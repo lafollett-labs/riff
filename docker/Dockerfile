@@ -24,6 +24,7 @@ RUN npx vite build --config desk/vite.config.ts
 FROM node:26-slim AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl ripgrep jq less procps tini chromium fonts-liberation \
+      ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 ENV CHROME_PATH=/usr/bin/chromium \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
@@ -91,6 +92,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # sandbox, and the page being rendered is one the company just wrote itself.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       chromium fonts-liberation \
+ && rm -rf /var/lib/apt/lists/*
+
+# ffmpeg, for getting a frame out of a video.
+#
+# Not codecs — Debian's chromium already decodes H.264 and AAC (it depends on
+# libopenh264, and canPlayType reports "probably" for avc1.42E01E in this
+# image). The staff concluded otherwise after a vendor's marketing video
+# screenshotted black, and the cause was the capture rather than the codec:
+# in headless, virtual time races the media pipeline and a software-decoded
+# frame often never composites into the screenshot.
+#
+# So the fix is the right tool rather than a missing library. `ffmpeg -ss <t>
+# -i <url> -frames:v 1 out.png` pulls any frame from any video, deterministically
+# and without a browser. It costs about 200 packages, which is the largest
+# thing in this image by some way; it is here because a vendor's own product
+# footage was the best evidence this company ever found, and a still from it
+# beat every written description of the same screen.
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 ENV CHROME_PATH=/usr/bin/chromium \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \

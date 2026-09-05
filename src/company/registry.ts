@@ -220,10 +220,18 @@ export class Registry {
    * Anything that moves a company's directory must do this first, because an
    * open SQLite handle and a renamed path disagree about where the file is.
    */
-  async close(slug: string): Promise<void> {
+  async close(slug: string, opts?: { drain?: boolean }): Promise<void> {
     const c = this.#open.get(slug);
     if (!c) return;
-    await c.scheduler.stop();
+    // Drains by default. A rename moves the directory, and it cannot be moved
+    // out from under an agent still writing to it — waiting out the shift is
+    // both the kind order and the only correct one.
+    //
+    // Archiving passes drain:false, and that is not an oversight. The operator
+    // has typed the company's name to confirm they are putting it away; making
+    // them then wait out a ten-minute shift for a company they are removing is
+    // the wrong trade. Pause it first if the shift matters.
+    await c.scheduler.stop({ drain: opts?.drain !== false });
     c.ledger.close();
     this.#open.delete(slug);
   }
@@ -253,8 +261,16 @@ export class Registry {
     // The scheduler reads its dials once, at construction, so a policy change
     // only means anything after the company is let go and built again. That
     // must not quietly pause a company that was working.
+    //
+    // Only rebuild when something structural moved. Editing the brief used to
+    // close and reopen the company like everything else, which aborted whoever
+    // was mid-shift: on 2026-09-05 three shifts died as `Claude Code process
+    // aborted by user` because the brief was edited twice while Lathe worked.
+    // A brief is read at wake, so the running shift would not have seen the new
+    // one either way — the restart cost work and bought nothing.
+    const structural = wanted !== slug || patch.policy !== undefined || patch.release !== undefined;
     const wasRunning = listCompanies().find((c) => c.slug === slug)?.wanted ?? false;
-    await this.close(slug);
+    if (structural) await this.close(slug);
 
     const from = companyHome(slug);
     const to = companyHome(wanted);
@@ -281,7 +297,15 @@ export class Registry {
     };
     // Where it lives is the directory's job to say, not the file's.
     writeFileSync(path, JSON.stringify(persisted(next), null, 2) + '\n', 'utf8');
-    if (wasRunning) await this.setRunning(wanted, true);
+    if (structural) {
+      if (wasRunning) await this.setRunning(wanted, true);
+    } else {
+      // The company stayed open, so its in-memory config is now the stale copy
+      // and /api/state would keep serving the old brief until something else
+      // reopened it.
+      const open = this.#open.get(slug);
+      if (open) this.#open.set(slug, { ...open, cfg: next });
+    }
     return { ok: true, slug: wanted };
   }
 
@@ -291,7 +315,7 @@ export class Registry {
    */
   async archive(slug: string): Promise<{ ok: true; at: string } | { ok: false; reason: string }> {
     if (!this.has(slug)) return { ok: false, reason: `no company '${slug}'` };
-    await this.close(slug);
+    await this.close(slug, { drain: false });
     const dir = archiveDir();
     mkdirSync(dir, { recursive: true });
     const stamp = this.#clock.iso().replace(/[:.]/g, '-');

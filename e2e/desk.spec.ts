@@ -1000,7 +1000,9 @@ test.describe('many companies, one console', () => {
       page.waitForRequest((r) => r.url().includes(`/running`) && r.method() === 'POST'),
       card.getByRole('button', { name: 'Pause' }).click(),
     ]);
-    expect(request.postDataJSON()).toMatchObject({ running: false, drain: true });
+    // Pause asks for nothing: draining is what stopping means now, and `hard`
+    // is the only way to get the shift-killing one.
+    expect(request.postDataJSON()).toEqual({ running: false });
     expect(request.url()).toContain(slug);
   });
 
@@ -1025,19 +1027,19 @@ test.describe('many companies, one console', () => {
 
     const card = page.locator('.card').first();
     await expect(card.locator('.state')).toHaveText('finishing 2');
-    await expect(card.getByRole('button', { name: 'Stop now' })).toBeVisible();
+    await expect(card.getByRole('button', { name: 'Shut down' })).toBeVisible();
     // Neither of the two states it is not.
     await expect(card.getByRole('button', { name: 'Pause' })).toHaveCount(0);
     await expect(card.getByRole('button', { name: 'Start' })).toHaveCount(0);
     // And a run that is ending cannot be handed a deadline.
     await expect(card.getByRole('button', { name: 'Run for…' })).toHaveCount(0);
 
-    // Stop now is the abort: it asks for no drain.
+    // Shut down is the kill, and it has to say so.
     const [request] = await Promise.all([
       page.waitForRequest((r) => r.url().includes('/running') && r.method() === 'POST'),
-      card.getByRole('button', { name: 'Stop now' }).click(),
+      card.getByRole('button', { name: 'Shut down' }).click(),
     ]);
-    expect(request.postDataJSON()).toEqual({ running: false });
+    expect(request.postDataJSON()).toEqual({ running: false, hard: true });
   });
 
   test('a file that is not a company is refused in words', async ({ page }) => {
@@ -1213,10 +1215,43 @@ test('a run can be given a deadline from the console', async ({ page }) => {
   // and stays there until they land — which is the point of it, and no good
   // to a fixture. Cut them short.
   await card.getByRole('button', { name: 'Pause' }).click();
-  const stopNow = card.getByRole('button', { name: 'Stop now' });
-  await expect(stopNow).toBeVisible();
-  await stopNow.click();
+  const shutDown = card.getByRole('button', { name: 'Shut down' });
+  await expect(shutDown).toBeVisible();
+  await shutDown.click();
   await expect(card.locator('.state')).toContainText('paused');
+});
+
+test('the power button on the front page kills, and asks before it does', async ({ page }) => {
+  // Pause drains everywhere now, which is right almost always and wrong for
+  // the one case it was invented for: a run going visibly wrong that the
+  // operator wants stopped without waiting out a ten-minute shift.
+  await page.route('**/api/state*', async (route) => {
+    const res = await route.fetch();
+    const body = await res.json();
+    await route.fulfill({ json: { ...body, running: true, draining: false, awake: [body.ceo.id] } });
+  });
+  await page.goto('/');
+  await useCompany(page, 'Testwright Co');
+  await go(page, 'Overview', 'Testwright Co');
+
+  const power = page.getByRole('button', { name: /^Shut down / });
+  await expect(power).toBeVisible();
+
+  // Arming is not firing. A misread icon must not destroy a shift.
+  let posts = 0;
+  page.on('request', (r) => { if (r.url().includes('/api/close')) posts += 1; });
+  await power.click();
+  await expect(page.getByText('mid-shift now')).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(page.getByText('mid-shift now')).toHaveCount(0);
+  expect(posts).toBe(0);
+
+  await power.click();
+  const [request] = await Promise.all([
+    page.waitForRequest((r) => r.url().includes('/api/close') && r.method() === 'POST'),
+    page.getByRole('button', { name: 'Shut down', exact: true }).click(),
+  ]);
+  expect(request.postDataJSON()).toEqual({ hard: true });
 });
 
 test('the release route is changeable after founding, not only at it', async ({ page }) => {

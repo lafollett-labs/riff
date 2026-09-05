@@ -361,17 +361,21 @@ export class Scheduler {
     while (this.#running) {
       this.#rolloverIfNewDay();
 
-      // Hard stops first, before anything else is considered.
+      // The bounds of an unattended run, checked before anything else. Both
+      // drain: a run left going overnight ends with nobody watching, and
+      // killing the shift that happens to be in flight when the clock runs out
+      // loses everything it did since its last journal entry — the one outcome
+      // an operator who set a deadline was trying to avoid.
       if (this.#opts.maxTicks != null && this.#ticks >= this.#opts.maxTicks) {
         this.#d.ledger.emit('company', 'scheduler.stopped', null,
           { why: 'tick ceiling reached', ticks: this.#ticks });
-        await this.stop();
+        await this.stop({ drain: true });
         break;
       }
       if (this.#opts.until != null && Date.now() >= this.#opts.until) {
         this.#d.ledger.emit('company', 'scheduler.stopped', null,
           { why: 'deadline reached', ticks: this.#ticks });
-        await this.stop();
+        await this.stop({ drain: true });
         break;
       }
 

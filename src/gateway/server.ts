@@ -310,12 +310,15 @@ const server = createServer(async (req, res) => {
         maxTicks: Number.isFinite(ticks) && ticks > 0 ? Math.round(ticks) : null,
       };
       const run = b['running'] === true;
-      // Pausing kills whoever is mid-shift; draining lets them finish first.
-      // Both are wanted: the operator waiting to rebuild wants the journal
-      // written, and the operator watching a run go wrong wants it to stop
-      // now. The default stays the immediate one, because that is what every
-      // existing caller of this endpoint already means by it.
-      const drain = !run && b['drain'] === true;
+      // A pause drains: nobody new is woken and whoever is mid-shift finishes
+      // writing. Killing them is `hard`, and it has to be asked for by name.
+      //
+      // The default used to be the other way round, and on 2026-09-05 three
+      // shifts died as `Claude Code process aborted by user` because an
+      // operator edited a brief while the company was working. A shift cut off
+      // that way still costs a full window and loses everything since its last
+      // journal entry, so the destructive one is the one that gets the flag.
+      const drain = !run && b['hard'] !== true;
       const ok = await registry.setRunning(target, run, bounds, { drain });
       return ok ? json(res, {
         slug: target, running: run,
@@ -705,9 +708,14 @@ const server = createServer(async (req, res) => {
         await registry.setRunning(co.slug, true);
         return json(res, { running: true });
       }
+      // Pause drains; Shutdown is `{"hard":true}`. Same pair as the per-company
+      // endpoint, because the footer button and the Companies row have to mean
+      // the same thing.
       if (p === '/api/close' && method === 'POST') {
-        await registry.setRunning(co.slug, false);
-        return json(res, { running: false });
+        const b = await readBody(req);
+        const drain = b['hard'] !== true;
+        await registry.setRunning(co.slug, false, undefined, { drain });
+        return json(res, { running: false, ...(drain ? { draining: true } : {}) });
       }
 
       // Wake one person, once. The first shift of a new company is the one

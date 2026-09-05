@@ -175,15 +175,15 @@ export const api = {
                          running?: boolean }) =>
     send<{ slug: string }>('/api/companies', 'POST', input),
   /**
-   * Start, pause or drain a company.
+   * Start, pause or shut down a company.
    *
-   * `drain` pauses without killing whoever is mid-shift: it answers at once
-   * and the company reports `draining` until the last journal is written.
-   * Plain pause aborts them, which is what the log's `Claude Code process
-   * aborted by user` entries are.
+   * A pause drains: it answers at once and the company reports `draining`
+   * until whoever is mid-shift has written their journal. `hard` kills them
+   * instead, which is what the log's `Claude Code process aborted by user`
+   * entries are, and it is never the default.
    */
   setCompanyRunning: (slug: string, running: boolean,
-                      bounds?: { hours?: number; maxTicks?: number; drain?: boolean }) =>
+                      bounds?: { hours?: number; maxTicks?: number; hard?: boolean }) =>
     send<{ running: boolean; draining?: boolean; until?: string; maxTicks?: number }>(
       `/api/companies/${encodeURIComponent(slug)}/running`, 'POST', { running, ...bounds }),
   renameAgent: (company: string, who: string, name: string) =>
@@ -224,7 +224,10 @@ export const api = {
   markRead: (ids?: string[], read = true) =>
     send<{ marked: number; read: boolean }>('/api/inbox/read', 'POST', { ...(ids ? { ids } : {}), read }),
   start: () => send<{ running: boolean }>('/api/open', 'POST'),
-  pause: () => send<{ running: boolean }>('/api/close', 'POST'),
+  /** Stop waking anybody; whoever is mid-shift finishes and writes. */
+  pause: () => send<{ running: boolean; draining?: boolean }>('/api/close', 'POST'),
+  /** Kill the shifts in flight. Everything since their last journal is lost. */
+  shutdown: () => send<{ running: boolean }>('/api/close', 'POST', { hard: true }),
   wake: (who?: string) => send<{ waking: string }>('/api/wake', 'POST', who ? { who } : {}),
   commons: () => get<{ held: number; ceiling: number; documents: CommonsDoc[] }>('/api/commons'),
   vitals: (window = '7.days') =>

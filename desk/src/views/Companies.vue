@@ -93,9 +93,9 @@ const startBounded = (c: CompanyRef) => run(async () => {
 });
 
 /** Start or pause without switching to it — several can run at once. */
-const setRunning = async (c: CompanyRef, running: boolean, drain = false) => {
+const setRunning = async (c: CompanyRef, running: boolean, hard = false) => {
   busy.value = true;
-  try { await api.setCompanyRunning(c.slug, running, drain ? { drain } : undefined); emit('changed'); }
+  try { await api.setCompanyRunning(c.slug, running, hard ? { hard } : undefined); emit('changed'); }
   catch (e) { err.value = e instanceof Error ? e.message : String(e); }
   finally { busy.value = false; }
 };
@@ -204,14 +204,14 @@ const receive = async (e: Event) => {
         <span class="meta faint mono">{{ c.ceo }} · {{ c.slug }}</span>
       </button>
       <div class="tools">
-        <button v-if="c.running" class="ghost" :disabled="busy" @click="setRunning(c, false, true)"
+        <button v-if="c.running" class="ghost" :disabled="busy" @click="setRunning(c, false)"
                 title="Stop waking anybody and let the shifts in flight finish writing. A shift can take several minutes.">
           Pause
         </button>
         <button v-else-if="c.draining" class="ghost danger" :disabled="busy"
-                @click="setRunning(c, false)"
+                @click="setRunning(c, false, true)"
                 title="Kill the shifts still finishing. Their work since the last journal is lost.">
-          Stop now
+          Shut down
         </button>
         <button v-else class="ghost" :disabled="busy" @click="setRunning(c, true)">Start</button>
         <button v-if="!c.running && !c.draining" class="ghost" :disabled="busy" @click="openBounded(c)"

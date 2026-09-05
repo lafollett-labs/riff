@@ -24,6 +24,26 @@ const business = computed(() => props.state.company.business.trim());
 const ceo = computed(() => props.state.ceo.name);
 
 const start = () => { draft.value = props.state.company.business; err.value = ''; editing.value = true; };
+
+/**
+ * The power button. Pause drains — nobody new is woken and whoever is working
+ * finishes writing — which is right almost always and is why it is the footer
+ * button. This is the other one: it kills the shifts in flight and loses
+ * everything they have done since their last journal entry, and it exists
+ * because an operator watching a run go wrong should not have to wait out a
+ * ten-minute shift to stop it.
+ *
+ * It asks first. A misread icon that silently destroys a shift is the failure
+ * this button would otherwise introduce.
+ */
+const killing = ref(false);
+const halting = ref(false);
+const live = computed(() => props.state.running || props.state.draining);
+const shutdown = async () => {
+  halting.value = true;
+  try { await api.shutdown(); killing.value = false; emit('changed'); }
+  finally { halting.value = false; }
+};
 const cancel = () => { editing.value = false; err.value = ''; };
 
 // Switching companies while the editor is open would silently retarget the
@@ -181,7 +201,31 @@ const working = computed(() => props.state.awake.length);
         {{ state.draining ? `finishing ${working}`
          : working ? `${working} working now` : (state.running ? 'idle' : 'paused') }}
       </p>
+      <button v-if="live" class="power" :disabled="halting" :aria-label="`Shut down ${state.company.name}`"
+              title="Shut down: kill the shifts in flight. Everything they have done since their last journal entry is lost. Pause drains instead."
+              @click="killing = true">
+        <svg viewBox="0 0 24 24" aria-hidden="true" width="18" height="18">
+          <path d="M12 3v9" /><path d="M18.4 6.6a9 9 0 1 1-12.8 0" />
+        </svg>
+        Shutdown
+      </button>
     </header>
+
+    <div v-if="killing" class="confirm">
+      <p>
+        <strong>Shut {{ state.company.name }} down?</strong>
+        <span v-if="working"> {{ working }} mid-shift now — everything since their
+        last journal entry is lost.</span>
+        <span v-else> Nobody is mid-shift, so this costs nothing that Pause would
+        have saved.</span>
+      </p>
+      <div class="row">
+        <button class="go danger" :disabled="halting" @click="shutdown">
+          {{ halting ? 'Shutting down…' : 'Shut down' }}
+        </button>
+        <button class="ghost" :disabled="halting" @click="killing = false">Cancel</button>
+      </div>
+    </div>
 
     <section class="brief">
       <div class="bar">
@@ -326,7 +370,26 @@ const working = computed(() => props.state.awake.length);
 h1 { font-size: 30px; }
 h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
 .line { font-size: 12px; margin-top: 6px; }
-.head { margin-bottom: 26px; }
+.head { margin-bottom: 26px; display: grid; grid-template-columns: 1fr auto;
+  align-items: center; column-gap: 16px; }
+.head h1 { grid-column: 1; grid-row: 1; }
+.head .line { grid-column: 1; grid-row: 2; }
+
+/* Quiet until you reach for it, then it reads as the destructive one. */
+.power { grid-column: 2; grid-row: 1 / span 2; display: inline-flex; align-items: center;
+  gap: 7px; font-size: 12px; letter-spacing: .04em; padding: 7px 13px; border-radius: 999px;
+  border: 1px solid var(--line); background: transparent; color: var(--muted); }
+.power svg { fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+.power:hover:not(:disabled) { color: var(--alert);
+  border-color: color-mix(in srgb, var(--alert) 55%, transparent); }
+.power:disabled { opacity: .55; }
+
+.confirm { border: 1px solid color-mix(in srgb, var(--alert) 45%, transparent);
+  border-radius: 8px; background: color-mix(in srgb, var(--alert) 8%, var(--panel));
+  padding: 14px 16px; margin-bottom: 22px; display: flex; flex-direction: column; gap: 12px; }
+.confirm p { font-size: 13px; max-width: 62ch; }
+.confirm .row { display: flex; gap: 8px; }
+.confirm .go.danger { background: #5a2a20; border-color: #7a3a2c; color: #f3ded8; }
 
 .brief { border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
   padding: 16px 18px 18px; margin-bottom: 22px; }

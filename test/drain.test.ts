@@ -46,10 +46,50 @@ describe('a drain waits for the shift; a pause kills it', () => {
       /void c\.scheduler\.stop\(\{ drain: true \}\)/);
   });
 
-  test('the immediate pause stays the default, so existing callers still mean it', () => {
+  test('a pause drains, and killing a shift has to be asked for by name', () => {
+    // The default used to be the other way round. On 2026-09-05 three Lathe
+    // shifts died as `Claude Code process aborted by user` because a brief was
+    // edited while the company worked — nobody had asked for that.
     const src = read('src/gateway/server.ts');
-    assert.match(src, /const drain = !run && b\['drain'\] === true;/,
-      'drain must be asked for, and only makes sense when stopping');
+    assert.match(src, /const drain = !run && b\['hard'\] !== true;/,
+      'stopping drains unless the caller says hard');
+  });
+
+  test('the footer Pause drains too, and Shutdown is the other one', () => {
+    const src = read('src/gateway/server.ts');
+    // /api/close is what the footer button reaches. It passed no options at
+    // all, so every press of it killed whoever was mid-shift.
+    assert.match(src, /const drain = b\['hard'\] !== true;\n\s*await registry\.setRunning\(co\.slug, false, undefined, \{ drain \}\);/);
+    assert.match(read('desk/src/api.ts'), /shutdown: \(\) => send<\{ running: boolean \}>\('\/api\/close', 'POST', \{ hard: true \}\)/);
+  });
+
+  test('a run that ends on its own deadline lets the last shift finish', () => {
+    // A bounded run ends with nobody watching, which is the worst moment to
+    // throw away whatever the shift in flight had done since its last journal.
+    const src = read('src/runtime/scheduler.ts');
+    const loop = src.slice(src.indexOf('async #loop()'));
+    assert.match(loop, /'tick ceiling reached'[\s\S]{0,120}?await this\.stop\(\{ drain: true \}\)/);
+    assert.match(loop, /'deadline reached'[\s\S]{0,120}?await this\.stop\(\{ drain: true \}\)/);
+  });
+
+  test('editing a brief does not restart the company underneath the shift', () => {
+    // The brief is read at wake, so a running shift would never have seen the
+    // new one — the close-and-reopen cost the work and bought nothing.
+    const src = read('src/company/registry.ts');
+    assert.match(src,
+      /const structural = wanted !== slug \|\| patch\.policy !== undefined \|\| patch\.release !== undefined;/);
+    assert.match(src, /if \(structural\) await this\.close\(slug\);/);
+    // And the company left open must not keep serving the brief it had before.
+    assert.match(src, /this\.#open\.set\(slug, \{ \.\.\.open, cfg: next \}\)/);
+  });
+
+  test('letting go of a company for a rename waits for the shift it would move', () => {
+    // A directory cannot be renamed out from under an agent still writing to
+    // it, so this is the one drain that is about correctness and not kindness.
+    const src = read('src/company/registry.ts');
+    assert.match(src, /await c\.scheduler\.stop\(\{ drain: opts\?\.drain !== false \}\);/);
+    // Archiving is the exception, and asks for the kill by name.
+    assert.match(src, /await this\.close\(slug, \{ drain: false \}\);\n\s*const dir = archiveDir\(\);/);
   });
 
   test('up.sh asks for the drain it says it wants', () => {
@@ -62,10 +102,18 @@ describe('a drain waits for the shift; a pause kills it', () => {
 
   test('the console offers both, and says which is which', () => {
     const vue = read('desk/src/views/Companies.vue');
-    assert.match(vue, /setRunning\(c, false, true\)/, 'Pause drains');
-    assert.match(vue, /Stop now/, 'and a kill is still reachable while it drains');
-    assert.match(vue, /setRunning\(c, false\)"/, 'which is the abort, not a second drain');
+    assert.match(vue, /@click="setRunning\(c, false\)"/, 'Pause drains');
+    assert.match(vue, /Shut down/, 'and a kill is still reachable while it drains');
+    assert.match(vue, /@click="setRunning\(c, false, true\)"/, 'which is the kill, not a second drain');
     assert.match(vue, /finishing \$\{c\.awake\.length\}/, 'the state says the shifts are landing');
+  });
+
+  test('the Overview power button kills, and asks before it does', () => {
+    const vue = read('desk/src/views/Overview.vue');
+    assert.match(vue, /class="power"/);
+    assert.match(vue, /@click="killing = true"/, 'the button arms, it does not fire');
+    assert.match(vue, /await api\.shutdown\(\)/, 'and only the confirmation fires it');
+    assert.match(vue, /v-if="live"/, 'nothing to shut down when nothing is running');
   });
 
   test('a company mid-drain cannot be handed a deadline for a run it is ending', () => {

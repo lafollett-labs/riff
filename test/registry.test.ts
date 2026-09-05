@@ -641,6 +641,43 @@ describe('what a script used to do, the API does', () => {
     } finally { kill(); }
   });
 
+  test('a world image is served, and nothing else is', async () => {
+    // The commons is prose with screenshots in it — a vendor's own product,
+    // a page somebody rendered — and a reader had to leave the console and go
+    // and find the PNG on disk, because /api/doc hands back JSON.
+    const { port, kill } = await serve();
+    try {
+      await fetch(`http://localhost:${port}/api/companies`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Gallery Co', ceo: 'Juno', chair: 'Cali', running: false }),
+      });
+      const world = join(home, '.riff/companies/gallery-co/world');
+      mkdirSync(join(world, 'shots'), { recursive: true });
+      // The eight bytes every PNG starts with, and enough of one to be a file.
+      writeFileSync(join(world, 'shots/grid.png'),
+        Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex'));
+      writeFileSync(join(world, 'shots/secret.env'), 'ANTHROPIC_API_KEY=sk-do-not-serve-this');
+
+      const at = (q: string) => fetch(`http://localhost:${port}/api/file?c=gallery-co&path=${q}`);
+
+      const img = await at('shots%2Fgrid.png');
+      assert.equal(img.status, 200);
+      assert.equal(img.headers.get('content-type'), 'image/png');
+      assert.equal(img.headers.get('x-content-type-options'), 'nosniff',
+        'an image must not be sniffed into being markup');
+      assert.equal(Buffer.from(await img.arrayBuffer()).subarray(1, 4).toString(), 'PNG');
+
+      // The world is full of things a model wrote. A console that serves any
+      // file in it on request is one bad path from serving a pasted credential.
+      assert.equal((await at('shots%2Fsecret.env')).status, 415, 'only images');
+      assert.equal((await at('..%2F..%2F..%2F..%2Fetc%2Fhosts')).status, 415,
+        'refused on the extension before the path is even resolved');
+      assert.equal((await at('..%2F..%2Fconfig.json.png')).status, 403,
+        'and a path leaving the world is refused even wearing an image name');
+      assert.equal((await at('shots%2Fabsent.png')).status, 403);
+    } finally { kill(); }
+  });
+
   test('the board can retire a seat without the CEO proposing it first', async () => {
     // retire_role is a TOOL, so removal ran CEO-proposes / board-ratifies —
     // which has no route at all when the CEO is the seat to remove. A company

@@ -13,7 +13,8 @@ const listWidth = ref(rememberedWidth('riff.commonsWidth', 268));
 const docs = ref<CommonsDoc[]>([]);
 const open = ref<CommonsDoc | null>(null);
 const body = ref('');
-const html = computed(() => render(body.value));
+// The document's own path, so a relative image resolves from where it was written.
+const html = computed(() => render(body.value, open.value?.path ?? ''));
 
 const load = async () => { docs.value = (await api.commons()).documents; };
 
@@ -140,6 +141,11 @@ const listed = computed(() => {
 </template>
 
 <style scoped>
+/* A screenshot is evidence, so it gets room — but never more than the
+   column it sits in, and it stays clickable to open full size. */
+.body :deep(img) { max-width: 100%; height: auto; display: block;
+  margin: 14px 0; border: 1px solid var(--line); border-radius: 4px;
+  background: var(--ground-2, #100c0a); }
 .wrap { display: grid; grid-template-columns: var(--list-w, 268px) 1fr;
   height: 100%; position: relative; }
 /* Below this the reader gets squeezed to a word per line, which is worse than

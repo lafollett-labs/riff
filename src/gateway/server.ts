@@ -122,6 +122,21 @@ const readBody = async (req: IncomingMessage): Promise<Record<string, unknown>> 
 };
 
 const DESK = resolve(import.meta.dirname, '../../desk/dist');
+
+/**
+ * What /api/file will serve. An allowlist rather than a lookup with a
+ * fallback: an unknown extension is a refusal, so a file the staff invented
+ * an extension for cannot be served as anything at all.
+ */
+const IMAGE_TYPES: Record<string, string> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.avif': 'image/avif',
+};
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json',
@@ -593,6 +608,45 @@ const server = createServer(async (req, res) => {
           });
         } catch {
           // world.path() throws on anything escaping the world root.
+          return json(res, { error: 'forbidden' }, 403);
+        }
+      }
+
+      /*
+       * A file out of the world, for the images a document points at.
+       *
+       * The commons is prose with screenshots in it — a vendor's own product,
+       * a page somebody rendered — and until now a reader had to leave the
+       * console and go and find the PNG on disk. `/api/doc` cannot serve it:
+       * that hands back JSON, and an image is bytes.
+       *
+       * Confinement is world.path(), the same textual-and-symlink check every
+       * other read goes through. On top of it, only image types are served.
+       * The world is a git repository full of things a model wrote, and a
+       * console that would hand back any file in it on request is one bad
+       * path away from serving a credential somebody pasted into a note.
+       */
+      if (p === '/api/file' && method === 'GET') {
+        const rel = url.searchParams.get('path') ?? '';
+        const type = IMAGE_TYPES[extname(rel).toLowerCase()];
+        if (!type) return json(res, { error: 'not an image' }, 415);
+        try {
+          const abs = world.path(rel);
+          if (!statSync(abs).isFile()) return json(res, { error: 'not found' }, 404);
+          res.writeHead(200, {
+            'content-type': type,
+            // Everything here is local and the console re-reads on navigation;
+            // caching stops a document with six screenshots refetching them
+            // every time somebody opens it.
+            'cache-control': 'no-cache',
+            // It is an image, and nothing else may talk it into being markup.
+            'x-content-type-options': 'nosniff',
+            'content-security-policy': "default-src 'none'; sandbox",
+          });
+          createReadStream(abs).pipe(res);
+          return;
+        } catch {
+          // Missing, or a path trying to leave the world.
           return json(res, { error: 'forbidden' }, 403);
         }
       }

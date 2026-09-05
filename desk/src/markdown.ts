@@ -1,4 +1,5 @@
 import MarkdownIt, { type RendererRule } from 'markdown-it';
+import { fileUrl } from './api.ts';
 
 /**
  * Rendering for prose written by agents.
@@ -67,4 +68,49 @@ const tableClose: RendererRule = (tokens, idx, options, env, self) =>
   '</div>';
 md.renderer.rules.table_close = tableClose;
 
-export const render = (src: string): string => md.render(src ?? '');
+/**
+ * Images resolve against the world, and only against the world.
+ *
+ * Agents write ![a screenshot](../staff/marlow/shots/grid.png) in a commons
+ * document, and until now that rendered as a broken image: the console is
+ * served from / and the PNG lives in the company's world, which has no URL.
+ * Every src is rewritten to /api/file, resolved relative to the document's own
+ * directory the way a reader would expect.
+ *
+ * A remote src is dropped rather than passed through. It would be a request to
+ * a third party the moment anybody opened the page — a tracking pixel at best,
+ * and at worst a way for something written in here to signal out of here.
+ */
+const worldPath = (base: string, src: string): string | null => {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(src) || src.startsWith('//')) return null;
+  // A leading slash means the world root, which is how the staff already refer
+  // to each other's files in prose. Anything else is relative to the document.
+  const from = src.startsWith('/') ? [] : (base ? base.split('/').slice(0, -1) : []);
+  const parts = from.concat(src.split('/'));
+  const out: string[] = [];
+  for (const part of parts) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') out.pop();
+    else out.push(part);
+  }
+  return out.length ? out.join('/') : null;
+};
+
+const openImage = md.renderer.rules.image;
+const image: RendererRule = (tokens, idx, options, env, self) => {
+  const t = tokens[idx]!;
+  const rel = worldPath(String((env as { base?: string } | undefined)?.base ?? ''),
+                        String(t.attrGet('src') ?? ''));
+  if (!rel) return '';
+  t.attrSet('src', fileUrl(rel));
+  t.attrSet('loading', 'lazy');
+  return openImage ? openImage(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
+};
+md.renderer.rules.image = image;
+
+/**
+ * `base` is the document's own path, so a relative image resolves the way its
+ * author meant it. Prose with no path of its own — a message, a persona —
+ * resolves against the world root.
+ */
+export const render = (src: string, base = ''): string => md.render(src ?? '', { base });

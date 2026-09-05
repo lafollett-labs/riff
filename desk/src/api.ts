@@ -134,6 +134,14 @@ const withCompany = (path: string): string => {
   return path + (path.includes('?') ? '&' : '?') + 'c=' + encodeURIComponent(current);
 };
 
+/**
+ * URL for a file inside the current company's world — images a document points
+ * at. Callers pass a world-relative path; the server refuses anything that
+ * escapes the world, and anything that is not an image.
+ */
+export const fileUrl = (worldPath: string): string =>
+  withCompany('/api/file?path=' + encodeURIComponent(worldPath));
+
 const get = async <T>(path: string): Promise<T> => {
   const r = await fetch(withCompany(path));
   if (!r.ok) throw new Error(`${path} → ${r.status}`);

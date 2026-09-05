@@ -743,7 +743,17 @@ server.listen(PORT, () => {
 
   // A scheduler lives in a process; the operator's intent does not. Anything
   // left running goes back to work rather than quietly stopping on a restart.
-  const resumed = new Set(registry.resume());
+  //
+  // Unless the container came up without a credentials record. Then every
+  // company it restored would wake, fail to authenticate and spend a shift
+  // saying so — the entrypoint sets RIFF_HOLD_PAUSED rather than let that
+  // happen, and the operator starts them once the record is delivered.
+  const held = process.env['RIFF_HOLD_PAUSED'] === '1';
+  const resumed = new Set(held ? [] : registry.resume());
+  if (held) {
+    console.log('\n  Held paused: no credentials record at start. '
+      + 'Deliver one with docker/up.sh creds, then start what you want.');
+  }
 
   const all = registry.list();
   console.log(`\n  Riff · ${all.length} compan${all.length === 1 ? 'y' : 'ies'}`);

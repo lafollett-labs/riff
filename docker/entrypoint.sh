@@ -62,18 +62,38 @@ rm -f /data/.write-test
 # Exiting on a deadline turned that into a crash loop that took the API down
 # with it, so `up.sh` could not even be asked to deliver a new one. Sitting
 # here logging is diagnosable; a restart loop is not.
+#
+# Bounded, and what it does at the deadline is NOT exit. `up.sh up --build` was
+# interrupted on 2026-09-05 after compose had already recreated the container
+# but before the record was pushed, and this loop then logged the same line
+# 2,695 times over eleven hours — the API never came up, so nothing could even
+# be asked for a new record. Giving up and starting is the way out that keeps
+# the door open; giving up and exiting is the restart loop this comment warns
+# about two paragraphs above.
 if [ "${RIFF_WAIT_FOR_CREDENTIALS:-}" = 1 ]; then
   creds="$HOME/.claude/.credentials.json"
+  deadline=${RIFF_CREDENTIALS_TIMEOUT:-300}
   waited=0
   while [ ! -s "$creds" ]; do
+    if [ "$waited" -ge "$deadline" ]; then
+      echo "riff: no credentials record after ${waited}s. Starting anyway, with"
+      echo "  every company held paused, so nothing wakes up unable to work."
+      echo "  Deliver the record and start them when you are ready:"
+      echo "    docker/up.sh creds"
+      # The server reads this and skips restoring whatever was left running.
+      # A company that wakes with no credentials burns a shift to log a failure.
+      RIFF_HOLD_PAUSED=1
+      export RIFF_HOLD_PAUSED
+      break
+    fi
     if [ "$waited" -gt 0 ] && [ $((waited % 15)) -eq 0 ]; then
-      echo "riff: still waiting for a credentials record at $creds (${waited}s)."
+      echo "riff: still waiting for a credentials record at $creds (${waited}s of ${deadline}s)."
       echo "  Deliver one with: docker/up.sh creds"
     fi
     sleep 1
     waited=$((waited + 1))
   done
-  echo "riff: credentials record present after ${waited}s"
+  [ -s "$creds" ] && echo "riff: credentials record present after ${waited}s"
 fi
 
 exec "$@"

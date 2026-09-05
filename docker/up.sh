@@ -212,7 +212,9 @@ else
 fi
 
 # Hand the record to a running factory. Idempotent, and safe to repeat.
+delivered=no
 deliver() {
+  [ "$delivered" = yes ] && return 0
   waited=0
   until printf '%s' "$record" \
       | run_compose exec -T factory sh -c \
@@ -226,7 +228,31 @@ deliver() {
     fi
     sleep 1
   done
+  delivered=yes
   echo "riff: credentials delivered to the factory (tmpfs only, never on disk)"
+}
+
+# Deliver on the way out, however we leave.
+#
+# `up --build` recreates the container and THEN pushes the record, and the build
+# is the slow half — minutes of apt and npm. Interrupt it in there, as happened
+# on 2026-09-05, and compose has already started a factory that is now blocked
+# waiting for a record this script was about to hand it and never will. It sat
+# there eleven hours.
+#
+# So the delivery is not the last statement of the happy path any more; it is
+# what this script does before it stops existing, whether it finished, failed or
+# was killed. Nothing to undo if the container was never started: `deliver`
+# fails its exec, gives up after 30 tries and says so.
+on_exit() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ -n "$record" ] && [ "$delivered" = no ] \
+     && run_compose ps --status running factory 2>/dev/null | grep -q factory; then
+    echo "riff: handing over the credentials record before exiting" >&2
+    deliver || true
+  fi
+  exit $status
 }
 
 run_compose() {
@@ -299,6 +325,8 @@ drain() {
 case $subcommand in
   up|restart|down|stop|create) drain ;;
 esac
+
+[ -n "$record" ] && trap on_exit EXIT HUP INT TERM
 
 run_compose "$@" || exit $?
 

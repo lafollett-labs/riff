@@ -559,3 +559,52 @@ describe('the session store is somewhere the factory can actually write', () => 
     assert.match(compose, /\/home\/labs:size=\d+m,uid=10001/);
   });
 });
+
+describe('a container that never got its credentials', () => {
+  /**
+   * `up.sh up --build` was interrupted on 2026-09-05 after compose had already
+   * recreated the factory but before the script pushed the credentials record
+   * in. The entrypoint then waited for that record for eleven hours, logging
+   * the same two lines 2,695 times, and because it never reached `exec` the
+   * API never came up — so `up.sh creds`, the documented fix, had nothing to
+   * talk to. Two independent faults, and either one alone is survivable.
+   */
+  const entrypoint = readFileSync(new URL('../docker/entrypoint.sh', import.meta.url), 'utf8');
+  const up = readFileSync(new URL('../docker/up.sh', import.meta.url), 'utf8');
+
+  test('the wait has a deadline, and starts the server rather than exiting at it', () => {
+    // Exiting is the crash loop the comment above the loop warns about: the
+    // container respawns, waits, exits, and takes the API with it every time.
+    assert.match(entrypoint, /deadline=\$\{RIFF_CREDENTIALS_TIMEOUT:-\d+\}/);
+    assert.match(entrypoint, /if \[ "\$waited" -ge "\$deadline" \]; then/);
+    const loop = entrypoint.slice(entrypoint.indexOf('deadline='));
+    assert.doesNotMatch(loop.slice(0, loop.indexOf('exec "$@"')), /\bexit 1\b/,
+      'giving up must start the server, never exit');
+  });
+
+  test('nothing wakes up unable to work', () => {
+    // A company restored without credentials spends a whole shift failing to
+    // authenticate and writing that down.
+    assert.match(entrypoint, /RIFF_HOLD_PAUSED=1/);
+    const server = readFileSync(new URL('../src/gateway/server.ts', import.meta.url), 'utf8');
+    assert.match(server, /const held = process\.env\['RIFF_HOLD_PAUSED'\] === '1';/);
+    assert.match(server, /const resumed = new Set\(held \? \[\] : registry\.resume\(\)\);/);
+  });
+
+  test('up.sh hands the record over however it leaves, not only when it finishes', () => {
+    // The build is the slow half — minutes — and the delivery used to be the
+    // statement after it. Interrupt the build and the record was never pushed.
+    assert.match(up, /trap on_exit EXIT HUP INT TERM/);
+    assert.match(up, /on_exit\(\) \{/);
+    // The trap is armed before compose runs, or it does not cover the build.
+    assert.ok(up.indexOf('trap on_exit') < up.indexOf('run_compose "$@"'),
+      'the trap must be armed before the build it exists to survive');
+  });
+
+  test('delivering twice is not delivering twice', () => {
+    // The happy path calls deliver() and so does the trap that follows it.
+    assert.match(up, /delivered=no/);
+    assert.match(up, /\[ "\$delivered" = yes \] && return 0/);
+    assert.match(up, /delivered=yes/);
+  });
+});

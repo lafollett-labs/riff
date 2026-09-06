@@ -601,6 +601,19 @@ describe('a container that never got its credentials', () => {
       'the trap must be armed before the build it exists to survive');
   });
 
+  test('up starts the stack detached, so the delivery after it is reachable', () => {
+    // Attached, `docker compose up` streams logs and never returns. The
+    // delivery is the next statement, so it never ran: on 2026-09-05 the stack
+    // came up on its 300s credentials deadline, held paused, and needed
+    // `up.sh creds` by hand. Watching the stack is `up.sh logs -f`.
+    assert.match(up, /if \[ "\$subcommand" = up \]; then/);
+    assert.match(up, /\[ "\$detached" = no \] && set -- "\$@" --detach/);
+    // And an operator who asked for attached gets it.
+    assert.match(up, /case \$a in -d\|--detach\) detached=yes ; break ;; esac/);
+    assert.ok(up.indexOf('detached=no') < up.indexOf('run_compose "$@"'),
+      'the flag must be added before compose runs');
+  });
+
   test('delivering twice is not delivering twice', () => {
     // The happy path calls deliver() and so does the trap that follows it.
     assert.match(up, /delivered=no/);

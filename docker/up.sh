@@ -326,6 +326,23 @@ case $subcommand in
   up|restart|down|stop|create) drain ;;
 esac
 
+# `up` starts the stack. Watching it is `up.sh logs -f`, which is why that is
+# a separate line in the usage above.
+#
+# Attached — which is what plain `docker compose up` is — the command streams
+# logs and never returns, so the delivery below is unreachable and the factory
+# waits for a record this script is still, technically, about to send. That is
+# what happened on 2026-09-05: the stack sat on its 300s credentials deadline,
+# started held-paused, and needed `up.sh creds` by hand to become useful. The
+# deadline is the backstop; this is the bug it was papering over.
+if [ "$subcommand" = up ]; then
+  detached=no
+  for a in "$@"; do
+    case $a in -d|--detach) detached=yes ; break ;; esac
+  done
+  [ "$detached" = no ] && set -- "$@" --detach
+fi
+
 [ -n "$record" ] && trap on_exit EXIT HUP INT TERM
 
 run_compose "$@" || exit $?

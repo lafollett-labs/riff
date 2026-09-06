@@ -1,6 +1,6 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Ledger } from '../src/ledger/ledger.ts';
@@ -255,5 +255,81 @@ describe('one answer from the gate proves the channel is alive', () => {
     assert.equal(w.turn(0, true), false);
     assert.equal(w.turn(0, true), false);
     assert.equal(w.turn(0, true), true);
+  });
+});
+
+describe('a link is not a way out of the world', () => {
+  /**
+   * `resolve` folds `..` away, so plain traversal was already caught. A
+   * symlink is not: planted inside world/ it resolves textually clean and
+   * lands wherever it points. `World.path` refused that; the gate did not.
+   *
+   * The consequence was worse than one read. Shell can already reach another
+   * company directly, so this was no escalation for a shell — but one `ln -s`
+   * made the hole permanent and invisible, and every later shift's Read, Grep
+   * and Glob followed the link while the ledger recorded an ordinary file of
+   * the actor's own.
+   */
+  test('a symlink out of the world is outside, however it is spelled', async () => {
+    const outside = join(dir, 'not-our-company');
+    mkdirSync(join(outside, 'commons'), { recursive: true });
+    writeFileSync(join(outside, 'commons', 'theirs.md'), 'another company\n');
+    mkdirSync(join(world.root, 'staff', 'rae'), { recursive: true });
+    symlinkSync(outside, join(world.root, 'staff', 'rae', 'peek'));
+
+    for (const tool of ['Read', 'Grep', 'Glob', 'Write', 'Edit']) {
+      const r = denied(await call(tool, {
+        file_path: 'staff/rae/peek/commons/theirs.md', content: 'x',
+      }), tool);
+      assert.match(r.message, /outside the company/, `${tool} followed the link`);
+    }
+  });
+
+  test('a link to the parent is only a way out if you leave through it', async () => {
+    mkdirSync(join(world.root, 'commons'), { recursive: true });
+    mkdirSync(join(dir, 'elsewhere'), { recursive: true });
+    writeFileSync(join(dir, 'elsewhere', 'theirs.md'), 'not ours\n');
+    mkdirSync(join(world.root, 'staff', 'rae'), { recursive: true });
+    symlinkSync(dir, join(world.root, 'staff', 'rae', 'up'));
+
+    // Out through the link and away: outside.
+    denied(await call('Read', { file_path: 'staff/rae/up/elsewhere/theirs.md' }), 'out via parent');
+    // Out through the link and straight back in: still ours, and refusing it
+    // would be the check turning into a wall.
+    allowed(await call('Read', { file_path: 'staff/rae/up/world/commons' }), 'back into our own world');
+  });
+
+  test('a file that does not exist yet is still placed by where it would land', async () => {
+    // realpath throws on a missing path, so the check walks up to the deepest
+    // ancestor that exists. Writing a NEW file through a link must still fail.
+    const outside = join(dir, 'not-our-company');
+    mkdirSync(outside, { recursive: true });
+    mkdirSync(join(world.root, 'staff', 'rae'), { recursive: true });
+    symlinkSync(outside, join(world.root, 'staff', 'rae', 'drop'));
+    denied(await call('Write', { file_path: 'staff/rae/drop/new-file.md', content: 'x' }),
+      'a new file through a link');
+  });
+
+  test('a link inside the world is classified by where it really points', async () => {
+    // Named as Rae's own, but it is Wren's. The colleague rule has to follow
+    // the link, or `staff/rae/mine` reads a colleague's file as your own.
+    mkdirSync(join(world.root, 'staff', 'wren'), { recursive: true });
+    writeFileSync(join(world.root, 'staff', 'wren', 'notes.md'), 'wren\n');
+    mkdirSync(join(world.root, 'staff', 'rae'), { recursive: true });
+    symlinkSync(join(world.root, 'staff', 'wren'), join(world.root, 'staff', 'rae', 'mine'));
+
+    // Reading a colleague is allowed, so this one lands in the gate rather
+    // than the classifier — what matters is that it is not treated as `own`.
+    const r = await call('Write', { file_path: 'staff/rae/mine/notes.md', content: 'x' });
+    const d = denied(r, 'writing a colleague through a link');
+    assert.doesNotMatch(d.message, /outside the company/,
+      'it is inside the world, just not hers');
+  });
+
+  test('an ordinary path still works, so the check is not a wall', async () => {
+    mkdirSync(join(world.root, 'staff', 'rae'), { recursive: true });
+    writeFileSync(join(world.root, 'staff', 'rae', 'mine.md'), 'mine\n');
+    allowed(await call('Read', { file_path: 'staff/rae/mine.md' }), 'own file');
+    allowed(await call('Write', { file_path: 'staff/rae/new.md', content: 'x' }), 'new own file');
   });
 });

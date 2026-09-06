@@ -1,5 +1,5 @@
-import { resolve, sep } from 'node:path';
-import { existsSync } from 'node:fs';
+import { dirname, resolve, sep } from 'node:path';
+import { existsSync, realpathSync } from 'node:fs';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentId, Capability } from '../core/types.ts';
 import type { Gate } from '../policy/gate.ts';
@@ -59,13 +59,50 @@ const pathFrom = (input: Record<string, unknown>): string | null => {
   return null;
 };
 
-/** Where does this path sit relative to the staff member reaching for it? */
+/**
+ * Where does this path sit relative to the staff member reaching for it?
+ *
+ * Two checks, and the second is the one that was missing. `resolve` folds
+ * `..` away, so `../../other/world` is caught textually. A SYMLINK is not:
+ * planted inside world/ it resolves textually clean and lands wherever it
+ * points. `World.path` has refused that since it was written; this did not,
+ * so one `ln -s` from a shell turned the known shell hole into a permanent
+ * one — Read, Grep and Glob followed the link into another company on every
+ * later shift, and the gate logged it as the actor's own file.
+ *
+ * The real path is also what gets classified, not the written one. A link
+ * named `staff/ada/peek` that points at Bob's directory is Bob's, whatever it
+ * is called from where you are standing.
+ */
 export const classifyPath = (world: World, actor: AgentId, raw: string): Where => {
   const abs = resolve(world.root, raw);
   const root = resolve(world.root);
   if (abs !== root && !abs.startsWith(root + sep)) return { kind: 'outside' };
 
-  const rel = abs.slice(root.length + 1);
+  // Walk up to the deepest ancestor that EXISTS — the target may be a file
+  // about to be created, and realpath throws on a missing path — but never
+  // above the world root. Walking past it resolves the installation instead
+  // of the company, and a world whose directory has not been made yet then
+  // classifies every path in it as outside, which failed every existing test
+  // in this file the first time this check was written.
+  let base = root;
+  let resolved = abs;
+  if (existsSync(root)) {
+    let probe = abs;
+    while (probe !== root && !existsSync(probe)) probe = dirname(probe);
+    try {
+      const real = realpathSync(probe);
+      base = realpathSync(root);
+      if (real !== base && !real.startsWith(base + sep)) return { kind: 'outside' };
+      resolved = real + abs.slice(probe.length);
+    } catch {
+      // A path we cannot resolve is a path we cannot vouch for.
+      return { kind: 'outside' };
+    }
+  }
+
+  if (resolved === base) return { kind: 'commons' };
+  const rel = resolved.slice(base.length + 1);
   const parts = rel.split(sep);
   if (parts[0] === 'commons') return { kind: 'commons' };
   if (parts[0] === 'staff' && parts[1]) {

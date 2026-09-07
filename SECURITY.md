@@ -34,6 +34,59 @@ control.
 
 ## What contains what
 
+### One company cannot read another
+
+The gate confines every file tool to the company's own world, and always has.
+It cannot confine a shell: the shell branch of `makeCanUseTool` passes no path,
+because a command string is not a path. `node -e`, `make`, and a script the
+agent wrote last turn are all opaque to inspection. On 2026-09-05 Lathe read
+`lafollett-labs`' world six times, and every one was logged as an ordinary
+`gate.allow`.
+
+Claude Code's own Bash sandbox closes it. Every shift in a container runs its
+shell under bubblewrap, scoped to that company's directory; the restriction is
+inherited by every descendant of the shell and cannot be loosened from inside.
+Measured from a real shift after the change:
+
+```
+ls /data/companies                       -> lathe
+cat /data/companies/fathom/config.json   -> No such file or directory
+node -e readdirSync('/data/companies')   -> [ 'lathe' ]
+```
+
+Other companies are not permission-denied, they are absent. The third line is
+the case no command inspection could catch: there is no path in the text.
+
+`failIfUnavailable: true` and `allowUnsandboxedCommands: false` — a shift that
+cannot be isolated fails loudly rather than quietly doing the thing the sandbox
+exists to prevent.
+
+**What this costs, and it is not free.** bubblewrap is built on unprivileged
+user namespaces, and Docker's default seccomp profile refuses those to every
+container: `unshare` is allowlisted only alongside `CAP_SYS_ADMIN`, so it falls
+through to `SCMP_ACT_ERRNO`. Measured four ways — a plain `docker run` with no
+hardening, `--cap-drop ALL`, the full factory profile, and `seccomp=unconfined`
+— and only the last permits it. `docker/seccomp-userns.json` is Docker's own
+profile with one group added; the posture is unchanged otherwise and the
+default action is still `SCMP_ACT_ERRNO`.
+
+Unprivileged user namespaces are the richest container-escape CVE class of the
+last decade, so this is a real widening of the outer wall to buy an inner one
+that nothing else provides. **On macOS a LinuxKit VM sits under the container,
+so an escape lands in a VM rather than on the host. On a Linux host it does
+not.** An operator running Riff directly on Linux is accepting more than one
+running it on a Mac.
+
+### A write outside the company succeeds and is then discarded
+
+Inside the sandbox, a write to a path outside the company reports success and
+does not persist: bubblewrap gives the command an ephemeral layer that is
+thrown away when it exits. Contained, but silent — a program can believe it
+wrote a file and be wrong. Found by Marlow on the first shift under the
+sandbox, and recorded here rather than fixed, because the alternative is
+lying to the kernel about what happened.
+
+
 ### The shell is decided by where the runtime is, not by who is asking
 
 `Bash` is refused outright on an operator's own machine, and no argument from

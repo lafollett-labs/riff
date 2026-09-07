@@ -72,7 +72,21 @@ services:
     restart: unless-stopped
     # An agent shell should not be able to fork-bomb the host or read the
     # kernel keyring on the way to a privilege escalation.
-    security_opt: ['no-new-privileges:true']
+    # The default seccomp profile, plus one group: unshare/clone with the
+    # namespace flags, which Docker allowlists only alongside CAP_SYS_ADMIN.
+    # Claude Code's Bash sandbox is bubblewrap on Linux, and bubblewrap is
+    # built on unprivileged user namespaces, so without this the sandbox
+    # cannot start in ANY container — measured on a plain `docker run` with no
+    # hardening at all, not only on this hardened one.
+    #
+    # It is a real widening: unprivileged user namespaces are the richest
+    # container-escape CVE class of the last decade. What it buys is the
+    # boundary between one company and another, which nothing else in this
+    # file provides. On macOS a LinuxKit VM sits under all of this; on a Linux
+    # host it does not, and SECURITY.md says so.
+    security_opt:
+      - 'no-new-privileges:true'
+      - seccomp=./seccomp-userns.json
     cap_drop: [ALL]
     pids_limit: 512
     mem_limit: 4g

@@ -1,4 +1,5 @@
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { homedir } from 'node:os';
 import { query, type CanUseTool, type SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
 import type { Ledger } from '../ledger/ledger.ts';
@@ -11,6 +12,9 @@ import { DEFAULT_POLICY } from '../core/config.ts';
 import { worstWindow, isWeekly, windowsFromUsage, limitsReadable, mergeWindow,
          isKnownLimit } from './limits.ts';
 import { RULES_TEXT } from '../policy/rules.ts';
+
+/** A path in the agent runtime's own home — caches a build needs to write. */
+const home = (rel: string): string => join(homedir(), rel);
 
 export type TickDeps = {
   agent: Agent;
@@ -891,6 +895,53 @@ export const tick = async (
         // so no turn is spent reaching for something that cannot be granted.
         // Inside the container the shell is the point, so it is offered.
         ...(shellIsContained() ? {} : { disallowedTools: ['Bash', 'BashOutput', 'KillShell'] }),
+
+        // The kernel boundary between one company and the next.
+        //
+        // canUseTool confines every FILE tool to this world, and always has.
+        // It cannot confine a shell: `ask('shell', cmd, null)` passes no path,
+        // because a command string is not a path — `node -e`, `make`, a script
+        // the agent wrote last turn are all opaque to inspection. So until now
+        // `cat /data/companies/<other>/ledger.db` was allowed, and on
+        // 2026-09-05 Lathe read another company's world six times.
+        //
+        // Claude Code's own Bash sandbox closes it: bubblewrap on Linux, and
+        // the restriction is inherited by every descendant of the shell and
+        // cannot be loosened from inside. Only when contained — off the
+        // container there is no Bash at all, so there is nothing to sandbox
+        // and failIfUnavailable would refuse a shift over an absent boundary
+        // that nothing needs.
+        //
+        // enableWeakerNestedSandbox: inside an unprivileged container bwrap
+        // cannot mount a fresh /proc, so it binds the container's. That hides
+        // less process information and is the documented container setting;
+        // the outer container is still the host boundary.
+        ...(shellIsContained() ? { sandbox: {
+          enabled: true,
+          enableWeakerNestedSandbox: true,
+          // Never degrade to running unsandboxed. A shift that cannot be
+          // isolated must fail loudly, not quietly do the thing this exists
+          // to prevent.
+          failIfUnavailable: true,
+          allowUnsandboxedCommands: false,
+          filesystem: {
+            // Deny where every company lives, then re-allow this one. The
+            // more specific path wins, so the company keeps its own directory
+            // — ledger, world and scratch — and loses its neighbours'.
+            denyRead: [dirname(dirname(world.root))],
+            allowRead: [dirname(world.root)],
+            // The company's own directory, plus the caches a build writes to.
+            // Everything outside the allow list is read-only INSIDE the
+            // sandbox, so with the home directory left out `npm install` and
+            // anything else that keeps a cache fails with EROFS. Marlow hit
+            // exactly this on the first shift under the sandbox: `undo.mjs`
+            // could not create ~/.undo and died with a raw mkdirSync stack.
+            // A boundary that stops the company building is the wrong
+            // boundary — the point is to separate companies, not to disarm
+            // them.
+            allowWrite: [dirname(world.root), home('.npm'), home('.cache'), home('.undo')],
+          },
+        } } : {}),
         // DO NOT CHANGE THIS. 'default' is the only mode that consults
         // canUseTool, and canUseTool is the gate — the single chokepoint every
         // tool call crosses. Measured, twice each, with a handler that denies

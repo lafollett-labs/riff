@@ -621,3 +621,74 @@ describe('a container that never got its credentials', () => {
     assert.match(up, /delivered=yes/);
   });
 });
+
+describe('one company cannot read another', () => {
+  /**
+   * The gate confines every FILE tool to the world and always has. It cannot
+   * confine a shell: `ask('shell', cmd, null)` passes no path, because a
+   * command string is not a path. On 2026-09-05 Lathe read another company's
+   * world six times — `du`, `find`, and twice a snapshot of it into its own
+   * tree — and every one was recorded as an ordinary `gate.allow`.
+   *
+   * Measured in the rebuilt container, from inside a real shift:
+   *   ls /data/companies                          -> lathe
+   *   cat /data/companies/fathom/config.json      -> No such file or directory
+   *   node -e readdirSync('/data/companies')      -> [ 'lathe' ]
+   *
+   * The third is the one no command inspection could ever catch: there is no
+   * path in the command text to inspect.
+   */
+  const staff = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
+  const compose = readFileSync(new URL('../docker/compose.yaml', import.meta.url), 'utf8');
+  const dockerfile = readFileSync(new URL('../docker/Dockerfile', import.meta.url), 'utf8');
+
+  test('every shift in a container runs its shell in a sandbox', () => {
+    assert.match(staff, /shellIsContained\(\) \? \{ sandbox: \{/,
+      'the sandbox is tied to the same signal that opens the shell');
+    assert.match(staff, /enabled: true/);
+  });
+
+  test('a sandbox that cannot start fails the shift instead of running anyway', () => {
+    // The documented default is a warning and unsandboxed commands, which is
+    // the one outcome this must never produce.
+    assert.match(staff, /failIfUnavailable: true/);
+    assert.match(staff, /allowUnsandboxedCommands: false/);
+  });
+
+  test('the fence is around the other companies, not around the company', () => {
+    assert.match(staff, /denyRead: \[dirname\(dirname\(world\.root\)\)\]/,
+      'deny where every company lives');
+    assert.match(staff, /allowRead: \[dirname\(world\.root\)\]/,
+      'then re-allow this one; the more specific path wins');
+  });
+
+  test('a sandboxed company can still build', () => {
+    // Everything outside allowWrite is read-only inside the sandbox, so a
+    // missing home directory turns `npm install` into EROFS. Marlow hit this
+    // on the first shift under the sandbox.
+    assert.match(staff, /allowWrite: \[dirname\(world\.root\), home\('\.npm'\), home\('\.cache'\)/);
+  });
+
+  test('the container ships what the Linux sandbox needs', () => {
+    // bwrap enforces the filesystem boundary, socat relays the network.
+    // Without them the CLI reports the sandbox unavailable.
+    const installs = dockerfile.match(/bubblewrap socat/g) ?? [];
+    assert.equal(installs.length, 2, 'both the dev and runtime stages need them');
+  });
+
+  test('and the seccomp profile that lets bubblewrap start at all', () => {
+    // Docker allowlists `unshare` only alongside CAP_SYS_ADMIN, so it falls
+    // through to the profile's SCMP_ACT_ERRNO. Measured four ways: a plain
+    // container, cap_drop ALL, the full factory profile, and
+    // seccomp=unconfined — only the last permits it. So this is not our
+    // hardening being unusual; it is every container.
+    assert.match(compose, /seccomp=\.\/seccomp-userns\.json/);
+    const profile = JSON.parse(
+      readFileSync(new URL('../docker/seccomp-userns.json', import.meta.url), 'utf8'));
+    assert.equal(profile.defaultAction, 'SCMP_ACT_ERRNO',
+      'still an allowlist; one group was added, the posture did not change');
+    const added = profile.syscalls.filter((s) => (s.names ?? []).includes('unshare'));
+    assert.ok(added.some((s) => s.action === 'SCMP_ACT_ALLOW' && !s.includes?.caps),
+      'unshare must be allowed without CAP_SYS_ADMIN or bwrap cannot start');
+  });
+});

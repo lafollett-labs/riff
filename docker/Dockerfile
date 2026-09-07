@@ -24,6 +24,7 @@ RUN npx vite build --config desk/vite.config.ts
 FROM node:26-slim AS dev
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl ripgrep jq less procps tini chromium fonts-liberation \
+      bubblewrap socat \
       ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 ENV CHROME_PATH=/usr/bin/chromium \
@@ -60,7 +61,20 @@ FROM node:26-slim
 # so add them explicitly if this line ever changes.
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git ca-certificates curl ripgrep jq less procps tini \
+      bubblewrap socat \
  && rm -rf /var/lib/apt/lists/*
+
+# bubblewrap and socat are Claude Code's own Bash sandbox on Linux: bwrap
+# enforces the filesystem boundary, socat relays network through its proxy.
+# Without them the CLI reports the sandbox unavailable and — unless
+# failIfUnavailable is set — runs commands unsandboxed.
+#
+# They need a user namespace, which Docker's DEFAULT seccomp profile refuses
+# for every container: `unshare` is allowlisted only alongside CAP_SYS_ADMIN,
+# so it falls through to the profile's SCMP_ACT_ERRNO. Measured four ways —
+# plain container, cap_drop ALL, our full profile, and seccomp=unconfined —
+# and only the last one permits it. docker/seccomp-userns.json is Docker's
+# profile with that one group added; compose.yaml names it.
 
 # A headless browser, and the fonts it needs to draw text at all.
 #

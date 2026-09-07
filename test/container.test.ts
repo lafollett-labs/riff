@@ -687,8 +687,41 @@ describe('one company cannot read another', () => {
       readFileSync(new URL('../docker/seccomp-userns.json', import.meta.url), 'utf8'));
     assert.equal(profile.defaultAction, 'SCMP_ACT_ERRNO',
       'still an allowlist; one group was added, the posture did not change');
-    const added = profile.syscalls.filter((s) => (s.names ?? []).includes('unshare'));
-    assert.ok(added.some((s) => s.action === 'SCMP_ACT_ALLOW' && !s.includes?.caps),
+    type Group = { names?: string[]; action?: string; includes?: { caps?: string[] } };
+    const groups = profile.syscalls as Group[];
+    const added = groups.filter((g) => (g.names ?? []).includes('unshare'));
+    assert.ok(added.some((g) => g.action === 'SCMP_ACT_ALLOW' && !g.includes?.caps),
       'unshare must be allowed without CAP_SYS_ADMIN or bwrap cannot start');
+  });
+});
+
+describe('a discarded write is a reporting bug, not a leak', () => {
+  /**
+   * Marlow, first shift under the sandbox: `touch /data/companies/probe.txt`
+   * returns 0 and the file never exists. Denying read means the path cannot be
+   * a bind of the real directory, so bubblewrap covers it with a scratch layer
+   * that is writable and thrown away when the command exits.
+   *
+   * Adding `denyWrite` on the same path does not change it — measured. And the
+   * alternative, binding the other companies read-only so writes fail loudly,
+   * puts every company's name back in view and needs the deny list rebuilt
+   * whenever one is founded. Invisibility is worth more than a loud failure on
+   * a write that was already forbidden.
+   */
+  const staff = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
+
+  test('a contained session is told that exit 0 there means nothing', () => {
+    assert.match(staff, /REPORTS SUCCESS AND IS DISCARDED/,
+      'the one case where a zero exit code lies has to be stated');
+    assert.match(staff, /Where your shell can write/);
+  });
+
+  test('and is pointed at the temp directory that actually works', () => {
+    // /tmp is read-only under the sandbox and refuses loudly; $TMPDIR does not.
+    assert.match(staff, /\$TMPDIR\. Use it rather than \/tmp/);
+  });
+
+  test('the warning is only given where there is a shell to warn about', () => {
+    assert.match(staff, /\.\.\.\(shellIsContained\(\) \? \[/);
   });
 });

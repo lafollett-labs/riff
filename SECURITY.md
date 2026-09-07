@@ -77,14 +77,40 @@ so an escape lands in a VM rather than on the host. On a Linux host it does
 not.** An operator running Riff directly on Linux is accepting more than one
 running it on a Mac.
 
-### A write outside the company succeeds and is then discarded
+### A write into the hidden region succeeds and is then discarded
 
-Inside the sandbox, a write to a path outside the company reports success and
-does not persist: bubblewrap gives the command an ephemeral layer that is
-thrown away when it exits. Contained, but silent — a program can believe it
-wrote a file and be wrong. Found by Marlow on the first shift under the
-sandbox, and recorded here rather than fixed, because the alternative is
-lying to the kernel about what happened.
+A write to another company's directory reports **exit 0** and does not persist.
+Nothing escapes — verified from inside the container and again on the host:
+
+```
+touch /data/companies/probe.txt   -> exit 0
+stat  /data/companies/probe.txt   -> No such file or directory
+~/.riff/companies/                -> fathom  lafollett-labs  lathe  prism
+```
+
+The cause is how the region is hidden. Denying *read* means the path cannot be
+a bind of the real directory, so bubblewrap covers it with a scratch layer that
+is writable and thrown away when the command exits. Denying *write* as well
+does not change it — measured, with `denyWrite` on the same path, and the write
+still returned 0.
+
+So it is a reporting bug, not a leak, and it is confined to the hidden region.
+Everywhere else the sandbox refuses loudly: `/tmp` answers `Read-only file
+system` and a non-zero exit. `$TMPDIR` (`/tmp/claude-<uid>`) is writable and is
+what tools should use.
+
+**Why it is not fixed in the sandbox.** The two properties trade against each
+other. Hiding the other companies gives silent discards; binding them read-only
+instead makes writes fail loudly but puts every company's name back in view,
+and the deny list would have to be rebuilt whenever a company is founded — a
+gap that lasts until the next shift. Robust invisibility is worth more than
+loud failure on a write that was already forbidden.
+
+What is done instead: every contained session is told, in its system prompt,
+that exit 0 there means nothing and that anything which must persist belongs
+under its own directory. That is a correctness warning to the author of a
+program, not a security control — the security control is the kernel, and it
+holds.
 
 
 ### The shell is decided by where the runtime is, not by who is asking

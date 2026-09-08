@@ -99,11 +99,15 @@ services:
     # It did — 33 resume attempts, 33 resets, 0 successes — while the feature
     # looked present and the container looked healthy.
     #
-    # Writable is not enough, because a tmpfs is also emptied by every restart
-    # while the session ids in the ledger survive on the volume. The entrypoint
-    # links /home/labs/.claude/projects out to /data/sessions for that reason.
-    # The credentials record stays here on purpose — it is pushed into memory
-    # after start and must never land on the operator's disk.
+    # The transcripts stay here, and are therefore emptied by every restart
+    # while the session ids in the ledger survive on the volume. Both ways of
+    # moving them were measured on 2026-09-08 and both cost more than they
+    # bought: CLAUDE_CONFIG_DIR moves the credentials lookup with them, which
+    # would put the subscription token on the operator's disk (`Not logged in
+    # · Please run /login`), and a symlink out of $HOME stops bubblewrap dead
+    # — `Can't mount on symlink destination` — which took the shell away from
+    # a whole shift. tick() checks the store before resuming instead, so a
+    # transcript that is gone costs a cold start and nothing else.
     tmpfs:
       - /tmp:size=512m,uid=10001,gid=10001,mode=1777
       - /home/labs:size=256m,uid=10001,gid=10001,mode=0700

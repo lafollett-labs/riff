@@ -559,32 +559,19 @@ describe('the session store is somewhere the factory can actually write', () => 
     assert.match(compose, /\/home\/labs:size=\d+m,uid=10001/);
   });
 
-  test('and the transcripts are not left on it, because a tmpfs is emptied', () => {
-    // Writable was not enough. The session id goes to the ledger, which is on
-    // the volume; the transcript went to a tmpfs, which every restart wipes.
-    // So after every rebuild each agent held an id for a conversation that no
-    // longer existed. On 2026-09-07 that took the first shift of two of the
-    // three staff who woke.
-    assert.match(entrypoint, /sessions=\/data\/sessions/);
-    assert.match(entrypoint, /ln -s "\$sessions" "\$HOME\/\.claude\/projects"/);
-  });
-
-  test('the credentials are NOT moved with them', () => {
-    // The record is pushed into memory after start precisely so it never
-    // reaches the operator's disk, and /data is the operator's disk.
-    const block = entrypoint.slice(entrypoint.indexOf('sessions=/data/sessions'),
-                                   entrypoint.indexOf('# Wait for the credentials record'));
-    assert.doesNotMatch(block, /credentials/i,
-      'nothing under .claude but projects/ may be linked onto the volume');
-    assert.match(entrypoint, /creds="\$HOME\/\.claude\/\.credentials\.json"/);
-  });
-
-  test('a store that already has transcripts in it is carried across, not dropped', () => {
-    // The link is made on a container that has already run at least once in
-    // its life — throwing the transcripts away to install the fix would cost
-    // exactly the shifts the fix exists to save.
-    assert.match(entrypoint, /if \[ -d "\$HOME\/\.claude\/projects" \]; then/);
-    assert.match(entrypoint, /tar cf - \.\) \| \(cd "\$sessions" && tar xf -\)/);
+  test('moving the transcripts off it costs more than it buys', () => {
+    // Both ways were measured on 2026-09-08. CLAUDE_CONFIG_DIR moves the
+    // credentials lookup with the transcripts, so the subscription token would
+    // have to live on the operator's disk — pointed elsewhere, the CLI answers
+    // `Not logged in`. A symlink out of $HOME stops bubblewrap dead with
+    // `Can't mount on symlink destination`, which took the shell away from
+    // every Bash call of a whole shift before anyone noticed.
+    assert.doesNotMatch(entrypoint, /ln -s .*\.claude\/projects/,
+      'bwrap cannot mount on a symlink, and the shell is the point of the box');
+    assert.doesNotMatch(entrypoint, /CLAUDE_CONFIG_DIR/,
+      'the config dir holds the credentials; it does not go on the volume');
+    assert.match(compose, /Can't mount on symlink destination/,
+      'the next person to try this should find out here, not from a dead shift');
   });
 
   test('a shift does not have to fail to find out the conversation is gone', () => {

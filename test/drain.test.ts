@@ -92,6 +92,23 @@ describe('a drain waits for the shift; a pause kills it', () => {
     assert.match(src, /await this\.close\(slug, \{ drain: false \}\);\n\s*const dir = archiveDir\(\);/);
   });
 
+  test('the rebuild wait is long enough for a shift, and honest when it is not', () => {
+    // It was 300s. On 2026-09-08 a rebuild hit that cap eight minutes into two
+    // shifts, printed "shifts drained", recreated the container and killed
+    // both — `Claude Code process aborted by user`, which is the exact line
+    // this guard exists to prevent. p99 across 499 recorded shifts is 16.1
+    // minutes and the longest that ever finished is 27.7, so 300s was short
+    // of a normal shift rather than of an unusual one.
+    const sh = read('docker/up.sh');
+    assert.match(sh, /while \[ "\$waited" -lt 1800 \]; do/);
+    // And a wait that ran out must not report the drain it did not get.
+    assert.match(sh, /if \[ -n "\$\{awake:-\}" \]; then/);
+    assert.match(sh, /STILL WORKING after \$\{waited\}s/);
+    const tail = sh.slice(sh.indexOf('while [ "$waited" -lt 1800 ]'));
+    assert.match(tail, /else\n\s*echo "riff: shifts drained;/,
+      'the all-clear is the else branch, not printed either way');
+  });
+
   test('up.sh asks for the drain it says it wants', () => {
     const sh = read('docker/up.sh');
     assert.match(sh, /"running":false,"drain":true/,

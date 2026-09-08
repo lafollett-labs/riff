@@ -310,16 +310,37 @@ drain() {
       -H 'content-type: application/json' -d '{"running":false,"drain":true}' >/dev/null 2>&1 || true
   done
 
+  # Long enough for a real shift, because a wait that gives up early is worse
+  # than no wait at all: it recreates the container under a live shift and
+  # prints that everything drained.
+  #
+  # It was 300s. On 2026-09-08 a rebuild reached that cap eight minutes into
+  # two shifts, announced "shifts drained", and killed both — `Claude Code
+  # process aborted by user`, the exact line this guard exists to prevent.
+  # Across the 499 shifts this installation has recorded, p99 is 16.1 minutes
+  # and the longest that ever finished is 27.7, so 300s was short of a normal
+  # shift, not of an unusual one. 30 minutes covers every one of them, and
+  # CompanyPolicy.shiftTimeoutMinutes guarantees the wait ends either way.
   waited=0
-  while [ "$waited" -lt 300 ]; do
+  while [ "$waited" -lt 1800 ]; do
     awake=$(curl -sf -m 5 "$base/companies" 2>/dev/null | grep -o '"awake":\[[^]]*\]' \
       | grep -v '"awake":\[\]' | head -1) || break
     [ -z "$awake" ] && break
-    [ $((waited % 15)) -eq 0 ] && echo "riff: waiting for shifts to finish (${waited}s)"
+    [ $((waited % 15)) -eq 0 ] && echo "riff: waiting for shifts to finish (${waited}s of 1800s)"
     sleep 3
     waited=$((waited + 3))
   done
-  echo "riff: shifts drained; the server restores what was running on boot"
+
+  # Say which happened. Announcing a drain that did not finish is how the
+  # killed shifts above went unnoticed until someone read the ledger.
+  if [ -n "${awake:-}" ]; then
+    echo "riff: STILL WORKING after ${waited}s — $awake" >&2
+    echo "  Recreating the container now kills them mid-shift and loses" >&2
+    echo "  everything since their last journal entry. Stop here unless you" >&2
+    echo "  mean it: ^C, then re-run once 'up.sh check' shows nobody awake." >&2
+  else
+    echo "riff: shifts drained; the server restores what was running on boot"
+  fi
 }
 
 case $subcommand in

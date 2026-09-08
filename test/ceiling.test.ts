@@ -2,6 +2,7 @@ import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { withoutSecrets } from '../src/runtime/staff.ts';
+import { DEFAULT_POLICY, readPolicy } from '../src/core/config.ts';
 
 /**
  * `Claude Code process exited with code 1` is the turn ceiling, not a crash.
@@ -104,9 +105,74 @@ describe('a leg that aborted itself does not hand the dead controller to the ret
     assert.match(arm, /addEventListener\('abort'/);
   });
 
-  test('both early exits still abort — the point was the retry, not the exit', () => {
-    // shift.blind and shift.tools_missing each break the stream this way.
-    assert.equal((staff().match(/stop\.abort\(\);/g) ?? []).length, 3,
-      'two early exits plus the signal chain');
+  test('every early exit still aborts — the point was the retry, not the exit', () => {
+    // shift.blind, shift.tools_missing and shift.overran each break the
+    // stream this way, and the signal chain is the fourth.
+    assert.equal((staff().match(/stop\.abort\(\);/g) ?? []).length, 4,
+      'three early exits plus the signal chain');
+  });
+});
+
+/**
+ * The bound on a shift that is stuck rather than slow.
+ *
+ * Turns, context and spend are the other three ceilings, and none of them
+ * advance while a shift waits on something that never answers — so a stuck
+ * shift is unbounded and holds one of `concurrency` slots for as long as it
+ * waits. Two of those and the company has stopped with nothing on the record
+ * saying so. A shell command left holding stdin ran for three days in this
+ * repo before a person noticed it and killed it by hand.
+ */
+describe('a shift that is stuck rather than slow', () => {
+  test('the clock is on the shift, not on one leg of it', () => {
+    // A shift that rotates twice is still one shift and gets one ceiling.
+    // Reading `stop` at fire time rather than capturing it is what makes that
+    // true, since every leg replaces the controller.
+    const src = staff();
+    const arm = src.slice(src.indexOf('let overran = false;'), src.indexOf('let toolsUp'));
+    assert.match(arm, /setTimeout\(/);
+    assert.match(arm, /stop\.abort\(\)/);
+    assert.ok(src.indexOf('let overran = false;') < src.indexOf('const runLeg'),
+      'armed once per shift, above the leg that would reset it');
+  });
+
+  test('it says it ran out of time, not that a person aborted it', () => {
+    // The SDK calls every abort "aborted by user", and an operator reading
+    // that in the ledger goes looking for the operator who did it.
+    const src = staff();
+    assert.match(src, /const overranBy = \(ms: number\): string =>/);
+    assert.match(src, /ledger\.emit\(agent\.id, 'shift\.overran'/);
+    // Checked before every other reading of the abort it caused.
+    const c = src.indexOf('} catch (err) {');
+    assert.ok(src.indexOf('if (overran)', c) < src.indexOf('LOST_SESSION.test(error)', c),
+      'the ceiling is why the error happened, so it is read first');
+  });
+
+  test('nothing is held open by a shift that has already ended', () => {
+    const src = staff();
+    assert.match(src, /timeout\?\.unref\(\);/);
+    assert.match(src, /if \(timeout\) clearTimeout\(timeout\);/);
+  });
+
+  test('the ceiling is above every shift this installation has ever run', () => {
+    // Measured over 499 recorded shifts: median 3.3 minutes, p99 16.1, and
+    // the longest that ever finished 27.7. A ceiling that can cut off work
+    // which is actually happening is a worse bug than the one it fixes.
+    assert.equal(DEFAULT_POLICY.shiftTimeoutMinutes, 45);
+    assert.ok(DEFAULT_POLICY.shiftTimeoutMinutes > 27.7 * 1.5);
+  });
+
+  test('zero turns it off, and is not mistaken for unset', () => {
+    assert.equal(readPolicy({ shiftTimeoutMinutes: 0 }).shiftTimeoutMinutes, 0);
+    assert.equal(readPolicy({}).shiftTimeoutMinutes, 45);
+    assert.equal(readPolicy({ shiftTimeoutMinutes: 99999 }).shiftTimeoutMinutes, 1440);
+    // And a shift only arms a clock it was actually given.
+    assert.match(staff(), /d\.shiftTimeoutMs && d\.shiftTimeoutMs > 0/);
+  });
+
+  test('a stuck shift shows up in the report rather than only in the log', () => {
+    const vitals = readFileSync(new URL('../src/analytics/vitals.ts', import.meta.url), 'utf8');
+    assert.match(vitals, /const overran = n\('shift\.overran'\);/);
+    assert.match(vitals, /troubleRate: over\(failed \+ blind \+ overran, woke\)/);
   });
 });

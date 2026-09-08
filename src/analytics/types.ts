@@ -32,6 +32,9 @@ export type ShiftVitals = {
   failed: number;
   /** Shifts stopped for making tool calls the gate never heard about. */
   blind: number;
+  /** Shifts stopped on the wall clock: stuck rather than slow. See
+   *  CompanyPolicy.shiftTimeoutMinutes. */
+  overran: number;
   /** Shifts cut at the turn ceiling with work still in hand. */
   truncated: number;
   rotated: number;
@@ -294,7 +297,7 @@ export type PersonVitals = {
 export type Trend = {
   shifts: number; costUsd: number; tokens: number; commits: number; messages: number;
   posted: number; removed: number; filed: number; released: number;
-  done: number; dropped: number; blind: number; failed: number;
+  done: number; dropped: number; blind: number; overran: number; failed: number;
   hired: number; retired: number; barren: number;
 };
 

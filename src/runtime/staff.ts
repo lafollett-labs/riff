@@ -67,6 +67,9 @@ export type TickDeps = {
   rotateAtContextPct?: number;
   /** Somewhere with real disk for toolchain caches. See cacheEnv. */
   cacheDir?: string;
+  /** Wall clock the whole shift may take before it is stopped. See
+   *  CompanyPolicy.shiftTimeoutMinutes. 0 or absent leaves it unbounded. */
+  shiftTimeoutMs?: number;
   /** External MCP servers (image generation, calendar, inbox). Everything they
    *  reach still crosses the gate — canUseTool sees these calls too. */
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
@@ -561,6 +564,15 @@ export const blindWatch = (limit = BLIND_TURNS) => {
 const WENT_BLIND = 'the permission channel died mid-shift: tools were being called and the '
   + `gate was never asked. Stopped after ${BLIND_TURNS} blind turns.`;
 
+/**
+ * Said plainly, because the SDK calls every abort "aborted by user" and an
+ * operator reading that would go looking for the operator who did it.
+ */
+const overranBy = (ms: number): string =>
+  `the shift ran past its ${Math.round(ms / 60_000)}-minute ceiling and was stopped. `
+  + 'Turns, context and spend all stand still while a shift waits on something, so this is '
+  + 'the only bound that catches one that is stuck rather than slow.';
+
 /** Said plainly for the same reason: the CLI only wrote it to a debug log. */
 const NO_TOOLS = "the company's own tools never connected, twice running — the shift had no "
   + 'way to write anything down, so it was stopped instead of spending its turns finding out.';
@@ -852,6 +864,23 @@ export const tick = async (
   };
   const watch = blindWatch();
   let wentBlind = false;
+  /**
+   * The clock on the whole shift, not on one leg.
+   *
+   * `stop` is replaced by every leg, so this reads whichever controller is
+   * current at the moment it fires rather than capturing the first one — a
+   * shift that rotates twice is still one shift and gets one ceiling.
+   */
+  let overran = false;
+  const timeout = d.shiftTimeoutMs && d.shiftTimeoutMs > 0
+    ? setTimeout(() => {
+      overran = true;
+      ledger.emit(agent.id, 'shift.overran', null, { after: d.shiftTimeoutMs });
+      stop.abort();
+    }, d.shiftTimeoutMs)
+    : null;
+  // Nothing may be held open by a shift that has already ended.
+  timeout?.unref();
   /** The tail of what the CLI said on its way out, kept only for a failure. */
   let noise = '';
   /**
@@ -1217,9 +1246,15 @@ export const tick = async (
 
       // Leaving the message loop is a normal return, so this never reaches
       // the catch below on its own.
+      if (overran) { failure = overranBy(d.shiftTimeoutMs ?? 0); break; }
       if (wentBlind) { failure = WENT_BLIND; break; }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
+
+      // Checked first: everything below reads the abort this caused as its
+      // own kind of failure, and `Claude Code process aborted by user` is the
+      // least useful sentence any of them could put on the record.
+      if (overran) { failure = overranBy(d.shiftTimeoutMs ?? 0); break; }
 
       // A conversation the runtime no longer has is not a failed shift.
       //
@@ -1283,6 +1318,9 @@ export const tick = async (
     prompt = RESUMED_PROMPT;
     rotations++;
   }
+
+  // Whatever happened, the shift is over and its clock is not.
+  if (timeout) clearTimeout(timeout);
 
   if (failure) {
     ledger.emit(agent.id, 'agent.failed', null, {

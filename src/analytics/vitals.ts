@@ -109,6 +109,7 @@ const trendOf = (v: Vitals): Trend => ({
   done: v.work.done,
   dropped: v.work.dropped,
   blind: v.shifts.blind,
+  overran: v.shifts.overran,
   failed: v.shifts.failed,
   hired: v.org.hired,
   retired: v.org.retired,
@@ -274,12 +275,14 @@ export const vitals = (
   const woke = n('agent.woke');
   const failed = n('agent.failed');
   const blind = n('shift.blind');
+  const overran = n('shift.overran');
   const costliest = Math.max(0, ...costBy.values());
   const shifts: ShiftVitals = {
     woke,
     slept,
     failed,
     blind,
+    overran,
     truncated,
     rotated: n('session.rotated'),
     rotateFailed: n('session.rotate_failed'),
@@ -288,7 +291,9 @@ export const vitals = (
     costUsd,
     costPerShift: over(costUsd, slept),
     turnsPerShift: over(turns, slept),
-    troubleRate: over(failed + blind, woke),
+    // A shift stopped on the clock is trouble in the same way a blind one is:
+    // it woke, held a slot, and produced nothing anyone asked for.
+    troubleRate: over(failed + blind + overran, woke),
     barren,
     costShareTop: over(costliest, costUsd),
   };

@@ -90,6 +90,24 @@ export type CompanyPolicy = {
   portfolioCeiling: number;
   /** R4: per-treasurer, per-day ceiling on real money, in whole cents. */
   dailyCapCents: number;
+  /**
+   * Wall clock a single shift may take before it is stopped, in minutes.
+   *
+   * Every other bound on a shift counts something the model does — turns,
+   * context, money. None of them advance while a shift is stuck, so a shift
+   * waiting on something that never answers is unbounded, and it holds one of
+   * `concurrency` slots for as long as it waits. Two of those and the company
+   * is stopped without a single event saying so.
+   *
+   * That is not hypothetical: a shell command left holding stdin ran for
+   * three days in this repo before a person noticed and killed it by hand.
+   *
+   * 45 rather than a guess. Across 499 recorded shifts the median is 3.3
+   * minutes, p99 is 16.1, and the longest that ever finished is 27.7 — so
+   * this is 1.6x the worst real shift and cannot cut off work that is
+   * happening. 0 disables it.
+   */
+  shiftTimeoutMinutes: number;
 };
 
 /**
@@ -115,6 +133,7 @@ export const DEFAULT_POLICY: CompanyPolicy = {
   // company never reaches is a ceiling that never made it choose.
   portfolioCeiling: 3,
   dailyCapCents: 500,
+  shiftTimeoutMinutes: 45,
 };
 
 /** Clamp anything a config file or an API caller offers into a workable range. */
@@ -148,6 +167,8 @@ export const readPolicy = (raw: unknown): CompanyPolicy => {
     // 0 is a real setting here, unlike the commons: it means "no ceiling".
     portfolioCeiling: Math.round(num('portfolioCeiling', 0, 200)),
     dailyCapCents: Math.round(num('dailyCapCents', 0, 100_000_00)),
+    // 0 is a real setting: no clock on a shift at all.
+    shiftTimeoutMinutes: num('shiftTimeoutMinutes', 0, 1440),
   };
 };
 

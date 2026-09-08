@@ -75,6 +75,7 @@ export type CompanyPolicy = {
   rotateAtContextPct: number;
   commonsCeiling: number;
   dailyCapCents: number;
+  shiftTimeoutMinutes: number;
 };
 
 export type State = {

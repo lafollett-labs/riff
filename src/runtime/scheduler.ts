@@ -61,6 +61,14 @@ export type SchedulerOptions = {
   maxTicks: number | null;
   /** Epoch ms. The scheduler stops itself here regardless of anything else. */
   until: number | null;
+  /**
+   * Wall clock one shift may take before it is stopped, in ms. 0 disables it.
+   *
+   * The other ceilings all count something the model does, and none of them
+   * move while a shift waits on something that never answers — which also
+   * holds one of `concurrency` slots for as long as it waits.
+   */
+  shiftTimeoutMs: number;
 };
 
 /** Defaults assume a Claude subscription: no dollar caps, paced by rate limit. */
@@ -78,6 +86,8 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
   maxTurns: 60,
   rotateAtContextPct: 50,
   cacheDir: '',
+  // 1.6x the longest shift ever recorded here. See CompanyPolicy.
+  shiftTimeoutMs: 45 * 60_000,
 };
 
 type Deps = {
@@ -463,6 +473,7 @@ export class Scheduler {
         ...(this.#opts.perTickBudgetUsd != null ? { maxBudgetUsd: this.#opts.perTickBudgetUsd } : {}),
         maxTurns: this.#opts.maxTurns,
         rotateAtContextPct: this.#opts.rotateAtContextPct,
+        ...(this.#opts.shiftTimeoutMs > 0 ? { shiftTimeoutMs: this.#opts.shiftTimeoutMs } : {}),
         ...(this.#opts.cacheDir ? { cacheDir: this.#opts.cacheDir } : {}),
         ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
         ...(this.#d.release ? { release: this.#d.release } : {}),

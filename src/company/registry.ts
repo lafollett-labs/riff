@@ -69,6 +69,15 @@ export class Registry {
   ): Promise<boolean> {
     const c = this.get(slug);
     if (!c) return false;
+    // Written before the scheduler is touched, not after.
+    //
+    // #loop checks its bounds at the top, before its first await, so a run
+    // with a bound already spent calls back into setRunningFlag(false) inside
+    // start() — and a write afterwards put `true` straight back over it. That
+    // is the whole bug this callback exists to fix, reappearing one line
+    // later. Recording the intent first also matches what the flag means: it
+    // is what the operator asked for, not a report of the scheduler's state.
+    setRunningFlag(c.cfg.home, run);
     if (run) {
       c.scheduler.start(bounds);
     } else if (opts?.drain) {
@@ -81,7 +90,6 @@ export class Registry {
     } else {
       await c.scheduler.stop();
     }
-    setRunningFlag(c.cfg.home, run);
     return true;
   }
 
@@ -207,6 +215,10 @@ export class Registry {
         throttleAboveUtilization: p.throttleAboveUtilization,
         pauseAboveUtilization: p.pauseAboveUtilization,
       },
+      // A run that ends on its own bound is as stopped as one the operator
+      // stopped, and has to be recorded the same way or the next boot starts
+      // it again with the bound gone. See Deps.onBoundReached.
+      onBoundReached: () => { setRunningFlag(cfg.home, false); },
       ...(Object.keys(cfg.connectors ?? {}).length ? { connectors: cfg.connectors } : {}),
       ...(cfg.release === 'bundle' ? { release: 'bundle' as const } : {}),
     });

@@ -705,6 +705,19 @@ describe('one company cannot read another', () => {
     assert.match(staff, /denyRead: \[dirname\(dirname\(world\.root\)\), sessionStore\(\),/);
   });
 
+  test('the wall around the network is the egress proxy, not the sandbox', () => {
+    // Turning the sandbox on turned its network filter on with it, and nobody
+    // chose that: `readpile https://example.com/` came back `deny
+    // network-outbound example.com:443`, so both of this company's fetching
+    // tools lost their only path and neither could be tested end to end.
+    // Measured with this line in place, from inside a sandboxed shell:
+    // example.com 200, nodejs.org 200, pastebin.com FAIL — the proxy's
+    // denylist still bites, which is the boundary that was actually chosen.
+    assert.match(staff, /network: \{ allowedDomains: \['\*'\] \}/);
+    assert.doesNotMatch(staff, /strictAllowlist: true/,
+      'an allowlist here would have to name every host a company might research');
+  });
+
   test('a sandboxed company can still build', () => {
     // Everything outside allowWrite is read-only inside the sandbox, so a
     // missing home directory turns `npm install` into EROFS. Marlow hit this

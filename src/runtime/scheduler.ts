@@ -86,6 +86,18 @@ type Deps = {
   release?: 'none' | 'bundle';
   options?: Partial<SchedulerOptions>;
   onTick?: (r: TickResult) => void;
+  /**
+   * A bound ended the run, so the company is no longer meant to be working.
+   *
+   * Stopping through the API writes that down; stopping on maxTicks or a
+   * deadline did not, because the scheduler has no idea a config file exists.
+   * So `running: true` outlived every bounded run, and the next process to
+   * read it started the company again — unbounded, since the bound lived only
+   * in memory. Lathe's one-hour trial on 2026-09-07 ended at 23:05 and was
+   * resumed with no ceiling by a rebuild three hours later, which is exactly
+   * the overnight run the bounds exist to prevent.
+   */
+  onBoundReached?: (why: string) => void;
 };
 
 /**
@@ -369,12 +381,14 @@ export class Scheduler {
       if (this.#opts.maxTicks != null && this.#ticks >= this.#opts.maxTicks) {
         this.#d.ledger.emit('company', 'scheduler.stopped', null,
           { why: 'tick ceiling reached', ticks: this.#ticks });
+        this.#d.onBoundReached?.('tick ceiling reached');
         await this.stop({ drain: true });
         break;
       }
       if (this.#opts.until != null && Date.now() >= this.#opts.until) {
         this.#d.ledger.emit('company', 'scheduler.stopped', null,
           { why: 'deadline reached', ticks: this.#ticks });
+        this.#d.onBoundReached?.('deadline reached');
         await this.stop({ drain: true });
         break;
       }

@@ -195,6 +195,34 @@ describe('working, and staying that way', () => {
     `);
     assert.deepEqual(JSON.parse(out), { wanted: false, resumed: [] });
   });
+
+  test('a run that ends on its own bound is remembered as stopped', () => {
+    // Only the API wrote the flag, so a run that ended on maxTicks or a
+    // deadline left `running: true` behind and the next process started the
+    // company again — with the bound gone, because the bound lived only in
+    // memory. Lathe's one-hour trial ended at 23:05 on 2026-09-07 and a
+    // rebuild three hours later resumed it unbounded.
+    //
+    // maxTicks: 0 trips the bound on the first pass of the loop, before
+    // anybody is selected, so this costs no shift.
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const r = new Registry(systemClock);
+      r.found({ name: 'Alpha Works', business: '', ceo: 'Ash', chair: 'Cali' });
+      await r.setRunning('alpha-works', true, { maxTicks: 0 });
+      // The loop is async; give it the one turn it needs to reach the bound.
+      for (let i = 0; i < 50 && r.list()[0].running; i++) await new Promise((f) => setTimeout(f, 20));
+      const stopped = !r.list()[0].running;
+      for (const c of r.opened()) { await c.scheduler.stop(); c.ledger.close(); }
+
+      const fresh = new Registry(systemClock);
+      const resumed = fresh.resume();
+      for (const c of fresh.opened()) { await c.scheduler.stop(); c.ledger.close(); }
+      console.log(JSON.stringify({ stopped, wanted: fresh.list()[0].wanted, resumed }));
+    `);
+    assert.deepEqual(JSON.parse(out), { stopped: true, wanted: false, resumed: [] });
+  });
 });
 
 describe('the legacy layout', () => {

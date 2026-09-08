@@ -985,6 +985,24 @@ export const tick = async (
           // to prevent.
           failIfUnavailable: true,
           allowUnsandboxedCommands: false,
+          // The wall around the network is the egress proxy, not this.
+          //
+          // Enabling the sandbox turned its network filter on as well, and
+          // nothing chose that: `readpile https://example.com/` came back
+          // `deny network-outbound example.com:443`, so both of this company's
+          // fetching tools lost the only path they had and neither could be
+          // tested end to end. Meanwhile the boundary that WAS chosen is still
+          // there and is stronger — the factory sits on an internal network
+          // with no route off the machine, and the single way out is a proxy
+          // holding an anchored denylist that logs every request it passes.
+          //
+          // A second allowlist in front of that would have to name every host
+          // a company might research before it knows it needs one, which is
+          // the opposite of how this company is told to work: fetch the
+          // evidence, and log the refusal in your own words when a site says
+          // no. So this defers to the proxy rather than duplicating it.
+          // strictAllowlist stays off with it; nothing here is an allowlist.
+          network: { allowedDomains: ['*'] },
           filesystem: {
             // Deny where every company lives, then re-allow this one. The
             // more specific path wins, so the company keeps its own directory

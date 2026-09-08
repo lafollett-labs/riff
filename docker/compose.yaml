@@ -98,6 +98,12 @@ services:
     # keeps no transcripts, so every resume fails and every shift starts cold.
     # It did — 33 resume attempts, 33 resets, 0 successes — while the feature
     # looked present and the container looked healthy.
+    #
+    # Writable is not enough, because a tmpfs is also emptied by every restart
+    # while the session ids in the ledger survive on the volume. The entrypoint
+    # links /home/labs/.claude/projects out to /data/sessions for that reason.
+    # The credentials record stays here on purpose — it is pushed into memory
+    # after start and must never land on the operator's disk.
     tmpfs:
       - /tmp:size=512m,uid=10001,gid=10001,mode=1777
       - /home/labs:size=256m,uid=10001,gid=10001,mode=0700

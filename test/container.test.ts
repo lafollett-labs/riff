@@ -558,6 +558,45 @@ describe('the session store is somewhere the factory can actually write', () => 
     // If HOME is not a writable mount, persistSession is a no-op.
     assert.match(compose, /\/home\/labs:size=\d+m,uid=10001/);
   });
+
+  test('and the transcripts are not left on it, because a tmpfs is emptied', () => {
+    // Writable was not enough. The session id goes to the ledger, which is on
+    // the volume; the transcript went to a tmpfs, which every restart wipes.
+    // So after every rebuild each agent held an id for a conversation that no
+    // longer existed. On 2026-09-07 that took the first shift of two of the
+    // three staff who woke.
+    assert.match(entrypoint, /sessions=\/data\/sessions/);
+    assert.match(entrypoint, /ln -s "\$sessions" "\$HOME\/\.claude\/projects"/);
+  });
+
+  test('the credentials are NOT moved with them', () => {
+    // The record is pushed into memory after start precisely so it never
+    // reaches the operator's disk, and /data is the operator's disk.
+    const block = entrypoint.slice(entrypoint.indexOf('sessions=/data/sessions'),
+                                   entrypoint.indexOf('# Wait for the credentials record'));
+    assert.doesNotMatch(block, /credentials/i,
+      'nothing under .claude but projects/ may be linked onto the volume');
+    assert.match(entrypoint, /creds="\$HOME\/\.claude\/\.credentials\.json"/);
+  });
+
+  test('a store that already has transcripts in it is carried across, not dropped', () => {
+    // The link is made on a container that has already run at least once in
+    // its life — throwing the transcripts away to install the fix would cost
+    // exactly the shifts the fix exists to save.
+    assert.match(entrypoint, /if \[ -d "\$HOME\/\.claude\/projects" \]; then/);
+    assert.match(entrypoint, /tar cf - \.\) \| \(cd "\$sessions" && tar xf -\)/);
+  });
+
+  test('a shift does not have to fail to find out the conversation is gone', () => {
+    // Before this, the id was handed to the SDK, the CLI died on `No
+    // conversation found with session ID`, and the runtime caught the string
+    // and retook the leg cold. That healed Marlow and not Idris or Rue.
+    const staff = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
+    assert.match(staff, /if \(session && !transcriptExists\(session\)\)/);
+    assert.match(staff, /why: 'transcript is gone'/);
+    // And it asks the disk, not the CLI's wording, which is free to change.
+    assert.match(staff, /existsSync\(join\(store, d, `\$\{id\}\.jsonl`\)\)/);
+  });
 });
 
 describe('a container that never got its credentials', () => {
@@ -656,10 +695,27 @@ describe('one company cannot read another', () => {
   });
 
   test('the fence is around the other companies, not around the company', () => {
-    assert.match(staff, /denyRead: \[dirname\(dirname\(world\.root\)\)\]/,
+    assert.match(staff, /denyRead: \[dirname\(dirname\(world\.root\)\)/,
       'deny where every company lives');
     assert.match(staff, /allowRead: \[dirname\(world\.root\)\]/,
       'then re-allow this one; the more specific path wins');
+  });
+
+  test('and around the subscription token, which the shell could simply read', () => {
+    // Measured on 2026-09-07 under the profile shipped the day before: a
+    // sandboxed shift ran `cat /home/labs/.claude/.credentials.json` and got
+    // it. The shell runs as the uid that owns the file, so 0600 stops nobody;
+    // Claude Code write-protects it and does not deny reading it. Re-measured
+    // with these two entries added: `denied`, with node, git and the shell
+    // itself still working.
+    assert.match(staff, /home\('\.claude\/\.credentials\.json'\)/);
+    assert.match(staff, /home\('\.claude\.json'\)/);
+  });
+
+  test('and around the transcripts, which are one company talking', () => {
+    // They moved to /data/sessions to survive a restart, which put them
+    // outside the /data/companies deny and outside the home directory too.
+    assert.match(staff, /denyRead: \[dirname\(dirname\(world\.root\)\), sessionStore\(\),/);
   });
 
   test('a sandboxed company can still build', () => {

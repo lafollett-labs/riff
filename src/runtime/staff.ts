@@ -1,5 +1,6 @@
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { existsSync, readdirSync } from 'node:fs';
 import { query, type CanUseTool, type SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
 import type { Ledger } from '../ledger/ledger.ts';
@@ -15,6 +16,41 @@ import { RULES_TEXT } from '../policy/rules.ts';
 
 /** A path in the agent runtime's own home — caches a build needs to write. */
 const home = (rel: string): string => join(homedir(), rel);
+
+/**
+ * Where the CLI keeps conversation transcripts.
+ *
+ * Measured against v2.1.263 rather than assumed: pointing CLAUDE_CONFIG_DIR
+ * at an empty directory puts `.claude.json` and `backups/` there instead of
+ * in the home directory.
+ */
+export const sessionStore = (env: NodeJS.ProcessEnv = process.env): string =>
+  join(env['CLAUDE_CONFIG_DIR']?.trim() || home('.claude'), 'projects');
+
+/**
+ * Whether the transcript a session id names is still on disk.
+ *
+ * The id is written to the ledger, which is on the durable volume. The
+ * transcript is written by the CLI, which in the container kept it on a
+ * tmpfs — so every restart wiped the conversations while every id survived,
+ * and the first leg of every first shift afterwards died on `No conversation
+ * found with session ID`. On 2026-09-07 that cost Idris and Rue a shift each:
+ * the cold retry meant to heal it worked for Marlow and not for them, and
+ * both went blind instead.
+ *
+ * Asking the disk first makes the healthy path silent — no dead leg, no
+ * failure event, no blind watch — and does not depend on matching an error
+ * string the CLI is free to reword.
+ *
+ * The directory under `projects/` is the working directory with every `/` and
+ * `.` replaced by `-`, which is the CLI's business and not ours. It scans
+ * instead: one readdir over a handful of directories.
+ */
+export const transcriptExists = (id: string, store = sessionStore()): boolean => {
+  let dirs: string[];
+  try { dirs = readdirSync(store); } catch { return false; }
+  return dirs.some((d) => existsSync(join(store, d, `${id}.jsonl`)));
+};
 
 export type TickDeps = {
   agent: Agent;
@@ -630,6 +666,13 @@ export const tick = async (
   /** The conversation currently being continued, or null to start a fresh
    *  one. Changes twice in a shift that rotates. */
   let session = (opts?.withoutResume ? null : ledger.getMeta(`session:${agent.id}`)) || null;
+  // A conversation the CLI no longer holds is not a resume, so do not spend a
+  // leg discovering that. See transcriptExists.
+  if (session && !transcriptExists(session)) {
+    ledger.setMeta(`session:${agent.id}`, '');
+    ledger.emit(agent.id, 'session.reset', null, { was: session, why: 'transcript is gone' });
+    session = null;
+  }
   ledger.emit(agent.id, 'agent.woke', null, { resumed: Boolean(session) });
 
   let costUsd = 0;
@@ -881,6 +924,11 @@ export const tick = async (
   const runLeg = async (prompt: string, maxTurns: number, handover = false): Promise<void> => {
     atCeiling = false;
     let toolTurns = 0;
+    // Kept per leg, not per shift. A shift that lost its conversation and
+    // retook the leg cold reported the FIRST leg's stderr on the second leg's
+    // failure — which is how `No conversation found with session ID` came to
+    // be attached to two shifts that had already started over without one.
+    noise = '';
     // A leg that ended by aborting must not hand its dead controller to the next.
     armStop();
     // The hand-over's own context is not the shift's context — it is measured
@@ -941,7 +989,17 @@ export const tick = async (
             // Deny where every company lives, then re-allow this one. The
             // more specific path wins, so the company keeps its own directory
             // — ledger, world and scratch — and loses its neighbours'.
-            denyRead: [dirname(dirname(world.root))],
+            // The shell runs as the same uid that owns these, so 0600 is not
+            // a boundary — only this list is. Measured on 2026-09-07 under
+            // the profile shipped the day before: a sandboxed shift read
+            // `.credentials.json`, which holds the live subscription token,
+            // and `.claude.json`. Claude Code write-protects both and does
+            // not deny reading them. The transcript store goes with them:
+            // one company's conversations are not another's to read, and
+            // after the move below they are no longer under a home directory
+            // this could cover by denying the home directory.
+            denyRead: [dirname(dirname(world.root)), sessionStore(),
+                       home('.claude/.credentials.json'), home('.claude.json')],
             allowRead: [dirname(world.root)],
             // The company's own directory, plus the caches a build writes to.
             // Everything outside the allow list is read-only INSIDE the

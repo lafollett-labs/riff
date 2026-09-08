@@ -43,6 +43,31 @@ MSG
 fi
 rm -f /data/.write-test
 
+# Put the CLI's conversation transcripts on the durable volume.
+#
+# $HOME is a 256M tmpfs (see compose.yaml, which explains why), and the CLI
+# keeps every transcript under $HOME/.claude/projects. The session id that
+# names one is written to the ledger, which is NOT on a tmpfs — so every
+# restart left every agent holding an id for a conversation that no longer
+# existed. On 2026-09-07 the first shift of two agents after a rebuild died
+# that way; the runtime now checks the store before resuming, and this is why
+# there is usually something there to find.
+#
+# Only `projects/` moves. `.credentials.json` stays on the tmpfs beside it,
+# deliberately: the subscription token is delivered into memory after start
+# and must not be written to the operator's disk.
+sessions=/data/sessions
+mkdir -p "$sessions" "$HOME/.claude"
+if [ ! -L "$HOME/.claude/projects" ]; then
+  # Anything the CLI wrote before the link exists was written to the tmpfs and
+  # is about to be discarded with it; move it across rather than lose it.
+  if [ -d "$HOME/.claude/projects" ]; then
+    (cd "$HOME/.claude/projects" && tar cf - .) | (cd "$sessions" && tar xf -)
+    rm -rf "$HOME/.claude/projects"
+  fi
+  ln -s "$sessions" "$HOME/.claude/projects"
+fi
+
 # Wait for the credentials record, when that is how this stack is being run.
 #
 # A bare token in CLAUDE_CODE_OAUTH_TOKEN can spend the subscription and cannot

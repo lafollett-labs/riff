@@ -90,7 +90,7 @@ describe('a leg that aborted itself does not hand the dead controller to the ret
     // controller that was already aborted, and died on the spot.
     const src = staff();
     const leg = src.indexOf('const runLeg');
-    assert.match(src.slice(leg, leg + 400), /armStop\(\);/,
+    assert.match(src.slice(leg, src.indexOf('const q = query(', leg)), /armStop\(\);/,
       'the retry inherits a live controller or it is not a retry');
     assert.doesNotMatch(src, /const stop = new AbortController\(\)/,
       'a shift-long controller cannot survive a leg that aborts');

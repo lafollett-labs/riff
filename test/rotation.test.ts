@@ -1,7 +1,11 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldRotate, cacheEnv, blindWatch } from '../src/runtime/staff.ts';
+import { shouldRotate, cacheEnv, blindWatch, sessionStore,
+         transcriptExists } from '../src/runtime/staff.ts';
 import { readPolicy, DEFAULT_POLICY } from '../src/core/config.ts';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /** Half of a one-million window, which is where the default fires. */
 const AT_HALF = {
@@ -151,5 +155,53 @@ describe('noticing that the gate has gone', () => {
 
   test('it takes more than one silent turn, because one is a race', () => {
     assert.equal(run([[true, false], [true, false]]), -1);
+  });
+});
+
+/**
+ * Resuming a conversation the CLI no longer has.
+ *
+ * The id is in the ledger, on the durable volume. The transcript was on a
+ * tmpfs until 2026-09-07, so every restart desynchronised the two: each agent
+ * woke asking to continue something that had been wiped, the CLI died on `No
+ * conversation found with session ID`, and the runtime learned that only by
+ * matching the wording. Idris and Rue each lost a shift to it that night.
+ */
+describe('a session id outliving its transcript', () => {
+  const store = (): string => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'riff-sessions-')), 'projects');
+    mkdirSync(join(dir, '-data-companies-lathe-world'), { recursive: true });
+    return dir;
+  };
+
+  test('a transcript that is there is found', () => {
+    const s = store();
+    writeFileSync(join(s, '-data-companies-lathe-world', 'abc-123.jsonl'), '{}\n');
+    assert.equal(transcriptExists('abc-123', s), true);
+  });
+
+  test('an id with nothing behind it is not', () => {
+    assert.equal(transcriptExists('abc-123', store()), false);
+  });
+
+  test('a store that does not exist at all answers no, rather than throwing', () => {
+    // The first start of a fresh installation, and the shift must not die on it.
+    assert.equal(transcriptExists('abc-123', join(tmpdir(), 'riff-no-such-store')), false);
+  });
+
+  test('the working directory it was recorded under does not have to be guessed', () => {
+    // The CLI names that directory after the cwd with every / and . turned
+    // into -, which is its rule to change. Scanning does not depend on it.
+    const s = store();
+    mkdirSync(join(s, '-somewhere-else-entirely'));
+    writeFileSync(join(s, '-somewhere-else-entirely', 'abc-123.jsonl'), '{}\n');
+    assert.equal(transcriptExists('abc-123', s), true);
+  });
+
+  test('the store follows CLAUDE_CONFIG_DIR, which is where the CLI keeps it', () => {
+    // Measured against v2.1.263: pointed at an empty directory, the CLI wrote
+    // .claude.json and backups/ there instead of into the home directory.
+    assert.equal(sessionStore({ CLAUDE_CONFIG_DIR: '/data/cfg' }), '/data/cfg/projects');
+    assert.match(sessionStore({}), /\.claude\/projects$/);
   });
 });

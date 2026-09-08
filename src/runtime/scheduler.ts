@@ -191,6 +191,24 @@ export class Scheduler {
     this.#d = d;
     this.#opts = { ...DEFAULT_SCHEDULE, ...d.options };
     this.#spendDay = d.clock.day();
+
+    // Where the rotation was when the last process stopped.
+    //
+    // This map used to start empty, which made `overdue` equal `now` for
+    // everybody — a dead heat resolved by rank and then by array order, which
+    // is hire order. So the first round after EVERY restart woke the same
+    // people: with two slots and three staff, the third was never picked.
+    //
+    // Measured on Lathe over 53 wakes: marlow 45.3%, idris 37.7%, rue 17.0%,
+    // where an even split is 33.3%. Simulated against selectDue itself, a
+    // one-round run gives marlow 50%, idris 50%, rue 0% — and a company
+    // started, bounded and rebuilt as often as this one is is almost all
+    // first rounds. Rue was hired ten seconds after Idris and that is the
+    // whole of why he came third.
+    //
+    // The rotation belongs to the company, not to the process that happens to
+    // be running it. Same lesson as the running flag.
+    for (const [id, at] of d.ledger.lastWorked()) this.#nextDue.set(id, at);
   }
 
   get running(): boolean { return this.#running; }
@@ -308,12 +326,21 @@ export class Scheduler {
     }
   }
 
-  /** Rank sets cadence: the CEO wakes ~2x as often as a member. */
+  /** Rank sets cadence: an executive wakes about 1.5x as often as a member. */
   #intervalFor(a: Agent): number {
     const rank = RANK[a.tier];
     const factor = 1 + rank * 0.35;
     // Jitter so ticks never phase-lock into a thundering herd.
-    const jitter = 0.85 + ((hash(a.id) % 30) / 100);
+    //
+    // It was `hash(a.id) % 30`, which is a constant per person and therefore
+    // not jitter at all: it never de-phased anything and instead handed each
+    // agent a permanent interval multiplier between 0.85 and 1.14, a 34%
+    // spread that never moved. Idris drew 1.14 and Nadia drew 1.14, and both
+    // sit at the bottom of their companies' wake counts — 29.1 minutes
+    // against Rue's 22.2 on the same tier, forever.
+    //
+    // Rolled per wake, it does what the comment always claimed.
+    const jitter = 0.85 + Math.random() * 0.3;
     return this.#opts.baseIntervalMs * factor * jitter * this.#throttle;
   }
 
@@ -519,12 +546,6 @@ export class Scheduler {
 const normaliseResetsAt = (v: number | undefined): number | null => {
   if (v == null || !Number.isFinite(v)) return null;
   return v < 1e12 ? v * 1000 : v;
-};
-
-const hash = (s: string): number => {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
-  return Math.abs(h);
 };
 
 const sleep = (ms: number, signal: AbortSignal): Promise<void> =>

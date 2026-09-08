@@ -164,6 +164,26 @@ export class Ledger {
   }
 
   /**
+   * When each person last finished a shift, by actor.
+   *
+   * The rotation is company state, not process state. A scheduler built with
+   * an empty picture of it treats everybody as equally overdue, and a dead
+   * heat is resolved by rank and then by hire order — the same two people,
+   * every restart. See Scheduler's constructor.
+   */
+  lastWorked(): Map<string, number> {
+    const out = new Map<string, number>();
+    for (const r of this.#db.prepare(
+      `SELECT actor, MAX(at) AS at FROM events
+        WHERE kind IN ('agent.slept','agent.failed') GROUP BY actor`
+    ).all() as Array<{ actor: string; at: string }>) {
+      const t = Date.parse(r.at);
+      if (Number.isFinite(t)) out.set(r.actor, t);
+    }
+    return out;
+  }
+
+  /**
    * Which rules actually bite. The constitution claims Rule 6 is the
    * load-bearing one; this is the query that can contradict it.
    */

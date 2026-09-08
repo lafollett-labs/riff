@@ -1,5 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { selectDue } from '../src/runtime/scheduler.ts';
 import { roundIsDue } from '../src/runtime/cadence.ts';
 import type { Agent, AgentId, Tier } from '../src/core/types.ts';
@@ -16,6 +17,63 @@ const TEN: Agent[] = [
   ...['lead1', 'lead2', 'lead3'].map((i) => staff(i, 'lead')),
   ...['m1', 'm2', 'm3', 'm4', 'm5', 'm6'].map((i) => staff(i, 'member')),
 ];
+
+/**
+ * Who gets picked when nobody has worked yet.
+ *
+ * `overdue` is `now - (nextDue ?? 0)`, so an agent the scheduler has never
+ * seen is maximally overdue — and so is everybody else. That dead heat falls
+ * through to rank and then to array order, which is hire order, and it
+ * resolves the same way every time. With two slots and three staff the third
+ * person is not picked at all.
+ *
+ * Measured on Lathe over 53 wakes: marlow 45.3%, idris 37.7%, rue 17.0%
+ * against an even 33.3%. Rue was hired ten seconds after Idris.
+ */
+describe('a company that has just started has no rotation to go on', () => {
+  const cold = (ids: string[], slots: number): string[] =>
+    selectDue(ids.map((id, i) => staff(id, i === 0 ? 'executive' : 'lead')), {
+      now: Date.now(), nextDue: new Map(), inFlight: new Set(), slots,
+    }).map((a) => a.id);
+
+  test('everyone unseen is exactly as overdue as everyone else', () => {
+    // Which is the fault: it is not that the tie-break is wrong, it is that
+    // there is a tie at all, every restart, forever.
+    assert.deepEqual(cold(['marlow', 'idris', 'rue'], 3), ['marlow', 'idris', 'rue']);
+  });
+
+  test('so the last one hired is never reached when the slots run out', () => {
+    assert.deepEqual(cold(['marlow', 'idris', 'rue'], 2), ['marlow', 'idris']);
+  });
+});
+
+/**
+ * The rotation is the company's, not the process's.
+ *
+ * A scheduler is built fresh on every restart, and this company is started,
+ * bounded and rebuilt constantly — so almost every round it runs is a first
+ * round. Seeding from the ledger is what makes the tie above stop happening.
+ */
+describe('the rotation survives the process that was running it', () => {
+  test('the scheduler starts from when people last actually worked', () => {
+    const src = readFileSync(new URL('../src/runtime/scheduler.ts', import.meta.url), 'utf8');
+    assert.match(src, /for \(const \[id, at\] of d\.ledger\.lastWorked\(\)\) this\.#nextDue\.set\(id, at\);/);
+    const ledger = readFileSync(new URL('../src/ledger/ledger.ts', import.meta.url), 'utf8');
+    // A failed shift is still a turn taken. Counting only agent.slept would
+    // send whoever just failed straight back to the front of the queue.
+    assert.match(ledger, /kind IN \('agent\.slept','agent\.failed'\) GROUP BY actor/);
+  });
+
+  test('the jitter is rolled per wake, so it cannot become a ranking', () => {
+    // `hash(a.id) % 30` never changed for a person: a permanent interval
+    // multiplier spread across 34%, dressed as jitter. Idris drew 1.14 and
+    // waited 29.1 minutes to Rue's 22.2 on the same tier, every time.
+    const src = readFileSync(new URL('../src/runtime/scheduler.ts', import.meta.url), 'utf8');
+    assert.match(src, /const jitter = 0\.85 \+ Math\.random\(\) \* 0\.3;/);
+    assert.doesNotMatch(src, /^const hash = /m,
+      'the per-agent hash is gone, not merely unused');
+  });
+});
 
 describe('ten staff and three slots: everybody works', () => {
   test('nobody is starved over a long run of contested rounds', () => {

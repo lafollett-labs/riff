@@ -69,6 +69,14 @@ export type SchedulerOptions = {
    * holds one of `concurrency` slots for as long as it waits.
    */
   shiftTimeoutMs: number;
+  /**
+   * How long a run may last from the moment it starts, in ms. 0 is no limit.
+   *
+   * `until` was only ever set when a caller passed one, so Start with no
+   * arguments — and a boot resume, which passes nothing — was an unbounded
+   * run. See CompanyPolicy.maxSessionHours.
+   */
+  maxSessionMs: number;
 };
 
 /** Defaults assume a Claude subscription: no dollar caps, paced by rate limit. */
@@ -88,6 +96,7 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
   cacheDir: '',
   // 1.6x the longest shift ever recorded here. See CompanyPolicy.
   shiftTimeoutMs: 45 * 60_000,
+  maxSessionMs: 2 * 60 * 60_000,
 };
 
 type Deps = {
@@ -185,6 +194,10 @@ export class Scheduler {
   }
 
   get running(): boolean { return this.#running; }
+
+  /** When this run ends, after the policy ceiling has had its say. Null is
+   *  unbounded, which only a company with maxSessionHours 0 can be. */
+  get until(): number | null { return this.#running ? this.#opts.until : null; }
   get spentTodayUsd(): number { return this.#spentToday; }
   get ticks(): number { return this.#ticks; }
   get rateLimit(): SDKRateLimitInfo | null { return this.#lastRateLimit; }
@@ -326,7 +339,14 @@ export class Scheduler {
     this.#running = true;
     this.#ticks = 0;
     this.#lastRound = 0;
-    this.#opts.until = bounds?.until ?? null;
+    // The run's own ceiling, which applies whether or not anybody asked for
+    // one. A caller may ask for less; asking for more does not get it, and
+    // the deadline goes back on the response so the clip is never silent.
+    const cap = this.#opts.maxSessionMs > 0 ? Date.now() + this.#opts.maxSessionMs : null;
+    const asked = bounds?.until ?? null;
+    this.#opts.until = cap == null ? asked
+      : asked == null ? cap
+      : Math.min(asked, cap);
     this.#opts.maxTicks = bounds?.maxTicks ?? null;
     this.#abort = new AbortController();
     this.#d.ledger.emit('company', 'work.started', null, { options: this.#opts });

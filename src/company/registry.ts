@@ -215,6 +215,7 @@ export class Registry {
         throttleAboveUtilization: p.throttleAboveUtilization,
         pauseAboveUtilization: p.pauseAboveUtilization,
         shiftTimeoutMs: Math.round(p.shiftTimeoutMinutes * 60_000),
+        maxSessionMs: Math.round(p.maxSessionHours * 60 * 60_000),
       },
       // A run that ends on its own bound is as stopped as one the operator
       // stopped, and has to be recorded the same way or the next boot starts

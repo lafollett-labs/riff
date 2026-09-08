@@ -320,10 +320,16 @@ const server = createServer(async (req, res) => {
       // journal entry, so the destructive one is the one that gets the flag.
       const drain = !run && b['hard'] !== true;
       const ok = await registry.setRunning(target, run, bounds, { drain });
+      // Read back rather than echoed. A run is capped by the company's
+      // maxSessionHours whether or not anyone asked for a deadline, so the
+      // requested figure is not always the one in force — and reporting the
+      // one that is not in force is how an operator plans a night around a
+      // deadline that already passed.
+      const until = ok && run ? (registry.get(target)?.scheduler.until ?? null) : null;
       return ok ? json(res, {
         slug: target, running: run,
         ...(drain ? { draining: true } : {}),
-        ...(run && bounds.until ? { until: new Date(bounds.until).toISOString() } : {}),
+        ...(until ? { until: new Date(until).toISOString() } : {}),
         ...(run && bounds.maxTicks ? { maxTicks: bounds.maxTicks } : {}),
       }) : json(res, { error: `no company '${target}'` }, 404);
     }

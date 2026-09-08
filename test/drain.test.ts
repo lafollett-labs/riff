@@ -116,6 +116,25 @@ describe('a drain waits for the shift; a pause kills it', () => {
     assert.match(vue, /v-if="live"/, 'nothing to shut down when nothing is running');
   });
 
+  test('a run has an end even when nobody asked for one', () => {
+    // `until` was only set when a caller passed one, so Start with no
+    // arguments — and resume() at boot, which passes nothing at all — was an
+    // unbounded run on somebody's subscription. A rebuild resumed Lathe that
+    // way at 01:58 on 2026-09-08 and it would have run until morning.
+    const src = read('src/runtime/scheduler.ts');
+    assert.match(src, /const cap = this\.#opts\.maxSessionMs > 0 \? Date\.now\(\) \+ this\.#opts\.maxSessionMs : null;/);
+    // A caller may ask for less. Asking for more does not get it.
+    assert.match(src, /: Math\.min\(asked, cap\);/);
+  });
+
+  test('and the deadline reported is the one in force, not the one requested', () => {
+    // Reporting a deadline that was clipped is how an operator plans a night
+    // around a stop that already happened.
+    assert.match(read('src/gateway/server.ts'),
+      /registry\.get\(target\)\?\.scheduler\.until \?\? null/);
+    assert.match(read('src/runtime/scheduler.ts'), /get until\(\): number \| null/);
+  });
+
   test('a company mid-drain cannot be handed a deadline for a run it is ending', () => {
     assert.match(read('desk/src/views/Companies.vue'), /v-if="!c\.running && !c\.draining"/);
   });

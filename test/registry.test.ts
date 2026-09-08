@@ -840,21 +840,70 @@ describe('what a script used to do, the API does', () => {
   test('a run started without bounds is not held to the last run\'s', () => {
     // The bounds belong to the run. A deadline that outlived the run it was
     // set for would stop the next one before it began.
+    //
+    // "Without bounds" no longer means without an end: the company's own
+    // maxSessionHours applies whether or not a caller asked for one, because
+    // Start with no arguments and resume() at boot both used to mean a run
+    // that never stopped. What must not carry over is the LAST run's figure.
     const out = run(`
       const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
       const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
       const r = new Registry(systemClock);
       const c = r.found({ name: 'Unbounded Co', business: 'b', ceo: 'Ceo', chair: 'Cali' });
       if (!c.ok) throw new Error(c.reason);
-      await r.setRunning('unbounded-co', true, { until: Date.now() - 1000, maxTicks: 1 });
+      const stale = Date.now() - 1000;
+      await r.setRunning('unbounded-co', true, { until: stale, maxTicks: 1 });
       await r.setRunning('unbounded-co', false);
+      const at = Date.now();
       await r.setRunning('unbounded-co', true);
       const last = c.company.ledger.lastEvent(['work.started']);
       const o = JSON.parse(last.dataJson).options;
-      console.log(JSON.stringify({ until: o.until, maxTicks: o.maxTicks }));
+      console.log(JSON.stringify({
+        stale: o.until === stale,
+        hoursAhead: o.until == null ? null : Math.round((o.until - at) / 3_600_000),
+        maxTicks: o.maxTicks,
+      }));
       await r.setRunning('unbounded-co', false);
     `);
-    assert.deepEqual(JSON.parse(out), { until: null, maxTicks: null });
+    assert.deepEqual(JSON.parse(out), { stale: false, hoursAhead: 2, maxTicks: null });
+  });
+
+  test('a company can be given a run with no end, but has to say so', () => {
+    // 0 is the setting that means it, and nothing else reaches it — which is
+    // the point: forgetting to pass a deadline must not be the way to get one.
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const r = new Registry(systemClock);
+      const c = r.found({ name: 'Allnight Co', business: 'b', ceo: 'Ceo', chair: 'Cali',
+                          policy: { maxSessionHours: 0 } });
+      if (!c.ok) throw new Error(c.reason);
+      await r.setRunning('allnight-co', true);
+      const o = JSON.parse(c.company.ledger.lastEvent(['work.started']).dataJson).options;
+      console.log(JSON.stringify({ until: o.until }));
+      await r.setRunning('allnight-co', false);
+    `);
+    assert.deepEqual(JSON.parse(out), { until: null });
+  });
+
+  test('a deadline longer than the company has earned is clipped, not honored', () => {
+    // "As a company proves itself we bump their time" only works if the dial
+    // is the thing that decides. An eight-hour request against a two-hour
+    // company is a two-hour run, and the response says so rather than
+    // reporting the figure that was asked for.
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const r = new Registry(systemClock);
+      const c = r.found({ name: 'Eager Co', business: 'b', ceo: 'Ceo', chair: 'Cali' });
+      if (!c.ok) throw new Error(c.reason);
+      const at = Date.now();
+      await r.setRunning('eager-co', true, { until: at + 8 * 3_600_000, maxTicks: null });
+      const reported = r.get('eager-co').scheduler.until;
+      console.log(JSON.stringify({ hoursAhead: Math.round((reported - at) / 3_600_000) }));
+      await r.setRunning('eager-co', false);
+    `);
+    assert.deepEqual(JSON.parse(out), { hoursAhead: 2 });
   });
 });
 

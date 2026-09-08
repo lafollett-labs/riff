@@ -108,6 +108,22 @@ export type CompanyPolicy = {
    * happening. 0 disables it.
    */
   shiftTimeoutMinutes: number;
+  /**
+   * Hours a run may last from the moment the company is started, before it
+   * drain-stops itself. 0 is no limit.
+   *
+   * The bound existed and nothing supplied it: `until` was only ever set when
+   * a caller passed one, so Start with no arguments — and a resume at boot,
+   * which passes nothing at all — was an unbounded run on somebody's
+   * subscription. Lathe was resumed that way by a rebuild at 01:58 on
+   * 2026-09-08 and would still have been running in the morning.
+   *
+   * A ceiling rather than a default, because "max" is what it is called and
+   * a longer run asked for explicitly should not quietly outlive it. The
+   * deadline comes back on the response, so a clipped request is visible
+   * rather than silent, and an operator who wants longer raises this.
+   */
+  maxSessionHours: number;
 };
 
 /**
@@ -134,6 +150,9 @@ export const DEFAULT_POLICY: CompanyPolicy = {
   portfolioCeiling: 3,
   dailyCapCents: 500,
   shiftTimeoutMinutes: 45,
+  // Long enough to be a real run, short enough that forgetting to stop it is
+  // not a night's worth of somebody's window.
+  maxSessionHours: 2,
 };
 
 /** Clamp anything a config file or an API caller offers into a workable range. */
@@ -169,6 +188,8 @@ export const readPolicy = (raw: unknown): CompanyPolicy => {
     dailyCapCents: Math.round(num('dailyCapCents', 0, 100_000_00)),
     // 0 is a real setting: no clock on a shift at all.
     shiftTimeoutMinutes: num('shiftTimeoutMinutes', 0, 1440),
+    // 0 likewise: a run with no end, for someone who means it.
+    maxSessionHours: num('maxSessionHours', 0, 720),
   };
 };
 

@@ -76,6 +76,7 @@ export type CompanyPolicy = {
   commonsCeiling: number;
   dailyCapCents: number;
   shiftTimeoutMinutes: number;
+  maxSessionHours: number;
 };
 
 export type State = {

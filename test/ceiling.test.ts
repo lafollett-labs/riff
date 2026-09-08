@@ -162,6 +162,15 @@ describe('a shift that is stuck rather than slow', () => {
     assert.ok(DEFAULT_POLICY.shiftTimeoutMinutes > 27.7 * 1.5);
   });
 
+  test('the run has its own ceiling, and it is not the shift ceiling', () => {
+    // Two different runaways. A shift ceiling catches one that is stuck; it
+    // does nothing about a company left working all night, because every
+    // shift in that night is a healthy three-minute shift.
+    assert.equal(DEFAULT_POLICY.maxSessionHours, 2);
+    assert.equal(readPolicy({ maxSessionHours: 0 }).maxSessionHours, 0);
+    assert.equal(readPolicy({}).maxSessionHours, 2);
+  });
+
   test('zero turns it off, and is not mistaken for unset', () => {
     assert.equal(readPolicy({ shiftTimeoutMinutes: 0 }).shiftTimeoutMinutes, 0);
     assert.equal(readPolicy({}).shiftTimeoutMinutes, 45);

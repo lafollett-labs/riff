@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "riff": {
+      "command": "node",
+      "args": ["src/mcp/server.ts"],
+      "env": { "RIFF_API": "http://localhost:4173" }
+    }
+  }
+}

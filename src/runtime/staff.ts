@@ -862,7 +862,7 @@ export const tick = async (
     if (d.signal.aborted) stop.abort();
     else d.signal.addEventListener('abort', () => stop.abort(), { once: true });
   };
-  const watch = blindWatch();
+  let watch = blindWatch();
   let wentBlind = false;
   /**
    * The clock on the whole shift, not on one leg.
@@ -911,6 +911,7 @@ export const tick = async (
   /** Did the company's own MCP server come up for this leg? */
   let toolsUp = true;
   let toolRetries = 0;
+  let blindRetries = 0;
   /** Null until a usage call answers either way. See limitsReadable. */
   let planVisible: boolean | null = null;
 
@@ -1218,6 +1219,34 @@ export const tick = async (
   let truncated = false;
   let failure = '';
 
+  /**
+   * One cold retry when the permission channel never woke up.
+   *
+   * shift.blind fires only when the gate was asked zero times for a whole
+   * leg while tools were being called — the control stream the CLI uses to
+   * reach canUseTool was dead from the first turn, every tool came back
+   * `Stream closed`, and the model kept asking into the void. Every observed
+   * case was a RESUMED session, which is the same shape as the tools/list
+   * that comes back `Stream closed` at wake, and the same cure: drop the
+   * resume and take the leg again cold. A fresh session brings up a fresh
+   * control stream, so the gate is wired again.
+   *
+   * Guarded on `session`: a leg that went blind with no resume to drop is a
+   * real fault in the channel, not resume flakiness, and must fail loudly
+   * rather than loop. Once, then stop — a second blind leg is a real fault
+   * too. Resetting the watch is the point: it latches at the limit, so the
+   * retry needs a fresh one or it trips on turn one.
+   */
+  const recoverBlind = (): boolean => {
+    if (!(session && blindRetries++ < 1)) return false;
+    ledger.setMeta(`session:${agent.id}`, '');
+    ledger.emit(agent.id, 'session.reset', null, { was: session, why: 'permission channel went blind' });
+    session = null;
+    wentBlind = false;
+    watch = blindWatch();
+    return true;
+  };
+
   for (;;) {
     const left = ceiling - turns;
     if (left <= 0) { truncated = true; break; }
@@ -1247,7 +1276,7 @@ export const tick = async (
       // Leaving the message loop is a normal return, so this never reaches
       // the catch below on its own.
       if (overran) { failure = overranBy(d.shiftTimeoutMs ?? 0); break; }
-      if (wentBlind) { failure = WENT_BLIND; break; }
+      if (wentBlind) { if (recoverBlind()) continue; failure = WENT_BLIND; break; }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
 
@@ -1283,7 +1312,7 @@ export const tick = async (
       // made a busy company look broken and buried the errors that matter.
       if (OUT_OF_TURNS.test(error) || atCeiling) { truncated = true; break; }
 
-      if (wentBlind) { failure = WENT_BLIND; break; }
+      if (wentBlind) { if (recoverBlind()) continue; failure = WENT_BLIND; break; }
 
       failure = error;
       break;

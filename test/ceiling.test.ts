@@ -100,7 +100,7 @@ describe('a leg that aborted itself does not hand the dead controller to the ret
   test('the shift signal is chained on every leg, not only the first', () => {
     // Otherwise a company stopping mid-retry would not reach the new leg.
     const src = staff();
-    const arm = src.slice(src.indexOf('const armStop'), src.indexOf('const watch = blindWatch'));
+    const arm = src.slice(src.indexOf('const armStop'), src.indexOf('let watch = blindWatch'));
     assert.match(arm, /d\.signal\.aborted\) stop\.abort\(\)/);
     assert.match(arm, /addEventListener\('abort'/);
   });
@@ -110,6 +110,56 @@ describe('a leg that aborted itself does not hand the dead controller to the ret
     // stream this way, and the signal chain is the fourth.
     assert.equal((staff().match(/stop\.abort\(\);/g) ?? []).length, 4,
       'three early exits plus the signal chain');
+  });
+});
+
+/**
+ * A blind leg is the permission channel never waking — every observed case
+ * was a resumed session whose control stream was dead from turn one, the gate
+ * asked zero times, every tool back as `Stream closed`. It is the same shape
+ * as a tools/list that never connects, and gets the same cure: drop the
+ * resume and take the leg again cold, once.
+ */
+describe('a blind leg on a resumed session is retried cold, once', () => {
+  const recover = () => {
+    const src = staff();
+    const from = src.indexOf('const recoverBlind');
+    assert.notEqual(from, -1, 'recoverBlind must exist');
+    return src.slice(from, src.indexOf('};', from) + 2);
+  };
+
+  test('the retry only fires with a resume to drop, and only once', () => {
+    // A blind leg that was already cold is a real channel fault, not resume
+    // flakiness, and must fail loudly rather than loop forever.
+    assert.match(recover(), /if \(!\(session && blindRetries\+\+ < 1\)\) return false;/);
+  });
+
+  test('it drops the resume and resets the latched watch', () => {
+    // The watch latches at the limit, so a retry that kept it would trip on
+    // turn one; and the session id is what carries the dead stream forward.
+    const r = recover();
+    assert.match(r, /session = null;/);
+    assert.match(r, /setMeta\(`session:\$\{agent\.id\}`, ''\)/);
+    assert.match(r, /watch = blindWatch\(\);/);
+    assert.match(r, /wentBlind = false;/);
+  });
+
+  test('both blind exits route through the retry before failing', () => {
+    // The normal return from the message loop and the catch both have to try
+    // recovery first — a blind abort can surface either way.
+    assert.equal(
+      (staff().match(/if \(recoverBlind\(\)\) continue; failure = WENT_BLIND; break;/g) ?? []).length,
+      2,
+      'the post-loop path and the catch path both recover before failing');
+  });
+
+  test('recovery is the same shape as the tools-missing retry it borrows from', () => {
+    // Both clear the session meta, null the session, and continue the leg —
+    // the proven pattern, not a new one invented for blindness.
+    const src = staff();
+    const tools = src.slice(src.indexOf('if (!toolsUp) {'), src.indexOf('failure = NO_TOOLS;'));
+    assert.match(tools, /toolRetries\+\+ < 1/);
+    assert.match(tools, /session = null;/);
   });
 });
 

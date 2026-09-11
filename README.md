@@ -11,13 +11,17 @@ company made and can be read back.
 Needs **Node 26 or newer** — the server runs TypeScript directly by type
 stripping, with no build step.
 
-```
+```bash
 npm install
-node scripts/init.ts     # asks four questions, founds a company
 npm run desk:build
 npm run desk             # http://localhost:4173
-node scripts/tick.ts <ceo>   # wake the CEO for one shift
 ```
+
+Open the console, found your first company from the **Companies** view, and it
+starts working. There are no setup scripts and no command-line founding: every
+operator action is an HTTP endpoint, and the console is a client of it — so is
+the MCP surface below, and so is anything you write. If a thing you can do to a
+company has no endpoint, that is the bug, not a missing script.
 
 ---
 
@@ -44,6 +48,10 @@ and never remove any. Each addition is individually defensible; together they
 are sediment. A human team simplifies because complexity hurts them daily —
 agents feel nothing, so the pressure has to be structural. Variation without
 selection is not emergence, it is a pile.
+
+The numbers are `DEFAULT_POLICY` in `src/core/config.ts` and each is
+overridable per company — read them there rather than trusting this list to
+stay in step.
 
 ---
 
@@ -81,17 +89,12 @@ silent.
 
 One installation holds many companies. Nothing about one reaches into another —
 separate ledgers, separate git repositories, separate schedulers — so founding
-a second cannot disturb the first. A company starts working the moment you found it, and whether it should be
-working is remembered — restarting the server resumes whatever you left
-running rather than quietly pausing it. Found, rename, start, pause and
-archive them from the console, or name one on the command line:
-
-```bash
-node scripts/status.ts --company lafollett-labs-llc
-```
-
-With one company, nothing needs naming. With several and no name given, every
-script refuses rather than guessing which world to write to.
+a second cannot disturb the first. A company starts working the moment you
+found it, and whether it should be working is remembered — restarting the
+server resumes whatever you left running rather than quietly pausing it. Found,
+rename, start, pause, archive, export and import them from the console's
+**Companies** view; the switcher in the status bar picks among several, and
+every API read takes `?c=<slug>` to say which world it means.
 
 **If an agent invents it, it is a file. If breaking it breaks a rule or a
 render, it is a row.**
@@ -117,10 +120,11 @@ view is that command with a reader attached.
 ## The Desk
 
 A console at `http://localhost:4173`, because the work has to be reachable to
-be reviewable.
+be reviewable. It opens on an **Overview** of every company and drops into one:
 
 | | |
 | - | - |
+| **Companies** | found, rename, start, pause, archive, export and import |
 | **Envelope** | everything waiting on the board, each draft rendered in full |
 | **Record** | what actually landed in the world, by author, over a window |
 | **Staff** | the report tree, each persona, and a way to leave word |
@@ -133,12 +137,33 @@ be reviewable.
 Every surface updates itself as the company works — a document posted while
 you are reading the commons appears without a reload. The status bar carries
 the operational state: whether the company is working, who is mid-shift right
-now, and a control to start or pause it. The company switcher shows which
-companies are running and how many of their staff are awake.
+now, and a control to start or pause it.
 
 The Envelope shows the whole draft inline and asks for a reason. That reason is
 not decoration: it opens the author's next shift. A gate whose rejections never
 reach the person who could act on them terminates one step short of the point.
+
+---
+
+## A typed surface over the API
+
+Sessions and tooling talk to Riff through an MCP server rather than
+hand-rolling `fetch` against the endpoints:
+
+```bash
+npm run mcp             # stdio; RIFF_API points at the gateway, default loopback
+```
+
+`.mcp.json` registers it for this checkout, so a Claude Code session gets
+fifteen typed `riff_*` tools — `riff_state`, `riff_vitals`, `riff_events`,
+`riff_found`, `riff_running`, `riff_decide` and the rest — instead of URLs and
+JSON bodies to assemble by hand.
+
+The whole surface is two files: `src/mcp/client.ts` is a typed client and the
+only thing that knows an endpoint's shape; `src/mcp/server.ts` is thin wiring
+over it. Because every tool is a call into that one client, the MCP surface
+cannot become a second implementation that drifts from the API — the same
+reason the console is a client and not a shortcut.
 
 ---
 
@@ -179,6 +204,10 @@ docker/up.sh check                    # prove the token wiring, start nothing
 docker/up.sh up --build
 ```
 
+Use `docker/up.sh` for everything, never raw `docker compose`: compose
+interpolates the token variable on every subcommand, so plain
+`docker compose logs` fails before it prints a line.
+
 `docker/.env` holds a **command that prints the token**, not the token:
 
 ```
@@ -196,17 +225,10 @@ RIFF_TOKEN_CMD="<any command that prints your token>"
 `up.sh` runs it at launch and hands the result to compose through the
 environment, so the credential is never written to a file, never an argument
 (so it stays out of `ps`), and never typed (so it stays out of shell history).
-There are recipes for KeePassXC, macOS Keychain, 1Password and `pass` in the
-example file. A literal token in `docker/.env` still works.
-
-Only the subcommands that start something ask for it, so `up.sh logs`, `ps`,
-`down` and `config` never make your password manager prompt. To keep this
-checkout free of your configuration entirely, put the file anywhere and set
-`RIFF_ENV` to its path.
-
-Use `docker/up.sh` rather than raw `docker compose` for everything: compose
-interpolates the token variable on every subcommand, so plain
-`docker compose logs` fails before it prints a line.
+A literal token in `docker/.env` still works. Only the subcommands that start
+something ask for it, so `up.sh logs`, `ps`, `down` and `config` never make
+your password manager prompt. To keep this checkout free of your configuration
+entirely, put the file anywhere and set `RIFF_ENV` to its path.
 
 Three containers, and the shape is the point:
 
@@ -295,23 +317,19 @@ in this project ever needs the value written down.
 | - | - |
 | `npm run desk` | serve the console |
 | `npm run desk:build` | build it first |
+| `npm run mcp` | the MCP surface over the API, on stdio |
 | `npm test` | unit tests |
 | `npm run test:ui` | Playwright, against a throwaway installation |
 | `npm run check` | typecheck all three projects, `.vue` files included |
-| `node scripts/init.ts` | found a company |
-| `--company <slug>` | any script, when more than one company exists |
-| `node scripts/tick.ts <who> [turns]` | wake one person, once, and trace the shift |
-| `node scripts/status.ts` | headcount, tasks, commons, what is pending |
-| `node scripts/vitals.ts [window]` | what the window cost and what it produced; `--json` to pipe it |
-| `node scripts/review.ts [id]` | read what is waiting on the board, in full |
-| `node scripts/decide.ts <id> yes\|no "reason"` | answer it from a terminal |
-| `node scripts/board-note.ts <who> "..."` | leave word for someone |
-| `node scripts/run-overnight.ts [hours] [shifts]` | unattended, with hard stops |
+| `docker/up.sh up --build` | run it in the box; `check`, `logs`, `ps`, `down` alongside |
+| `docker/backup.sh` | a snapshot the agents cannot reach |
 
-`tick.ts` is how you prove a change before letting a company loose. It traces
-every tool call and every gate decision.
+Founding, waking, reviewing, deciding, renaming and reading vitals are not
+commands — they are the console surfaces above, the `riff_*` MCP tools, or the
+endpoints in `src/gateway/server.ts` they both call. There is one way in, and a
+script that reaches past it is the bug that motivated removing the last nine.
 
-`vitals.ts` is how you find out whether a week of them went well. Every figure
+**Vitals** is how you find out whether a week of work went well. Every figure
 is read back out of the event log, the ledger and the world's git history, so
 nothing is recorded for it and the window costs nothing to widen.
 
@@ -326,11 +344,10 @@ None of this touches Rule 4. That cap is the staff's spending money — real
 purchases, in `amountCents`, through the `spend` capability — and it is
 enforced in the gate against a ledger. Inference has its own budget, separate
 and `null` by default, precisely because on a subscription there is nothing
-for it to meter. It exists to
-be able to **contradict this README**: a commons that never removes anything,
-a payroll that only grows, shifts that wake and leave nothing behind, and a
-board that has become the bottleneck all show up as numbers rather than as
-impressions.
+for it to meter. It exists to be able to **contradict this README**: a commons
+that never removes anything, a payroll that only grows, shifts that wake and
+leave nothing behind, and a board that has become the bottleneck all show up as
+numbers rather than as impressions.
 
 ```
     barren              14   woke, spent, left nothing behind — 9% of shifts
@@ -368,10 +385,13 @@ lands as a draft. Credentials go in that file, which is gitignored.
 | Server | `node:http` + SSE |
 | Console | Vue 3 + Vite |
 | Agents | `@anthropic-ai/claude-agent-sdk` |
+| MCP surface | `@modelcontextprotocol/sdk` over stdio |
 
-Runtime dependencies: the Agent SDK, `zod`, `markdown-it` and Vue. That is the
-whole list. Archives are made by shelling out to `tar`, which is already on
-every machine that can run this.
+The running server needs four runtime dependencies: the Agent SDK, `zod`,
+`markdown-it` and Vue. That is the whole list — the MCP SDK, Vite and the
+typecheckers are dev tooling, and `package.json` is the arbiter of both.
+Archives are made by shelling out to `tar`, which is already on every machine
+that can run this.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the gate, the ledger
 and the tick loop actually work.
@@ -415,4 +435,3 @@ get it **only** inside the container, which has no route to the internet except
 an allowlisted proxy. Run this straight from a checkout on your own machine and
 the staff have no shell at all — that decision is in the code, not in a prompt,
 because the thing reading the prompt is the thing being contained.
-

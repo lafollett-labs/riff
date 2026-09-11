@@ -18,9 +18,11 @@
     "desk": "node src/gateway/server.ts",
     "desk:build": "vite build --config desk/vite.config.ts",
     "desk:dev": "vite --config desk/vite.config.ts",
-    "test:ui": "npm run desk:build && playwright test"
+    "test:ui": "npm run desk:build && playwright test",
+    "mcp": "node src/mcp/server.ts"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@playwright/test": "^1.62.1",
     "@types/node": "^26.3.0",
     "@typescript/native-preview": "latest",

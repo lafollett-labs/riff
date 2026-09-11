@@ -60,19 +60,26 @@ env: { ...process.env, HOME: tmp, RIFF_ROOT: join(tmp, '.riff'),
 
 ## The API is the only way in
 
-Every operator action is an HTTP endpoint in `src/gateway/server.ts`, and the
-console is a client of it like anything else. `scripts/` holds build and dev
-utilities only — `check-sfc-types.mjs` and whatever a git hook needs.
+Every operator action is an HTTP endpoint in `src/gateway/server.ts`, and
+everything else is a client of it: the console, the `riff_*` MCP tools, and
+whatever you write. `scripts/` holds build and dev utilities only —
+`check-sfc-types.mjs` and whatever a git hook needs.
 
 ```
 if a thing an operator does has no endpoint:
-    add the endpoint          # not a script that reaches past it
+    add the endpoint          # not a script, not a client that reaches past it
 ```
 
 Nine scripts once did founding, waking, deciding, reviewing, renaming, status
-and vitals against the ledger directly. Each was a second implementation that
-drifted from the API's, and one of them founded a company by editing
-`config.json` under a running server and corrupted its ledger.
+and vitals against the ledger directly — each a second implementation that
+drifted from the API's, and one founded a company by editing `config.json`
+under a running server and corrupted its ledger. They are gone (`e38d7a5`).
+
+Node-side tooling that speaks to the API goes through `src/mcp/client.ts`;
+`src/mcp/server.ts` is thin MCP wiring over it. Reach for that client instead
+of hand-rolling `fetch`, or you have written the tenth script. The browser
+console cannot import it — a Node client pinned to an absolute origin — so it
+keeps its own typed client in `desk/src/api.ts`, one `/api` origin away.
 
 ## Never touch a running company's ledger from the host
 

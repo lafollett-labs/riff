@@ -614,7 +614,11 @@ describe('a container that never got its credentials', () => {
     assert.match(entrypoint, /RIFF_HOLD_PAUSED=1/);
     const server = readFileSync(new URL('../src/gateway/server.ts', import.meta.url), 'utf8');
     assert.match(server, /const held = process\.env\['RIFF_HOLD_PAUSED'\] === '1';/);
-    assert.match(server, /const resumed = new Set\(held \? \[\] : registry\.resume\(\)\);/);
+    // The hold now has two reasons: the entrypoint's no-record-at-deadline flag,
+    // and a delivered-but-dead credential the flag's -s presence test cannot
+    // see (present with its token fields nulled — the 02:54 failure).
+    assert.match(server, /const hold = held \|\| !cred\.live;/);
+    assert.match(server, /const resumed = new Set\(hold \? \[\] : registry\.resume\(\)\);/);
   });
 
   test('up.sh hands the record over however it leaves, not only when it finishes', () => {

@@ -4,6 +4,7 @@ import {
   guessKeeperName, listCompanies, migrateLegacyLayout, resolveSlug,
 } from '../core/config.ts';
 import { Registry, type Company } from '../company/registry.ts';
+import { startCredentialHealth } from '../runtime/credential.ts';
 import { renameAgent } from '../company/rename.ts';
 import { vitals } from '../analytics/vitals.ts';
 import { exportCompany, exportName, importCompany } from '../company/transfer.ts';
@@ -80,6 +81,20 @@ const json = (res: ServerResponse, body: unknown, status = 200): void => {
   const s = JSON.stringify(body);
   res.writeHead(status, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(s) });
   res.end(s);
+};
+
+/**
+ * Refuse a start the delivered credential cannot back, rather than letting the
+ * company wake and fail every shift until someone reads the ledger — which is
+ * exactly how a run limped on through the night on 2026-09-11. Answers 503,
+ * because the fix is a delivery away, not a malformed request, and names it.
+ * A no-op outside the container: see startCredentialHealth.
+ */
+const refuseIfNoCredential = (res: ServerResponse, slug: string): boolean => {
+  const cred = startCredentialHealth();
+  if (cred.live) return false;
+  json(res, { error: `cannot start ${slug}: ${cred.why}`, fix: cred.fix }, 503);
+  return true;
 };
 
 /** An upload of at most this. A company is megabytes; a mistake is gigabytes. */
@@ -310,6 +325,7 @@ const server = createServer(async (req, res) => {
         maxTicks: Number.isFinite(ticks) && ticks > 0 ? Math.round(ticks) : null,
       };
       const run = b['running'] === true;
+      if (run && refuseIfNoCredential(res, target)) return;
       // A pause drains: nobody new is woken and whoever is mid-shift finishes
       // writing. Killing them is `hard`, and it has to be asked for by name.
       //
@@ -711,6 +727,7 @@ const server = createServer(async (req, res) => {
       }
 
       if (p === '/api/open' && method === 'POST') {
+        if (refuseIfNoCredential(res, co.slug)) return;
         await registry.setRunning(co.slug, true);
         return json(res, { running: true });
       }
@@ -731,6 +748,9 @@ const server = createServer(async (req, res) => {
         const b = await readBody(req);
         const who = typeof b['who'] === 'string' && b['who'] ? b['who'] : cfg.ceo.id;
         if (!ledger.getAgent(who)) return json(res, { error: `no agent '${who}'` }, 404);
+        // Only a nudge that would start a stopped scheduler needs a credential;
+        // nudging a company already working changes nothing about its auth.
+        if (!scheduler.running && refuseIfNoCredential(res, co.slug)) return;
         scheduler.nudge(who);
         if (!scheduler.running) await registry.setRunning(co.slug, true);
         return json(res, { waking: who, running: true });
@@ -754,10 +774,18 @@ server.listen(PORT, () => {
   // company it restored would wake, fail to authenticate and spend a shift
   // saying so — the entrypoint sets RIFF_HOLD_PAUSED rather than let that
   // happen, and the operator starts them once the record is delivered.
+  // Two reasons to hold, and they cover the two failures of 2026-09-11. The
+  // entrypoint sets RIFF_HOLD_PAUSED when no record arrived before its deadline
+  // (the record was absent). The credential check catches a record that did
+  // arrive but cannot authenticate — present but with its token fields nulled
+  // by a failed refresh — which the entrypoint's mere -s presence test passes.
   const held = process.env['RIFF_HOLD_PAUSED'] === '1';
-  const resumed = new Set(held ? [] : registry.resume());
-  if (held) {
-    console.log('\n  Held paused: no credentials record at start. '
+  const cred = startCredentialHealth();
+  const hold = held || !cred.live;
+  const resumed = new Set(hold ? [] : registry.resume());
+  if (hold) {
+    const why = cred.live ? 'no credentials record at start' : cred.why;
+    console.log(`\n  Held paused: ${why}. `
       + 'Deliver one with docker/up.sh creds, then start what you want.');
   }
 

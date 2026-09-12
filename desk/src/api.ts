@@ -224,6 +224,16 @@ export const api = {
   /** Kill the shifts in flight. Everything since their last journal is lost. */
   shutdown: () => send<{ running: boolean }>('/api/close', 'POST', { hard: true }),
   wake: (who?: string) => send<{ waking: string }>('/api/wake', 'POST', who ? { who } : {}),
+  /**
+   * A company's secrets. Names only, ever — the value cannot be read back once
+   * written, the same shape as the endpoint. Every call carries the company via
+   * withCompany, so a secret is set for exactly the company on screen.
+   */
+  secrets: () => get<{ names: string[] }>('/api/secrets'),
+  putSecret: (name: string, value: string) =>
+    send<{ ok: boolean; name: string }>('/api/secrets', 'PUT', { name, value }),
+  deleteSecret: (name: string) =>
+    send<{ deleted: boolean }>(`/api/secrets?name=${encodeURIComponent(name)}`, 'DELETE'),
   commons: () => get<{ held: number; ceiling: number; documents: CommonsDoc[] }>('/api/commons'),
   vitals: (window = '7.days') =>
     get<Vitals>(`/api/vitals?window=${encodeURIComponent(window)}`),

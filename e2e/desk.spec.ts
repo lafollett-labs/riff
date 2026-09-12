@@ -1477,3 +1477,33 @@ test('the page itself never scrolls, however long the view is', async ({ page })
   await expect(page.locator('.status')).toBeInViewport();
   expect((await page.locator('.rail').boundingBox())!.y).toBe(railBefore);
 });
+
+test('a secret is set by name, shown by name, and never shown by value', async ({ page }) => {
+  await go(page, 'Secrets');
+
+  await page.locator('.fld.name').fill('OPENROUTER_API_KEY');
+  await page.locator('.fld.val').fill('sk-or-v1-super-secret-value');
+  await page.getByRole('button', { name: 'Save' }).click();
+
+  // It appears by name in the list for this company...
+  const row = page.locator('.item').filter({ hasText: 'OPENROUTER_API_KEY' });
+  await expect(row).toHaveCount(1);
+  // ...the value is nowhere on the page — write-only means it never comes back...
+  await expect(page.locator('main')).not.toContainText('sk-or-v1-super-secret-value');
+  // ...and the field itself is cleared, not merely masked, so nothing lingers.
+  await expect(page.locator('.fld.val')).toHaveValue('');
+  await expect(page.locator('.fld.name')).toHaveValue('');
+
+  // Replace prefills the name and moves focus to the value field.
+  await row.getByRole('button', { name: 'Replace' }).click();
+  await expect(page.locator('.fld.name')).toHaveValue('OPENROUTER_API_KEY');
+  await expect(page.locator('.fld.val')).toBeFocused();
+
+  // Remove asks before it acts, and the confirm takes focus (a keyboard user is
+  // never left with focus on nothing)...
+  await row.getByRole('button', { name: 'Remove' }).click();
+  await expect(row.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  // ...then the name is gone.
+  await row.getByRole('button', { name: 'Yes' }).click();
+  await expect(page.locator('.item').filter({ hasText: 'OPENROUTER_API_KEY' })).toHaveCount(0);
+});

@@ -50,7 +50,11 @@ ENV NODE_ENV=development RIFF_ROOT=/data RIFF_CONTAINED=1 PORT=4173
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
 
 # ------------------------------------------------------------------- runtime
-FROM node:26-slim
+# Named, and the factory service targets it by name. It is NOT the last stage
+# any more — keyproxy is — and an untargeted build resolves to the last stage,
+# so adding keyproxy below silently made an untargeted factory build the proxy
+# instead (the container booted `keyproxy listening on :8890` and no gateway).
+FROM node:26-slim AS runtime
 
 # Build tooling the staff will actually need. Kept deliberately small — add per
 # line of business rather than pre-installing a kitchen sink.

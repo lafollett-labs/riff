@@ -17,6 +17,9 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
+      # Explicit — keyproxy is the last stage, and an untargeted build takes the
+      # last one, which would boot the proxy here instead of the gateway.
+      target: runtime
     # keyproxy gated on health so a shift never races a proxy that is not yet
     # listening; egress only needs to have started.
     depends_on:

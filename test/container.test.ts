@@ -168,6 +168,17 @@ describe('what the factory can reach', () => {
     assert.match(keyproxy, /no-new-privileges:true/);
   });
 
+  test('the factory builds the gateway stage, not the proxy one', () => {
+    // keyproxy is the LAST stage in the Dockerfile, and an untargeted build
+    // resolves to the last stage — so an untargeted factory service boots the
+    // proxy (`keyproxy listening on :8890`, no gateway) and never goes healthy.
+    // The target must be explicit; this is the guard for that exact regression.
+    assert.match(factoryBlock, /target:\s*runtime/, 'the factory must target the runtime stage');
+    const dockerfile = readFileSync('docker/Dockerfile', 'utf8');
+    assert.match(dockerfile, /FROM node:26-slim AS runtime\b/, 'the runtime stage must be named so it can be targeted');
+    assert.match(dockerfile, /CMD \["node", "src\/gateway\/server\.ts"\]/, 'the runtime stage runs the gateway');
+  });
+
   test('its network has no route off the machine', () => {
     assert.match(compose, /walled:\s*\n\s*internal:\s*true/);
     // The factory is on the walled network only; the proxy bridges out.

@@ -157,16 +157,16 @@ onMounted(load);
       <h2>{{ editing ? `Edit ${editing}` : 'Add a route' }}</h2>
       <div class="row">
         <input ref="nameInput" class="srv name" v-model="name" aria-label="Service name"
-               :readonly="!!editing" placeholder="openrouter" spellcheck="false"
+               :readonly="!!editing" placeholder="Service name" spellcheck="false"
                autocapitalize="off" autocomplete="off" @keydown.enter="save" />
         <input ref="upstreamInput" class="srv up" v-model="upstream" aria-label="Upstream URL"
-               placeholder="https://openrouter.ai/api/v1" spellcheck="false"
+               placeholder="Upstream base URL" spellcheck="false"
                autocapitalize="off" autocomplete="off" @keydown.enter="save" />
       </div>
       <div class="row">
         <input class="srv secret" v-model="secret" aria-label="Vault secret name" list="secret-names"
-               placeholder="OPENROUTER_API_KEY" spellcheck="false" autocapitalize="off"
-               autocomplete="off" @keydown.enter="save" />
+               placeholder="Secret name (the identifier, not the value)" spellcheck="false"
+               autocapitalize="off" autocomplete="off" @keydown.enter="save" />
         <datalist id="secret-names">
           <option v-for="s in secretNames" :key="s" :value="s" />
         </datalist>
@@ -175,6 +175,11 @@ onMounted(load);
         </button>
         <button v-if="editing" class="save ghost" @click="reset">Cancel</button>
       </div>
+      <p class="hint faint">
+        Example — name <code>openrouter</code>, upstream
+        <code>https://openrouter.ai/api/v1</code>, secret <code>OPENROUTER_API_KEY</code>
+        (the name you gave it in Secrets, never the <code>sk-…</code> value).
+      </p>
 
       <p v-if="secretUnset" class="warn">
         No secret named <span class="mono">{{ secret.trim() }}</span> is set yet —
@@ -245,7 +250,9 @@ header { margin-bottom: 26px; }
 h1 { font-size: 24px; }
 .who { font-size: 12px; margin-top: 4px; text-transform: none; }
 .note { font-size: 13px; line-height: 1.6; margin-top: 12px; max-width: 64ch; }
-.note code, .rmeta code { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+.note code, .rmeta code, .hint code { font-family: var(--mono, ui-monospace, monospace); font-size: 12px; }
+.hint { font-size: 11px; line-height: 1.6; margin-top: 8px; }
+.hint code { font-size: 11px; }
 h2 { font-size: 12px; letter-spacing: .07em; text-transform: uppercase; color: var(--faint);
   margin: 0 0 12px; font-weight: 600; }
 section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }

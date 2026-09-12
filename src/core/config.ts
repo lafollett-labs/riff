@@ -1,8 +1,9 @@
 import { homedir } from 'node:os';
 import { join, resolve, isAbsolute, sep } from 'node:path';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, statSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { userInfo } from 'node:os';
+import { atomicWriteFileSync } from './atomicwrite.ts';
 
 /**
  * Where the company lives.
@@ -272,7 +273,8 @@ export const validateServiceRoute = (
   // scheme '' is a deliberate choice (inject the raw value), so only a non-string
   // is "absent"; a control char in it would break out of the header line.
   const schemeGiven = typeof route.scheme === 'string';
-  const scheme = schemeGiven ? (route.scheme as string) : '';
+  // Trim like upstream/secret/header; '' (raw injection) stays '' after trimming.
+  const scheme = schemeGiven ? (route.scheme as string).trim() : '';
   if (schemeGiven && CONTROL_CHARS_RE.test(scheme)) {
     return { ok: false, reason: 'scheme must not contain control characters' };
   }
@@ -483,9 +485,9 @@ export const migrateLegacyLayout = (): { moved: string } | null => {
   // The stored config records absolute paths from the old location.
   const moved = readConfigFile(join(target, CONFIG_NAME));
   if (moved) {
-    writeFileSync(join(target, CONFIG_NAME), JSON.stringify({
+    atomicWriteFileSync(join(target, CONFIG_NAME), JSON.stringify({
       ...moved, home: target, worldDir: join(target, 'world'), ledgerPath: join(target, 'ledger.db'),
-    }, null, 2) + '\n', 'utf8');
+    }, null, 2) + '\n');
   }
   return { moved: slug };
 };
@@ -634,7 +636,7 @@ export const setRunningFlag = (home: string, running: boolean): void => {
   const cfg = readConfigFile(path);
   if (!cfg) return;
   const { home: _h, worldDir: _w, ledgerPath: _l, ...rest } = cfg;
-  writeFileSync(path, JSON.stringify({ ...rest, running }, null, 2) + '\n', 'utf8');
+  atomicWriteFileSync(path, JSON.stringify({ ...rest, running }, null, 2) + '\n');
 };
 
 /** Create the company's home and write the config. Idempotent. */
@@ -646,7 +648,7 @@ export const scaffoldConfig = (cfg: RiffConfig): { created: boolean; path: strin
   const path = join(cfg.home, CONFIG_NAME);
   if (existsSync(path)) return { created: false, path };
 
-  writeFileSync(path, JSON.stringify(persisted(cfg), null, 2) + '\n', 'utf8');
+  atomicWriteFileSync(path, JSON.stringify(persisted(cfg), null, 2) + '\n');
   return { created: true, path };
 };
 

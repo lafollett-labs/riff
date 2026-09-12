@@ -800,8 +800,13 @@ const server = createServer(async (req, res) => {
       }
       if (p === '/api/secrets' && method === 'PUT') {
         const b = await readBody(req);
-        const name = typeof b['name'] === 'string' ? b['name'] : '';
-        const value = typeof b['value'] === 'string' ? b['value'] : '';
+        // Trim the name (the identifier check rejects whitespace anyway, so this
+        // is just friendlier). For the value, strip ONLY surrounding CR/LF — the
+        // paste artifact that would inject `sk-…\n` and 401 silently — never all
+        // whitespace: the vault is general-purpose and a credential (a DB
+        // password, say) may legitimately carry edge spaces we must not corrupt.
+        const name = typeof b['name'] === 'string' ? b['name'].trim() : '';
+        const value = typeof b['value'] === 'string' ? b['value'].replace(/^[\r\n]+|[\r\n]+$/g, '') : '';
         try {
           putSecret(co.slug, name, value);
         } catch (e) {
@@ -812,7 +817,7 @@ const server = createServer(async (req, res) => {
         return json(res, { ok: true, name });
       }
       if (p === '/api/secrets' && method === 'DELETE') {
-        const name = url.searchParams.get('name') ?? '';
+        const name = url.searchParams.get('name')?.trim() ?? '';
         return json(res, { deleted: deleteSecret(co.slug, name) });
       }
 
@@ -836,7 +841,7 @@ const server = createServer(async (req, res) => {
         return json(res, { ok: true, name });
       }
       if (p === '/api/services' && method === 'DELETE') {
-        const name = url.searchParams.get('name') ?? '';
+        const name = url.searchParams.get('name')?.trim() ?? '';
         // Object.hasOwn, not `in`: `in` walks the prototype chain, so 'toString'
         // or 'constructor' would report deleted for a route that never existed.
         const existed = Object.hasOwn(cfg.services, name);

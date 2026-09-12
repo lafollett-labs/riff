@@ -79,8 +79,13 @@ const askDelete = async (n: string): Promise<void> => {
 };
 
 const remove = async (n: string): Promise<void> => {
-  try { await api.deleteSecret(n); pendingDelete.value = null; await load(); }
-  catch (e) { err.value = msg(e); }
+  try {
+    await api.deleteSecret(n); pendingDelete.value = null; await load();
+    // The removed row is gone and focus would fall to <body>; put it back on the
+    // form so a keyboard user keeps their place (matches the Services view).
+    await nextTick();
+    nameInput.value?.focus();
+  } catch (e) { err.value = msg(e); }
 };
 
 onMounted(load);

@@ -11,7 +11,8 @@ import {
 } from '../core/config.ts';
 import type { Clock } from '../core/clock.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { atomicWriteFileSync } from '../core/atomicwrite.ts';
 import { dropVault } from '../core/secrets.ts';
 import { join } from 'node:path';
 
@@ -373,7 +374,7 @@ export class Registry {
         ? { services: mergeServices(cfg.services, patch.setService, patch.deleteService) } : {}),
     };
     // Where it lives is the directory's job to say, not the file's.
-    writeFileSync(path, JSON.stringify(persisted(next), null, 2) + '\n', 'utf8');
+    atomicWriteFileSync(path, JSON.stringify(persisted(next), null, 2) + '\n');
     if (structural) {
       if (wasRunning) await this.setRunning(wanted, true);
     } else {

@@ -7,6 +7,7 @@ import {
 import { basename, join } from 'node:path';
 import { companiesDir, companyHome, installRoot, operatorError, persisted, slugId,
   type RiffConfig } from '../core/config.ts';
+import { atomicWriteFileSync } from '../core/atomicwrite.ts';
 
 /**
  * Moving a company between machines.
@@ -244,7 +245,7 @@ export const importCompany = (
       },
       running: false,
     };
-    writeFileSync(join(work, 'config.json'), JSON.stringify(persisted(next), null, 2) + '\n', 'utf8');
+    atomicWriteFileSync(join(work, 'config.json'), JSON.stringify(persisted(next), null, 2) + '\n');
     rmSync(manifestPath, { force: true });
 
     // Belt and braces: an archive written before exports learned to strip

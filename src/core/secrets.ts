@@ -1,7 +1,8 @@
 import { randomBytes, createCipheriv, createDecipheriv } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
+import { existsSync, readFileSync, mkdirSync, chmodSync, rmSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { installRoot, slugId, operatorError } from './config.ts';
+import { atomicWriteFileSync } from './atomicwrite.ts';
 
 /**
  * Per-company secrets the agents can USE but never POSSESS.
@@ -58,8 +59,9 @@ export const writeSecret600 = (path: string, contents: string): void => {
   const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   chmodSync(dir, 0o700);
-  writeFileSync(path, contents, { mode: 0o600 });
-  chmodSync(path, 0o600);
+  // Atomic: the proxy reads a vault fresh on every request, so a putSecret that
+  // truncated it in place could be read half-written and fail to decrypt.
+  atomicWriteFileSync(path, contents, 0o600);
 };
 
 export const loadOrCreateMasterKey = (): Buffer => {

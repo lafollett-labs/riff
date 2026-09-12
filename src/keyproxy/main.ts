@@ -114,6 +114,19 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
 
   const target = upstreamURL(route, rest, url.search);
 
+  // Defense in depth beyond validateServiceRoute (enforced on the API path but
+  // bypassed by a hand-edited or imported config): never inject a real key onto a
+  // plaintext hop. https anywhere; http ONLY to loopback (same-host test and dev
+  // upstreams). Anything else — a stray ftp://, an http:// to a real host — is
+  // refused here rather than transmitted or thrown on downstream. URL.hostname
+  // returns IPv6 bracketed, so the loopback set matches the bracketed form; the
+  // numeric shorthands (127.1, 0x7f000001) normalise to 127.0.0.1 already.
+  const loopback = ['127.0.0.1', '[::1]', 'localhost'].includes(target.hostname);
+  if (!(target.protocol === 'https:' || (target.protocol === 'http:' && loopback))) {
+    console.log(`keyproxy ${scope.company} ${service} -> ${target.host} plaintext-refused`);
+    return send(res, 502, 'refusing to send a credential to a non-https upstream');
+  }
+
   // Copy the caller's headers minus the ones we must not pass, then inject the
   // credential on the route's header. Default is a bearer Authorization; a
   // service wanting a raw header value sets an empty scheme.

@@ -34,6 +34,14 @@ describe('a service route is validated before it can reach config', () => {
     assert.equal(v.route.scheme, '');
   });
 
+  test('surrounding whitespace is trimmed from upstream, secret, header and scheme', () => {
+    const v = validateServiceRoute('svc', {
+      upstream: '  https://a.test  ', secret: '  KEY  ', header: '  X-Api-Key  ', scheme: '  Token  ',
+    });
+    assert.ok(v.ok);
+    assert.deepEqual(v.route, { upstream: 'https://a.test', secret: 'KEY', header: 'X-Api-Key', scheme: 'Token' });
+  });
+
   test('a non-https upstream is refused — the key must never ride a plaintext hop', () => {
     const v = validateServiceRoute('svc', { upstream: 'http://a.test', secret: 'KEY' });
     assert.equal(v.ok, false);

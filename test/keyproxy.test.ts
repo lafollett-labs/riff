@@ -94,6 +94,7 @@ beforeEach(async () => {
       openrouter: { upstream: `http://127.0.0.1:${upPort}/api/v1`, secret: 'OPENROUTER_API_KEY' },
       custom: { upstream: `http://127.0.0.1:${upPort}/api`, secret: 'CUSTOM_KEY', header: 'x-api-key', scheme: '' },
       stall: { upstream: `http://127.0.0.1:${blackholePort}/`, secret: 'OPENROUTER_API_KEY' },
+      plaintext: { upstream: 'http://example.com/', secret: 'OPENROUTER_API_KEY' },
     },
   }));
   secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY');
@@ -197,6 +198,16 @@ describe('nothing gets through without a valid, scoped, declared route', () => {
       assert.equal(r.status, 404, probe);
       assert.equal(seen, null);
     }
+  });
+
+  test('a non-https, non-loopback upstream is refused before the key is ever sent (KP-4)', async () => {
+    // validateServiceRoute enforces https on the API path, but a hand-edited or
+    // imported config can carry an http upstream; the proxy re-asserts it so a
+    // real key never rides a plaintext hop. The refusal is pre-connection.
+    const token = proxytoken.mintScopedToken('shipit', 3600);
+    const r = await call('/svc/plaintext/x', token);
+    assert.equal(r.status, 502);
+    assert.equal(seen, null, 'the upstream must never be contacted');
   });
 
   test('a declared route whose secret is missing is 502, not an unauthenticated call', async () => {

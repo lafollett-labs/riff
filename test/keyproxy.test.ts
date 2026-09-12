@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, type Server, type IncomingMessage } from 'node:http';
+import { createServer, get as httpGet, type Server, type IncomingMessage } from 'node:http';
+import { gzipSync, gunzipSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
 
 /**
@@ -21,6 +22,7 @@ let keyproxy: typeof import('../src/keyproxy/main.ts');
 let upstream: Server;
 let proxy: Server;
 let attacker: Server;
+let blackhole: Server;
 let attackerHits: number;
 let seen: { path: string; auth: string | undefined; token: string | undefined; body: string } | null;
 
@@ -61,10 +63,23 @@ beforeEach(async () => {
       res.end();
       return;
     }
+    if ((req.url ?? '').includes('gzip')) {
+      // A real upstream (OpenRouter) gzips its JSON. The proxy is a byte pipe, so
+      // it must forward the gzip body AND content-encoding untouched for the
+      // client to decode — never decode-and-reframe it.
+      res.writeHead(200, { 'content-type': 'application/json', 'content-encoding': 'gzip' });
+      res.end(gzipSync(JSON.stringify({ ok: true, zipped: true })));
+      return;
+    }
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ ok: true }));
   });
   const upPort = await listen(upstream);
+
+  // Accepts the TCP connection and never answers — undici's fetch bounded this
+  // with a default timeout; node:http does not, so the proxy must impose its own.
+  blackhole = createServer(() => { /* deliberately never responds */ });
+  const blackholePort = await listen(blackhole);
 
   // One company. Two services: the default bearer-Authorization route, and one
   // whose credential is injected on a CUSTOM header (X-Api-Key) — the case
@@ -78,6 +93,7 @@ beforeEach(async () => {
     services: {
       openrouter: { upstream: `http://127.0.0.1:${upPort}/api/v1`, secret: 'OPENROUTER_API_KEY' },
       custom: { upstream: `http://127.0.0.1:${upPort}/api`, secret: 'CUSTOM_KEY', header: 'x-api-key', scheme: '' },
+      stall: { upstream: `http://127.0.0.1:${blackholePort}/`, secret: 'OPENROUTER_API_KEY' },
     },
   }));
   secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY');
@@ -93,6 +109,7 @@ afterEach(async () => {
   await close(proxy);
   await close(upstream);
   await close(attacker);
+  await close(blackhole);
   rmSync(root, { recursive: true, force: true });
   delete process.env['RIFF_ROOT'];
 });
@@ -114,6 +131,32 @@ describe('the real key reaches the upstream and the scoped token does not', () =
     assert.equal(seen?.body, '{"model":"x"}');
     // The capability the caller held never left the proxy.
     assert.ok(!(seen?.auth ?? '').includes(token));
+  });
+
+  test('a gzip-encoded upstream response is passed through untouched, for the client to decode', async () => {
+    // The proxy is a byte pipe: it must forward the upstream's gzip body AND its
+    // content-encoding header unchanged, never decoding (it never reads the body).
+    // Read the raw bytes off the socket — fetch would auto-decode and hide the
+    // proof. Before passthrough the proxy decoded and forwarded a stale header,
+    // and a client gunzipping plaintext threw "incorrect header check".
+    const token = proxytoken.mintScopedToken('shipit', 3600);
+    const got = await new Promise<{ status: number; encoding: string | undefined; raw: Buffer }>((resolve, reject) => {
+      const r = httpGet({ host: '127.0.0.1', port: port(proxy), path: '/svc/openrouter/gzip',
+        headers: { authorization: `Bearer ${token}` } }, (resp) => {
+        const chunks: Buffer[] = [];
+        resp.on('data', (c: Buffer) => chunks.push(c));
+        resp.on('end', () => resolve({
+          status: resp.statusCode ?? 0,
+          encoding: resp.headers['content-encoding'] as string | undefined,
+          raw: Buffer.concat(chunks),
+        }));
+      });
+      r.on('error', reject);
+    });
+    assert.equal(got.status, 200);
+    assert.equal(got.encoding, 'gzip', 'the upstream encoding must be forwarded, not stripped');
+    assert.equal(got.raw[0], 0x1f); assert.equal(got.raw[1], 0x8b); // still gzip on the wire
+    assert.deepEqual(JSON.parse(gunzipSync(got.raw).toString()), { ok: true, zipped: true });
   });
 
   test('the query string is preserved', async () => {
@@ -204,5 +247,21 @@ describe('the request cannot steer the proxy off its declared host', () => {
     const r = await call('/svc/openrouter/../../../etc/passwd', token);
     assert.equal(r.status, 404);
     assert.equal(seen, null);
+  });
+});
+
+describe('the shared proxy stays available when an upstream misbehaves', () => {
+  test('a stalling upstream is bounded and fails closed, not left to hang (KP-1)', async () => {
+    // node:http has no default upstream timeout, so without a bound the request
+    // hangs forever and open sockets accrue on the shared proxy. Shorten the
+    // deadline for the test; a blackhole upstream accepts TCP and never answers.
+    process.env['KEYPROXY_UPSTREAM_TIMEOUT_MS'] = '300';
+    try {
+      const token = proxytoken.mintScopedToken('shipit', 3600);
+      const r = await call('/svc/stall/x', token);
+      assert.equal(r.status, 502, 'the timeout must turn a stall into a closed failure');
+    } finally {
+      delete process.env['KEYPROXY_UPSTREAM_TIMEOUT_MS'];
+    }
   });
 });

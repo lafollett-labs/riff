@@ -1,5 +1,6 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
-import { Readable } from 'node:stream';
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse,
+  type OutgoingHttpHeaders } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import { resolveConfig, type ServiceRoute } from '../core/config.ts';
 import { getSecret } from '../core/secrets.ts';
 import { verifyScopedToken } from '../core/proxytoken.ts';
@@ -28,9 +29,13 @@ import { verifyScopedToken } from '../core/proxytoken.ts';
 const PORT = Number(process.env['KEYPROXY_PORT'] ?? 8890);
 const MAX_BODY = 10 * 1024 * 1024; // API calls, not uploads.
 
-// Headers we never copy onward: the token (replaced), hop-by-hop framing, and
-// content-length (fetch recomputes it). The injection header is dropped too, so
-// a caller cannot smuggle in its own value on the header we are about to set.
+// Headers we never copy onward, in either direction: the token (replaced on the
+// request, absent on the response), hop-by-hop framing, and content-length and
+// transfer-encoding (this hop reframes its own body). The injection header is
+// dropped from the request too, so a caller cannot smuggle its own value in on
+// the header we are about to set. content-encoding is NOT here: this is a byte
+// pipe — the proxy never reads or decodes the body, so whatever encoding the
+// upstream chose is forwarded untouched for the client to decode.
 const HOP_BY_HOP = new Set([
   'host', 'authorization', 'connection', 'keep-alive', 'proxy-authorization',
   'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'content-length',
@@ -112,62 +117,91 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
   // Copy the caller's headers minus the ones we must not pass, then inject the
   // credential on the route's header. Default is a bearer Authorization; a
   // service wanting a raw header value sets an empty scheme.
-  const headers = new Headers();
+  const headers: OutgoingHttpHeaders = {};
   const injectHeader = (route.header ?? 'authorization').toLowerCase();
   for (const [k, v] of Object.entries(req.headers)) {
     if (v == null) continue;
     const lk = k.toLowerCase();
     if (HOP_BY_HOP.has(lk) || lk === injectHeader) continue;
-    headers.set(k, Array.isArray(v) ? v.join(', ') : v);
+    headers[lk] = v; // IncomingMessage keys are already lowercase
   }
   const scheme = route.scheme ?? 'Bearer';
-  headers.set(injectHeader, scheme ? `${scheme} ${key}` : key);
+  headers[injectHeader] = scheme ? `${scheme} ${key}` : key;
 
   const method = req.method ?? 'GET';
   const hasBody = method !== 'GET' && method !== 'HEAD';
   const body = hasBody ? await readBody(req) : undefined;
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(target, {
-      method,
-      headers,
-      // NEVER follow a redirect. fetch defaults to 'follow', and undici does
-      // not strip a CUSTOM injection header (an X-Api-Key route, say) across a
-      // cross-origin hop — so an open redirect on the declared upstream would
-      // hand the real key to the redirect's host. Manual hands the 3xx straight
-      // back to the caller instead; the key is injected once, to the declared
-      // host, and never re-sent.
-      redirect: 'manual',
-      ...(body && body.length ? { body } : {}),
+  // A byte pipe over a node builtin, NOT fetch: the keyproxy image ships no
+  // node_modules, so undici's request() is unavailable, and fetch would decode
+  // the body (which this proxy never reads) only to force us to re-frame it.
+  // node:http(s).request forwards the body untouched and — unlike fetch — never
+  // follows a redirect, so the key is injected once, to the declared host, and
+  // an open redirect can never carry it onward. https validates the upstream
+  // cert against the image's ca-certificates; the validator holds upstream to
+  // https, and http is here only for a same-host test upstream.
+  const doRequest = target.protocol === 'https:' ? httpsRequest : httpRequest;
+  await new Promise<void>((resolve) => {
+    // Answer the caller once, then settle the wait. Guarded so a second terminal
+    // event (a timeout that fires as the body ends, a client abort racing an
+    // upstream error) can never write twice or throw on a spent response.
+    const fail = (code: number, msg: string): void => {
+      if (!res.headersSent && !res.destroyed) send(res, code, msg);
+      else if (!res.writableEnded && !res.destroyed) res.end();
+      resolve();
+    };
+    const upstreamReq = doRequest(target, { method, headers }, (up) => {
+      // The whole callback is guarded: it runs outside the Promise executor, so a
+      // throw here (a header value writeHead rejects) would otherwise escape both
+      // this Promise and handle()'s catch — an uncaught hang, not a 500.
+      try {
+        const status = up.statusCode ?? 502;
+        // A drain can surface a stream error (an upstream that closes mid-body);
+        // catch it so it can never become an unhandled 'error' on a future runtime.
+        up.on('error', () => fail(502, 'upstream stream error'));
+        // A redirect is refused, not chased and not passed on. Nothing follows it
+        // (the core client does not auto-follow), so the injected key never reaches
+        // the redirect's host; we also do not forward the Location, closing the
+        // caller chasing it. Refuse on the header's PRESENCE (even empty), matching
+        // the old redirect:'manual' guard. A model API does not redirect a call.
+        if (status >= 300 && status < 400 && 'location' in up.headers) {
+          up.resume(); // drain so the socket can be reused/closed
+          console.log(`keyproxy ${scope.company} ${service} -> ${target.host} redirect-refused ${status}`);
+          return fail(502, 'upstream attempted a redirect, which is not followed');
+        }
+        // One audit line, and the key is not in it.
+        console.log(`keyproxy ${scope.company} ${service} -> ${target.host} ${status}`);
+        const outHeaders: OutgoingHttpHeaders = {};
+        for (const [k, v] of Object.entries(up.headers)) {
+          if (v == null || HOP_BY_HOP.has(k.toLowerCase())) continue;
+          outHeaders[k] = v;
+        }
+        res.writeHead(status, outHeaders);
+        up.pipe(res);
+        up.on('end', () => resolve());
+      } catch (e) {
+        up.resume(); // don't leave the upstream socket hanging
+        console.log(`keyproxy ${scope.company} ${service} -> ${target.host} relay-error`);
+        fail(502, 'relay error');
+      }
     });
-  } catch (e) {
-    console.log(`keyproxy ${scope.company} ${service} -> ${target.host} transport-error`);
-    return send(res, 502, `upstream unreachable: ${e instanceof Error ? e.message : String(e)}`);
-  }
-
-  // A redirect is refused, not chased and not passed on. `redirect: 'manual'`
-  // stops undici from following it (which would re-send the injected key to the
-  // redirect's host — the exfil path this guards). It hands back the real 3xx
-  // with its Location, so the remaining risk is the CALLER chasing it; we close
-  // that too by refusing rather than forwarding the Location. A model API does
-  // not legitimately redirect a completion, so failing closed loses nothing.
-  if (upstream.status >= 300 && upstream.status < 400 && upstream.headers.has('location')) {
-    console.log(`keyproxy ${scope.company} ${service} -> ${target.host} redirect-refused ${upstream.status}`);
-    return send(res, 502, 'upstream attempted a redirect, which is not followed');
-  }
-
-  // One audit line, and the key is not in it.
-  console.log(`keyproxy ${scope.company} ${service} -> ${target.host} ${upstream.status}`);
-
-  const outHeaders: Record<string, string> = {};
-  upstream.headers.forEach((v, k) => { if (!HOP_BY_HOP.has(k.toLowerCase())) outHeaders[k] = v; });
-  res.writeHead(upstream.status, outHeaders);
-  if (upstream.body) {
-    Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]).pipe(res);
-  } else {
-    res.end();
-  }
+    upstreamReq.on('error', (e) => {
+      console.log(`keyproxy ${scope.company} ${service} -> ${target.host} transport-error`);
+      fail(502, `upstream unreachable: ${e instanceof Error ? e.message : String(e)}`);
+    });
+    // node:http has NO default timeout (undici's fetch applied ~300s), so a
+    // stalling upstream would hang this request forever — and on the SHARED
+    // keyproxy, stalled requests pile up open sockets until it serves no company.
+    // Bound it and fail closed; destroy() lands in the 'error' handler above.
+    // Read here, not at module load, so a test can shorten it without a reimport.
+    const timeoutMs = Number(process.env['KEYPROXY_UPSTREAM_TIMEOUT_MS'] ?? 120_000);
+    upstreamReq.setTimeout(timeoutMs, () => upstreamReq.destroy(new Error('upstream timeout')));
+    // A killed shift (or any client disconnect) must release the upstream socket
+    // too, or the same handle leak accrues from the caller side.
+    res.on('close', () => { if (!res.writableEnded) upstreamReq.destroy(); });
+    if (body && body.length) upstreamReq.end(body);
+    else upstreamReq.end();
+  });
 };
 
 export const start = (port = PORT): ReturnType<typeof createServer> => {

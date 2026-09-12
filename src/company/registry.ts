@@ -7,7 +7,7 @@ import { found } from './genesis.ts';
 import {
   archiveDir, companyHome, DEFAULT_POLICY, listCompanies, persisted, readPolicy,
   resolveConfig, scaffoldConfig, setRunningFlag, slugId,
-  type CompanyPolicy, type CompanyRef, type RiffConfig,
+  type CompanyPolicy, type CompanyRef, type RiffConfig, type ServiceRoute,
 } from '../core/config.ts';
 import type { Clock } from '../core/clock.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
@@ -35,6 +35,22 @@ export type Company = {
   gate: Gate;
   constitution: Constitution;
   scheduler: Scheduler;
+};
+
+/**
+ * Apply a single route set/remove onto a company's existing routes. update()
+ * calls this against the config it just read from disk, so two concurrent writes
+ * compose rather than the second overwriting the first.
+ */
+const mergeServices = (
+  existing: Record<string, ServiceRoute> | undefined,
+  set?: { name: string; route: ServiceRoute },
+  remove?: string,
+): Record<string, ServiceRoute> => {
+  const next = { ...(existing ?? {}) };
+  if (set) next[set.name] = set.route;
+  if (remove) delete next[remove];
+  return next;
 };
 
 export class Registry {
@@ -296,7 +312,13 @@ export class Registry {
   async update(
     slug: string,
     patch: { name?: string; business?: string; slug?: string; policy?: Partial<CompanyPolicy>;
-             release?: 'none' | 'bundle' },
+             release?: 'none' | 'bundle';
+             // A service route is a DELTA, not a whole map: the caller names the
+             // one route to set or remove and update() merges it against the
+             // config it reads fresh below. A caller that instead computed the
+             // full map from its own in-memory snapshot would drop a concurrent
+             // write — two sets racing, the second overwriting the first.
+             setService?: { name: string; route: ServiceRoute }; deleteService?: string },
   ): Promise<{ ok: true; slug: string } | { ok: false; reason: string }> {
     if (!this.has(slug)) return { ok: false, reason: `no company '${slug}'` };
 
@@ -339,6 +361,16 @@ export class Registry {
       // installation — which is how a live company got its directory moved
       // out from under an open ledger.
       ...(patch.release ? { release: patch.release } : {}),
+      // Merged against the config just read from disk, so concurrent route
+      // writes compose instead of clobbering. Deliberately NOT in the
+      // `structural` set below: the proxy reads a company's routes fresh from
+      // disk on every request, so a new route is live the moment this file is
+      // written — no restart, and nothing that could abort a shift mid-write the
+      // way a rebuild does. A company already running picks the route's injected
+      // token-env up at its next start, since the scheduler reads services once
+      // at construction; routes are normally set while a company is stopped.
+      ...((patch.setService || patch.deleteService)
+        ? { services: mergeServices(cfg.services, patch.setService, patch.deleteService) } : {}),
     };
     // Where it lives is the directory's job to say, not the file's.
     writeFileSync(path, JSON.stringify(persisted(next), null, 2) + '\n', 'utf8');

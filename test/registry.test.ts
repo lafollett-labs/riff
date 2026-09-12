@@ -129,6 +129,46 @@ describe('managing a company', () => {
     assert.equal(r['ledgerOpens'], true, 'the moved ledger must still open');
   });
 
+  test('a service route is a delta that composes, is read back, and never moves the folder', () => {
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { resolveConfig } = await import('${process.cwd()}/src/core/config.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const { readFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const r = new Registry(systemClock);
+      const a = r.found({ name: 'Alpha Works', business: '', ceo: 'Ash', chair: 'Cali' });
+      if (!a.ok) throw new Error('found failed');
+      const openrouter = { upstream: 'https://openrouter.ai/api/v1', secret: 'OPENROUTER_API_KEY' };
+      const res = await r.update('alpha-works', { setService: { name: 'openrouter', route: openrouter } });
+      // A second set must COMPOSE, not replace — this is the lost-update guard:
+      // the delta merges against the config on disk, so the first route survives.
+      await r.update('alpha-works', { setService: { name: 'other', route: { upstream: 'https://b.test', secret: 'B_KEY' } } });
+      // The proxy reads config from disk, so what is on disk is what matters.
+      const afterSets = JSON.parse(readFileSync(join(a.company.cfg.home, 'config.json'), 'utf8')).services;
+      // Removing one leaves the other untouched.
+      await r.update('alpha-works', { deleteService: 'other' });
+      const resolved = resolveConfig(process.cwd(), 'alpha-works').services;
+      const onDisk = JSON.parse(readFileSync(join(a.company.cfg.home, 'config.json'), 'utf8'));
+      console.log(JSON.stringify({
+        res, slug: r.list()[0].slug, afterSets, resolved,
+        // config.json must never carry its own derived paths, services or not.
+        leakedHome: 'home' in onDisk,
+      }));
+    `);
+    const r = JSON.parse(out) as Record<string, unknown>;
+    assert.deepEqual(r['res'], { ok: true, slug: 'alpha-works' });
+    assert.equal(r['slug'], 'alpha-works', 'setting a route must not move the folder');
+    assert.deepEqual(r['afterSets'], {
+      openrouter: { upstream: 'https://openrouter.ai/api/v1', secret: 'OPENROUTER_API_KEY' },
+      other: { upstream: 'https://b.test', secret: 'B_KEY' },
+    }, 'a second set must compose with the first, not clobber it');
+    assert.deepEqual(r['resolved'], {
+      openrouter: { upstream: 'https://openrouter.ai/api/v1', secret: 'OPENROUTER_API_KEY' },
+    }, 'deleting one route must leave the others');
+    assert.equal(r['leakedHome'], false);
+  });
+
   test('archiving moves the company aside and never deletes it', () => {
     const out = run(`
       const { Registry } = await import('${process.cwd()}/src/company/registry.ts');

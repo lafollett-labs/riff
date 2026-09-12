@@ -208,6 +208,80 @@ export type ServiceRoute = {
   scheme?: string;
 };
 
+/**
+ * A service name becomes a path segment at the proxy — `/svc/<name>/…` — so it
+ * is letters, digits, dash and underscore, nothing that needs escaping or could
+ * climb the path.
+ */
+export const SERVICE_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+// The regex admits names like `constructor` and `toString`. The proxy looks a
+// route up as `services[name]`, which for an undeclared service of one of these
+// names returns an inherited Object.prototype member — truthy — and so answers
+// a probe differently from a genuinely-unknown service, leaking that the name is
+// special. The proxy also guards with Object.hasOwn; rejecting the names here is
+// the matching half, so such a route can never be stored in the first place.
+const RESERVED_SERVICE_NAMES = new Set([
+  '__proto__', 'prototype', 'constructor', 'hasOwnProperty', 'isPrototypeOf',
+  'propertyIsEnumerable', 'toLocaleString', 'toString', 'valueOf',
+]);
+// RFC 7230 header-name tokens, and the environment-identifier rule secrets.ts
+// enforces on the secret this route names.
+const HEADER_NAME_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+// C0 controls, DEL, and C1 controls — none belong in a header value, and
+// rejecting them here fails the route at the 400 gate rather than as a 500 when
+// undici refuses the header downstream. CR/LF are the injection bytes; the rest
+// are caught for the same reason the header name is held to a strict token set.
+const CONTROL_CHARS_RE = /[ --]/;
+
+/**
+ * Validate and normalise a service route before it is written to a company's
+ * config. The credential this route names is decrypted in the proxy and sent to
+ * `upstream` over the open internet, so the one hard line is that upstream must
+ * be https — this is the single place the system would otherwise hand a real key
+ * to a plaintext hop. A bad route is the operator's error (400), never a 500.
+ */
+export const validateServiceRoute = (
+  name: string,
+  route: { upstream?: unknown; secret?: unknown; header?: unknown; scheme?: unknown },
+): { ok: true; route: ServiceRoute } | { ok: false; reason: string } => {
+  if (!SERVICE_NAME_RE.test(name)) {
+    return { ok: false, reason: `service name ${JSON.stringify(name)} must be a single path segment: letters, digits, dash or underscore` };
+  }
+  if (RESERVED_SERVICE_NAMES.has(name)) {
+    return { ok: false, reason: `service name ${JSON.stringify(name)} is reserved` };
+  }
+  const upstream = typeof route.upstream === 'string' ? route.upstream.trim() : '';
+  let u: URL;
+  try { u = new URL(upstream); }
+  catch { return { ok: false, reason: 'upstream must be an absolute URL, e.g. https://openrouter.ai/api/v1' }; }
+  if (u.protocol !== 'https:') {
+    return { ok: false, reason: 'upstream must be https — the proxy injects a real key and will not send it over a plaintext hop' };
+  }
+  if (u.username || u.password) {
+    return { ok: false, reason: 'upstream must not embed credentials; the key comes from the vault, named by `secret`' };
+  }
+  const secret = typeof route.secret === 'string' ? route.secret.trim() : '';
+  if (!ENV_NAME_RE.test(secret)) {
+    return { ok: false, reason: 'secret must name a vault secret: a valid environment identifier (letter or underscore, then letters, digits, underscores)' };
+  }
+  const header = typeof route.header === 'string' ? route.header.trim() : '';
+  if (header && !HEADER_NAME_RE.test(header)) {
+    return { ok: false, reason: `header ${JSON.stringify(header)} is not a valid HTTP header name` };
+  }
+  // scheme '' is a deliberate choice (inject the raw value), so only a non-string
+  // is "absent"; a control char in it would break out of the header line.
+  const schemeGiven = typeof route.scheme === 'string';
+  const scheme = schemeGiven ? (route.scheme as string) : '';
+  if (schemeGiven && CONTROL_CHARS_RE.test(scheme)) {
+    return { ok: false, reason: 'scheme must not contain control characters' };
+  }
+  const out: ServiceRoute = { upstream, secret };
+  if (header) out.header = header;
+  if (schemeGiven) out.scheme = scheme;
+  return { ok: true, route: out };
+};
+
 export type RiffConfig = {
   version: 1;
   /**

@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { systemClock } from '../core/clock.ts';
 import {
-  guessKeeperName, listCompanies, migrateLegacyLayout, resolveSlug,
+  guessKeeperName, listCompanies, migrateLegacyLayout, resolveSlug, validateServiceRoute,
 } from '../core/config.ts';
 import { Registry, type Company } from '../company/registry.ts';
 import { startCredentialHealth } from '../runtime/credential.ts';
@@ -814,6 +814,37 @@ const server = createServer(async (req, res) => {
       if (p === '/api/secrets' && method === 'DELETE') {
         const name = url.searchParams.get('name') ?? '';
         return json(res, { deleted: deleteSecret(co.slug, name) });
+      }
+
+      // A company's service routes: which named service the injecting proxy
+      // forwards to which upstream, authenticated by which vault secret. Unlike
+      // the secrets themselves these hold NO value — a secret NAME, a host, a
+      // header — so the whole map is safe to read back. A route points the proxy
+      // at a host and names the key to inject; the value lives only in the vault.
+      if (p === '/api/services' && method === 'GET') {
+        return json(res, { services: cfg.services });
+      }
+      if (p === '/api/services' && method === 'PUT') {
+        const b = await readBody(req);
+        const name = typeof b['name'] === 'string' ? b['name'].trim() : '';
+        const v = validateServiceRoute(name, b);
+        if (!v.ok) return json(res, { error: v.reason }, 400);
+        // A delta, not the whole map: update() merges it against the config it
+        // reads fresh, so two concurrent writes compose instead of clobbering.
+        const r = await registry.update(co.slug, { setService: { name, route: v.route } });
+        if (!r.ok) return json(res, { error: r.reason }, 409);
+        return json(res, { ok: true, name });
+      }
+      if (p === '/api/services' && method === 'DELETE') {
+        const name = url.searchParams.get('name') ?? '';
+        // Object.hasOwn, not `in`: `in` walks the prototype chain, so 'toString'
+        // or 'constructor' would report deleted for a route that never existed.
+        const existed = Object.hasOwn(cfg.services, name);
+        if (existed) {
+          const r = await registry.update(co.slug, { deleteService: name });
+          if (!r.ok) return json(res, { error: r.reason }, 409);
+        }
+        return json(res, { deleted: existed });
       }
     }
 

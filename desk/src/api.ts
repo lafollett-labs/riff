@@ -3,7 +3,8 @@
 // and ships a module that dies in the browser. Vite says so in a warning and
 // exits 0 anyway, so scripts/check-sfc-types.mjs enforces it instead.
 import type { Vitals, Trend } from '../../src/analytics/types.ts';
-import type { CompanyRef as ConfigCompanyRef, CompanyPolicy } from '../../src/core/config.ts';
+import type { CompanyRef as ConfigCompanyRef, CompanyPolicy, ServiceRoute } from '../../src/core/config.ts';
+export type { ServiceRoute };
 export type { Vitals, Trend };
 
 /** Everything the Desk knows, it knows from these. */
@@ -234,6 +235,17 @@ export const api = {
     send<{ ok: boolean; name: string }>('/api/secrets', 'PUT', { name, value }),
   deleteSecret: (name: string) =>
     send<{ deleted: boolean }>(`/api/secrets?name=${encodeURIComponent(name)}`, 'DELETE'),
+  /**
+   * A company's service routes — where the injecting proxy forwards a named
+   * service and which vault secret it injects. These carry no value (a secret
+   * NAME, a host, a header), so unlike secrets the whole map reads back. Set a
+   * route with the secret name a product's `api_key_env` will point at.
+   */
+  services: () => get<{ services: Record<string, ServiceRoute> }>('/api/services'),
+  putService: (name: string, route: ServiceRoute) =>
+    send<{ ok: boolean; name: string }>('/api/services', 'PUT', { name, ...route }),
+  deleteService: (name: string) =>
+    send<{ deleted: boolean }>(`/api/services?name=${encodeURIComponent(name)}`, 'DELETE'),
   commons: () => get<{ held: number; ceiling: number; documents: CommonsDoc[] }>('/api/commons'),
   vitals: (window = '7.days') =>
     get<Vitals>(`/api/vitals?window=${encodeURIComponent(window)}`),

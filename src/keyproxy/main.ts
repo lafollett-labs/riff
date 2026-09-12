@@ -58,7 +58,11 @@ const routeFor = (company: string, service: string): ServiceRoute | null => {
   // resolveConfig with an explicit slug reads exactly that company's config;
   // services defaults to {} for a company that declares none.
   const services = resolveConfig(process.cwd(), company).services;
-  return services[service] ?? null;
+  // Object.hasOwn, never `services[service]` alone: a probe for `constructor` or
+  // `toString` would otherwise resolve to an inherited Object.prototype member
+  // and answer differently from a genuinely-unknown service, leaking that the
+  // name is special. An undeclared service — whatever its name — is one answer.
+  return Object.hasOwn(services, service) ? services[service]! : null;
 };
 
 /**

@@ -11,6 +11,7 @@ import Companies from './views/Companies.vue';
 import Inbox from './views/Inbox.vue';
 import Overview from './views/Overview.vue';
 import Secrets from './views/Secrets.vue';
+import Services from './views/Services.vue';
 import Vitals from './views/Vitals.vue';
 import Splitter, { rememberedWidth } from './Splitter.vue';
 
@@ -23,6 +24,7 @@ const VIEWS = [
   { id: 'work',     label: 'Work',     comp: Work },
   { id: 'commons',  label: 'Commons',  comp: Commons },
   { id: 'secrets',  label: 'Secrets',  comp: Secrets },
+  { id: 'services', label: 'Services', comp: Services },
   { id: 'vitals',   label: 'Vitals',   comp: Vitals },
   { id: 'feed',     label: 'Feed',     comp: Feed },
 ] as const;

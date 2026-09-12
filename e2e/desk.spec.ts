@@ -1507,3 +1507,41 @@ test('a secret is set by name, shown by name, and never shown by value', async (
   await row.getByRole('button', { name: 'Yes' }).click();
   await expect(page.locator('.item').filter({ hasText: 'OPENROUTER_API_KEY' })).toHaveCount(0);
 });
+
+test('a service route is set by name, shows its upstream, and warns when its secret is unset', async ({ page }) => {
+  await go(page, 'Services');
+
+  await page.locator('.srv.name').fill('openrouter');
+  await page.locator('.srv.up').fill('https://openrouter.ai/api/v1');
+  await page.locator('.srv.secret').fill('OPENROUTER_API_KEY');
+  // No secret of that name is set, so the form says so before the route is even
+  // saved — the coupling between a route and the key it names is made visible.
+  await expect(page.locator('.warn')).toContainText('OPENROUTER_API_KEY');
+  await page.getByRole('button', { name: 'Add' }).click();
+
+  // It appears as a route: the name, and the upstream it forwards to.
+  const route = page.locator('.route').filter({ hasText: 'openrouter' });
+  await expect(route).toHaveCount(1);
+  await expect(route).toContainText('https://openrouter.ai/api/v1');
+  // The route carries no value — only the secret's NAME and the header it lands on.
+  await expect(route).toContainText('Authorization: Bearer <OPENROUTER_API_KEY>');
+  // And the list flags that the named secret is not set yet.
+  await expect(route.locator('.badge')).toHaveText('secret not set');
+  // The form cleared after the write.
+  await expect(page.locator('.srv.name')).toHaveValue('');
+
+  // Edit prefills the form and locks the name (it keys the route), moving focus
+  // to the upstream.
+  await route.getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('.srv.name')).toHaveValue('openrouter');
+  await expect(page.locator('.srv.name')).toHaveAttribute('readonly', '');
+  await expect(page.locator('.srv.up')).toBeFocused();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+
+  // Remove asks first, and the confirm takes focus...
+  await route.getByRole('button', { name: 'Remove' }).click();
+  await expect(route.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  // ...then the route is gone.
+  await route.getByRole('button', { name: 'Yes' }).click();
+  await expect(page.locator('.route').filter({ hasText: 'openrouter' })).toHaveCount(0);
+});

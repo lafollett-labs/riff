@@ -143,6 +143,19 @@ describe('nothing gets through without a valid, scoped, declared route', () => {
     assert.equal(seen, null);
   });
 
+  test('a prototype-chain name is unknown like any other, not a 502 that reveals it is special', async () => {
+    // `services['constructor']` would resolve to an inherited Object.prototype
+    // member and slip past a truthiness check, answering 502 ("no credential")
+    // instead of 404 — telling a prober the name is special. Object.hasOwn in
+    // routeFor makes it one answer: unknown is unknown.
+    const token = proxytoken.mintScopedToken('shipit', 3600);
+    for (const probe of ['constructor', 'toString', 'hasOwnProperty']) {
+      const r = await call(`/svc/${probe}/x`, token);
+      assert.equal(r.status, 404, probe);
+      assert.equal(seen, null);
+    }
+  });
+
   test('a declared route whose secret is missing is 502, not an unauthenticated call', async () => {
     secrets.deleteSecret('shipit', 'OPENROUTER_API_KEY');
     const token = proxytoken.mintScopedToken('shipit', 3600);

@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
-import { query, type CanUseTool, type SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type SDKRateLimitInfo, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Gate } from '../policy/gate.ts';
@@ -563,6 +563,41 @@ export const blindWatch = (limit = BLIND_TURNS) => {
  *  is exactly what this looked like the three times it happened. */
 const WENT_BLIND = 'the permission channel died mid-shift: tools were being called and the '
   + `gate was never asked. Stopped after ${BLIND_TURNS} blind turns.`;
+
+/**
+ * The dead control stream, named at its source instead of inferred from silence.
+ *
+ * When a resumed session brings the control stream up dead, canUseTool is never
+ * reached and the SDK answers every tool call with a tool_result whose text is
+ * `AbortError: Stream closed` — the transport, not a tool that ran and failed.
+ * blindWatch catches this after three silent turns; reading the error itself
+ * catches it on turn one, so the leg is dropped and retaken cold before three
+ * turns are spent guessing. blindWatch stays as the backstop for the day the
+ * SDK stops surfacing the error.
+ *
+ * Matches on `is_error` AND the closed-stream text together: a tool that merely
+ * printed those words would not have is_error set, and the transport failure
+ * always does.
+ */
+const STREAM_CLOSED = /stream closed/i;
+export const streamClosedResult = (m: SDKUserMessage): boolean => {
+  const content = m.message?.content;
+  if (!Array.isArray(content)) return false;
+  return content.some((b) => {
+    const block = b as { type?: string; is_error?: boolean; content?: unknown };
+    if (block.type !== 'tool_result' || block.is_error !== true) return false;
+    const c = block.content;
+    const text = typeof c === 'string'
+      ? c
+      : Array.isArray(c)
+        ? c.map((x) => {
+          const part = x as { type?: string; text?: string };
+          return part.type === 'text' ? part.text ?? '' : '';
+        }).join(' ')
+        : '';
+    return STREAM_CLOSED.test(text);
+  });
+};
 
 /**
  * Said plainly, because the SDK calls every abort "aborted by user" and an
@@ -1133,6 +1168,21 @@ export const tick = async (
             d.trace(`  says  ${b.text.trim().split('\n')[0]!.slice(0, 110)}`);
           }
         }
+      }
+      // The dead control stream, caught at its source. A resumed session can
+      // bring the stream up dead: canUseTool is never reached (gateCalls stays
+      // 0) and every tool comes back `Stream closed` on the first turn.
+      // blindWatch below would catch this after three blind turns; reading the
+      // error drops the leg on turn one and retakes it cold through the same
+      // recovery. Only while the gate has never answered (a live channel that
+      // closes mid-leg is a different fault, and clobbering it would throw away
+      // real work) and only with a resume to drop — a cold leg falls through to
+      // blindWatch, which fails it loudly rather than looping.
+      if (m.type === 'user' && session && gateCalls === 0 && streamClosedResult(m)) {
+        wentBlind = true;
+        ledger.emit(agent.id, 'shift.blind', null, { turns, gateCalls, after: 0, via: 'stream-error' });
+        stop.abort();
+        break;
       }
       if (m.type === 'system' && 'session_id' in m && typeof m.session_id === 'string') {
         session = m.session_id;

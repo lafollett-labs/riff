@@ -1,7 +1,8 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { withoutSecrets } from '../src/runtime/staff.ts';
+import { withoutSecrets, streamClosedResult } from '../src/runtime/staff.ts';
+import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { DEFAULT_POLICY, readPolicy } from '../src/core/config.ts';
 
 /**
@@ -106,10 +107,11 @@ describe('a leg that aborted itself does not hand the dead controller to the ret
   });
 
   test('every early exit still aborts — the point was the retry, not the exit', () => {
-    // shift.blind, shift.tools_missing and shift.overran each break the
-    // stream this way, and the signal chain is the fourth.
-    assert.equal((staff().match(/stop\.abort\(\);/g) ?? []).length, 4,
-      'three early exits plus the signal chain');
+    // shift.blind (inferred from silence), the stream-error caught at its
+    // source, shift.tools_missing and shift.overran each break the stream this
+    // way, and the signal chain is the fifth.
+    assert.equal((staff().match(/stop\.abort\(\);/g) ?? []).length, 5,
+      'four early exits plus the signal chain');
   });
 });
 
@@ -160,6 +162,57 @@ describe('a blind leg on a resumed session is retried cold, once', () => {
     const tools = src.slice(src.indexOf('if (!toolsUp) {'), src.indexOf('failure = NO_TOOLS;'));
     assert.match(tools, /toolRetries\+\+ < 1/);
     assert.match(tools, /session = null;/);
+  });
+});
+
+describe('the dead control stream is read at its source, not inferred from silence', () => {
+  // A user message carrying tool_result blocks, the shape the SDK emits when it
+  // answers the assistant's tool calls.
+  const userMsg = (blocks: unknown[]): SDKUserMessage =>
+    ({ type: 'user', message: { role: 'user', content: blocks } } as unknown as SDKUserMessage);
+
+  test('a Stream closed tool_result with is_error is the dead channel', () => {
+    assert.equal(streamClosedResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'AbortError: Stream closed' },
+    ])), true);
+  });
+
+  test('the closed-stream text can arrive as content blocks, not only a string', () => {
+    assert.equal(streamClosedResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', is_error: true,
+        content: [{ type: 'text', text: 'AbortError: Stream closed' }] },
+    ])), true);
+  });
+
+  test('a tool that merely printed the words, without is_error, is not the channel dying', () => {
+    // The whole point of matching is_error too: a Bash tool that ran fine and
+    // echoed "stream closed" must not be read as the transport being gone.
+    assert.equal(streamClosedResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', is_error: false, content: 'the stream closed cleanly' },
+    ])), false);
+  });
+
+  test('a tool that ran and failed for its own reason is not the channel dying', () => {
+    assert.equal(streamClosedResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'ENOENT: no such file' },
+    ])), false);
+  });
+
+  test('a plain user prompt carries no tool_result and is never the channel dying', () => {
+    assert.equal(streamClosedResult(
+      { type: 'user', message: { role: 'user', content: 'just text' } } as unknown as SDKUserMessage), false);
+  });
+
+  test('the leg drops on turn one only while the gate has never answered, with a resume to drop', () => {
+    // The guards are what keep it from clobbering a leg that was working: a
+    // live channel that closes after the gate has answered is a different
+    // fault, and a cold leg falls through to blindWatch rather than looping.
+    const src = staff();
+    assert.match(src,
+      /if \(m\.type === 'user' && session && gateCalls === 0 && streamClosedResult\(m\)\) \{/);
+    const branch = src.slice(src.indexOf("if (m.type === 'user' && session"));
+    assert.match(branch.slice(0, 260), /wentBlind = true;/,
+      'routes through the same wentBlind -> recoverBlind path, not a new one');
   });
 });
 

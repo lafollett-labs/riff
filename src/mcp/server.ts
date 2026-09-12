@@ -51,6 +51,12 @@ server.registerTool('riff_companies', {
   inputSchema: {},
 }, () => run(() => client.companies()));
 
+server.registerTool('riff_usage', {
+  title: 'Riff: subscription usage',
+  description: 'The plan\'s own five-hour and seven-day windows (utilization and reset time), last injected from /api/oauth/usage. This is what the throttle paces on; report percentages, never dollars. Empty until the usage poller has posted a reading.',
+  inputSchema: {},
+}, () => run(() => client.usage()));
+
 server.registerTool('riff_state', {
   title: 'Riff: company state',
   description: 'Live state of one company: running/awake/draining, headcount, agents, pending approvals, usage windows, next-due times.',

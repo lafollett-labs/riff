@@ -5,6 +5,7 @@ import {
 } from '../core/config.ts';
 import { Registry, type Company } from '../company/registry.ts';
 import { startCredentialHealth } from '../runtime/credential.ts';
+import { windowsFromUsage } from '../runtime/limits.ts';
 import { renameAgent } from '../company/rename.ts';
 import { vitals } from '../analytics/vitals.ts';
 import { exportCompany, exportName, importCompany } from '../company/transfer.ts';
@@ -214,6 +215,38 @@ const server = createServer(async (req, res) => {
     // ------------------------------------------------- the installation
     if (p === '/api/companies' && method === 'GET') {
       return json(res, { companies: registry.list(), active: resolveSlug() });
+    }
+
+    // Subscription usage, injected from outside. A `setup-token` spends the
+    // plan but cannot read what is left of it (no `user:profile`), so the
+    // windows are polled with an interactive credential elsewhere and posted
+    // here. The body is the `/api/oauth/usage` response verbatim; every running
+    // company is then paced off the plan's real windows rather than the sparse
+    // rate_limit_event a shift occasionally carries.
+    if (p === '/api/usage' && method === 'POST') {
+      const b = await readBody(req);
+      // windowsFromUsage reads a `rate_limits` map and skips any entry without a
+      // numeric utilization, so wrapping the response as that map drops the
+      // non-window fields (spend, limits, extra_usage) without naming them here.
+      const windows = windowsFromUsage({
+        rate_limits_available: true,
+        rate_limits: b as Record<string, { utilization: number | null; resets_at: string | null } | null>,
+      });
+      registry.injectUsage(windows);
+      return json(res, { accepted: windows.length });
+    }
+
+    if (p === '/api/usage' && method === 'GET') {
+      const u = registry.usage;
+      if (!u) return json(res, { at: null, windows: [] });
+      return json(res, {
+        at: new Date(u.at).toISOString(),
+        windows: u.windows.map(([kind, w]) => ({
+          kind,
+          utilization: w.utilization ?? null,
+          resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null,
+        })),
+      });
     }
 
     if (p === '/api/companies' && method === 'POST') {

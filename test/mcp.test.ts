@@ -117,6 +117,9 @@ test('reads hit the right method and path', async () => {
     await client.companies();
     assert.deepEqual([last(s.calls).method, last(s.calls).url], ['GET', '/api/companies']);
 
+    await client.usage();
+    assert.deepEqual([last(s.calls).method, last(s.calls).url], ['GET', '/api/usage']);
+
     await client.state('shipit');
     assert.equal(last(s.calls).url, '/api/state?c=shipit');
 

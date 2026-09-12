@@ -1250,3 +1250,41 @@ describe('the whole company is readable, not only the board\'s slice', () => {
   });
 });
 
+
+describe('subscription usage is injected across companies', () => {
+  test('an injected reading reaches every open company and is held for the next', () => {
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const r = new Registry(systemClock);
+      // Founding opens a company but does not start its scheduler (no shifts
+      // spawned), so this exercises the broadcast without spending anything.
+      const a = r.found({ name: 'Alpha Works', business: 'one', ceo: 'Ash', chair: 'Cali' });
+      const b = r.found({ name: 'Beta Works', business: 'two', ceo: 'Bay', chair: 'Cali' });
+      if (!a.ok || !b.ok) throw new Error('found failed');
+
+      // The plan's windows belong to no single company; every one paces off them.
+      r.injectUsage([['seven_day', { status: 'allowed', utilization: 0.8, rateLimitType: 'seven_day' }]]);
+      console.log(JSON.stringify({
+        bindingA: a.company.scheduler.binding?.utilization ?? null,
+        bindingB: b.company.scheduler.binding?.utilization ?? null,
+        held: r.usage?.windows.length ?? 0,
+      }));
+    `);
+    const r = JSON.parse(out) as Record<string, unknown>;
+    assert.equal(r['bindingA'], 0.8, 'company A paces off the injected plan window');
+    assert.equal(r['bindingB'], 0.8, 'and so does company B — the plan is shared');
+    assert.equal(r['held'], 1, 'the reading is retained for a company started later');
+  });
+
+  test('a company started after an injection is seeded with it, not left blind', () => {
+    // The start paths apply the held reading right after starting the scheduler,
+    // so the first round paces correctly. Asserted at the source because
+    // starting a real scheduler here would spawn shifts.
+    const src = readFileSync(new URL('../src/company/registry.ts', import.meta.url), 'utf8');
+    assert.match(src, /if \(this\.#usage\) c\.scheduler\.applyUsage\(this\.#usage\.windows\);/);
+    // And both start paths get it: setRunning(true) and boot resume().
+    assert.equal((src.match(/c\.scheduler\.applyUsage\(this\.#usage\.windows\)/g) ?? []).length, 2,
+      'both setRunning and resume seed the fresh scheduler');
+  });
+});

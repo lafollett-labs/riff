@@ -111,6 +111,10 @@ export class RiffClient {
     return this.#req('GET', '/api/companies');
   }
 
+  usage(): Promise<RiffResponse> {
+    return this.#req('GET', '/api/usage');
+  }
+
   state(slug: string): Promise<RiffResponse> {
     return this.#req('GET', `/api/state${q(slug)}`);
   }

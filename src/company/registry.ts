@@ -10,6 +10,7 @@ import {
   type CompanyPolicy, type CompanyRef, type RiffConfig,
 } from '../core/config.ts';
 import type { Clock } from '../core/clock.ts';
+import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -38,8 +39,28 @@ export type Company = {
 export class Registry {
   readonly #clock: Clock;
   readonly #open = new Map<string, Company>();
+  /** The latest subscription-wide usage windows, injected via POST /api/usage. */
+  #usage: { windows: Array<readonly [string, SDKRateLimitInfo]>; at: number } | null = null;
 
   constructor(clock: Clock) { this.#clock = clock; }
+
+  /**
+   * Fold a subscription-wide usage reading into every running company.
+   *
+   * The five-hour and seven-day windows belong to the plan, not to any one
+   * company, so all of them pace off the same reading. Kept here as well, so a
+   * company started after the reading arrives is seeded with it rather than
+   * pacing blind until the next poll.
+   */
+  injectUsage(windows: Array<readonly [string, SDKRateLimitInfo]>): void {
+    this.#usage = { windows, at: this.#clock.now().getTime() };
+    for (const c of this.#open.values()) c.scheduler.applyUsage(windows);
+  }
+
+  /** The last injected usage reading, for the console and the usage MCP tool. */
+  get usage(): { windows: Array<readonly [string, SDKRateLimitInfo]>; at: number } | null {
+    return this.#usage;
+  }
 
   /**
    * Every company, each carrying whether it is actually working.
@@ -80,6 +101,9 @@ export class Registry {
     setRunningFlag(c.cfg.home, run);
     if (run) {
       c.scheduler.start(bounds);
+      // Seed the fresh scheduler with the plan's current windows, so it paces
+      // correctly from its first round instead of blind until the next poll.
+      if (this.#usage) c.scheduler.applyUsage(this.#usage.windows);
     } else if (opts?.drain) {
       // Answer now, finish later. A drain waits out a whole shift — up to ten
       // minutes at 30 turns — and a request held open that long is a request
@@ -104,6 +128,7 @@ export class Registry {
       const c = this.get(ref.slug);
       if (!c) continue;
       c.scheduler.start();
+      if (this.#usage) c.scheduler.applyUsage(this.#usage.windows);
       back.push(ref.slug);
     }
     return back;

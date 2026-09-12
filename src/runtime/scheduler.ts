@@ -300,7 +300,44 @@ export class Scheduler {
     // Everything below reads the fullest window rather than the one that just
     // reported. Any of them can stop the company, so the binding one is the
     // only honest input to a decision about slowing down.
-    const worst = this.binding ?? info;
+    this.#repace(this.binding ?? info);
+  }
+
+  /**
+   * Fold an out-of-band usage reading into the same pacing the shift-reported
+   * signal drives. The windows come from `/api/oauth/usage`, read with a
+   * `user:profile` credential and injected through the gateway, because the
+   * spend credential can be a `setup-token` that cannot read them itself.
+   *
+   * They are the subscription's windows, not this company's, so every running
+   * company is paced off them: a plan at 85% must slow all of them, not only
+   * whichever one happened to catch a `rate_limit_event` in its last shift.
+   * This is the steady source that signal never was — 15 of 155 shifts carried
+   * one in one run, none at all across a whole night in another (see limits.ts).
+   */
+  applyUsage(windows: Iterable<readonly [string, SDKRateLimitInfo]>): void {
+    const now = Date.now();
+    let any = false;
+    for (const [kind, info] of windows) {
+      this.#windows.set(kind, info);
+      this.#readAt.set(kind, now);
+      any = true;
+    }
+    if (!any) return;
+    const worst = this.binding;
+    // So the console's `rateLimit` reflects the freshest reading, not the last
+    // shift's stale one.
+    if (worst) this.#lastRateLimit = worst;
+    this.#repace(worst);
+  }
+
+  /**
+   * Recompute throttle and pause from the fullest known window. Shared by the
+   * shift-reported signal and the injected usage reading, so the two cannot
+   * pace the company by different rules.
+   */
+  #repace(worst: SDKRateLimitInfo | null): void {
+    if (!worst) return;
     const u = worst.utilization ?? 0;
 
     // The operator's headroom. Slowing down still spends the window, just

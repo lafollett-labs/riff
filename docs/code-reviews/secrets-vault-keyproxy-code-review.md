@@ -42,3 +42,28 @@ closed; no Claude token or factory secret in the keyproxy container; the
 515/515 pass; `npm run check` clean (tsgo strict + SFC + desk + e2e). New:
 `secrets` (18), `proxytoken` (16), `keyproxy` (14, incl. redirect-refusal),
 `sandbox-filesystem` (3), keyproxy container guard.
+
+---
+
+## Follow-on — Desk Secrets panel
+
+**Verdict:** ✅ APPROVED (round 3) · Reviewer: `pe-vue`
+**Scope:** `desk/src/views/Secrets.vue` (new), `desk/src/api.ts`, `desk/src/App.vue`, `e2e/desk.spec.ts`.
+
+A per-company Secrets tab in the console — set a name + masked value, list names
+(never values), replace, remove-with-confirm. Writes to `/api/secrets` over
+loopback; `api.ts` stays type-only.
+
+| ID | Sev | Finding | Resolution |
+| - | - | - | - |
+| HIGH-001 | 🟠 | Inputs had no accessible name (placeholder-only), breaking the Desk's own a11y pattern. | **Fixed** — `aria-label` on both inputs, matching Inbox/Staff. |
+| MEDIUM-001 | 🟡 | e2e asserted the value via `textContent` (vacuous — input value isn't text). | **Fixed** — asserts `.fld.val` `toHaveValue('')` + a Replace-focus check. |
+| MEDIUM-002 | 🟡 | Focus dropped on the destructive Remove→confirm swap; no Escape. | **Fixed** — confirm takes focus, Escape cancels, name refocused after save. |
+| MEDIUM-003 | 🟡 | *(round 2, self-introduced)* `cancelBtn` ref inside `v-for` resolves to an array; `.focus()` threw, hidden by the type and by green tests. | **Fixed** — function ref captures the single open element; e2e now asserts Cancel is focused. |
+| LOW-001/002 | 🟢 | Enter could double-submit; `name.trim()` in template. | **Fixed** — `canSave` computed guards both. |
+| INFO-001 | ℹ️ | Password manager might offer to save the value. | `autocomplete="new-password"` + `data-1p-ignore`/`data-lpignore`. |
+| INFO-004 | ℹ️ | Focus not restored to Remove after the confirm closes. | Deferred (accepted) — inline confirm, single-operator console. |
+
+The loop's shape is the point: a real a11y gap, then a bug my *own* round-2 fix
+introduced (green tests missed it), caught and closed by round 3. 62/62 UI tests,
+`npm run check` clean.

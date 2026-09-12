@@ -102,10 +102,10 @@ onMounted(load);
       <h2>Set a secret</h2>
       <div class="row">
         <input ref="nameInput" class="fld name" v-model="name" aria-label="Secret name"
-               placeholder="OPENROUTER_API_KEY" spellcheck="false" autocapitalize="off"
+               placeholder="Secret name" spellcheck="false" autocapitalize="off"
                autocomplete="off" @keydown.enter="save" />
         <input ref="valueInput" class="fld val" v-model="value" type="password"
-               aria-label="Secret value" placeholder="value" spellcheck="false"
+               aria-label="Secret value" placeholder="Secret value" spellcheck="false"
                autocomplete="new-password" data-1p-ignore data-lpignore="true"
                @keydown.enter="save" />
         <button class="save" :disabled="!canSave" @click="save">
@@ -113,8 +113,9 @@ onMounted(load);
         </button>
       </div>
       <p class="hint faint">
-        Names are environment identifiers — letters, digits, underscore. The
-        product reads this name; its adapter's <code>api_key_env</code> must match.
+        Names are environment identifiers — letters, digits, underscore, e.g.
+        <code>OPENROUTER_API_KEY</code>. The product reads this name; its adapter's
+        <code>api_key_env</code>, and the Services route, must match it.
       </p>
       <p v-if="err" class="err">{{ err }}</p>
       <p v-else-if="justSaved" class="ok">Saved <span class="mono">{{ justSaved }}</span>.</p>

@@ -3,7 +3,7 @@
 // and ships a module that dies in the browser. Vite says so in a warning and
 // exits 0 anyway, so scripts/check-sfc-types.mjs enforces it instead.
 import type { Vitals, Trend } from '../../src/analytics/types.ts';
-import type { CompanyRef as ConfigCompanyRef } from '../../src/core/config.ts';
+import type { CompanyRef as ConfigCompanyRef, CompanyPolicy } from '../../src/core/config.ts';
 export type { Vitals, Trend };
 
 /** Everything the Desk knows, it knows from these. */
@@ -66,18 +66,11 @@ export type Event = {
  *
  * Type-only, so it is erased before the bundle: no server code is shipped.
  */
-export type CompanyPolicy = {
-  maxTurns: number;
-  concurrency: number;
-  baseIntervalMinutes: number;
-  throttleAboveUtilization: number;
-  pauseAboveUtilization: number;
-  rotateAtContextPct: number;
-  commonsCeiling: number;
-  dailyCapCents: number;
-  shiftTimeoutMinutes: number;
-  maxSessionHours: number;
-};
+// Imported, not restated — and this is the file that proves the rule: the hand
+// copy that used to live here had dropped `portfolioCeiling`, so it typechecked
+// on both sides while the Tune panel could not edit the missing field. Re-export
+// the server's own declaration; SFC checking is the other half of the pair.
+export type { CompanyPolicy };
 
 export type State = {
   slug: string;

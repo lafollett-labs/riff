@@ -86,6 +86,15 @@ const DIALS = [
     min: 0, max: 90, step: 5 },
   { key: 'commonsCeiling', label: 'Documents in the commons',
     hint: 'Rule 6. Past it, adding one means removing one.', min: 1, max: 500, step: 1 },
+  { key: 'portfolioCeiling', label: 'Projects at once',
+    hint: 'Rule 7. Continuing is always cheaper than starting, so without a cap a company ships point releases of its first idea forever. 0 turns the rule off.',
+    min: 0, max: 200, step: 1 },
+  { key: 'shiftTimeoutMinutes', label: 'Minutes a shift may run',
+    hint: 'Wall clock before a stuck shift is stopped. Turns and money never advance while a shift waits on something that never answers, and it holds a slot the whole time. 0 disables it.',
+    min: 0, max: 1440, step: 5 },
+  { key: 'maxSessionHours', label: 'Max runtime (hours)',
+    hint: 'The ceiling on a whole run, over any deadline a start asks for. 0 never stops — the safety net for a company left running unattended.',
+    min: 0, max: 720, step: 0.5 },
 ] as const;
 
 const policy = ref<Record<string, number>>({ ...props.state.policy });
@@ -96,18 +105,22 @@ const perr = ref('');
 const dirty = computed(() =>
   DIALS.some((d) => policy.value[d.key] !== props.state.policy[d.key])
   || pausePct.value !== Math.round(props.state.policy.pauseAboveUtilization * 100)
-  || throttlePct.value !== Math.round(props.state.policy.throttleAboveUtilization * 100));
+  || throttlePct.value !== Math.round(props.state.policy.throttleAboveUtilization * 100)
+  || Math.round(capUsd.value * 100) !== props.state.policy.dailyCapCents);
 
 // Utilization is a fraction everywhere it is used and a percentage everywhere
 // it is read. Doing that conversion in the field is less confusing than
 // asking anyone to type 0.92.
 const throttlePct = ref(Math.round(props.state.policy.throttleAboveUtilization * 100));
 const pausePct = ref(Math.round(props.state.policy.pauseAboveUtilization * 100));
+// Cents in the schema (real money), dollars in the field — nobody edits a cap in cents.
+const capUsd = ref(props.state.policy.dailyCapCents / 100);
 
 const resetDials = () => {
   policy.value = { ...props.state.policy };
   throttlePct.value = Math.round(props.state.policy.throttleAboveUtilization * 100);
   pausePct.value = Math.round(props.state.policy.pauseAboveUtilization * 100);
+  capUsd.value = props.state.policy.dailyCapCents / 100;
   perr.value = '';
 };
 // The poll in App.vue replaces the whole state object every twenty seconds, so
@@ -125,15 +138,23 @@ watch(() => props.state.policy, () => {
 }, { deep: true });
 watch(() => props.state.slug, () => { tuning.value = false; resetDials(); });
 
+// A blank number field reads back as '' from v-model.number. Treat that as
+// "unchanged", never 0 — clearing maxSessionHours or the shift timeout to blank
+// must not silently switch a safety bound off; typing 0 still does, on purpose.
+const numOr = (v: unknown, fallback: number): number =>
+  v === '' || v == null ? fallback : Number(v);
+
 const saveDials = async () => {
   saving.value = true;
   perr.value = '';
   try {
     await api.renameCompany(props.state.slug, {
       policy: {
-        ...(Object.fromEntries(DIALS.map((d) => [d.key, Number(policy.value[d.key])]))),
+        ...(Object.fromEntries(DIALS.map((d) =>
+          [d.key, numOr(policy.value[d.key], props.state.policy[d.key])]))),
         throttleAboveUtilization: throttlePct.value / 100,
         pauseAboveUtilization: pausePct.value / 100,
+        dailyCapCents: Math.round(numOr(capUsd.value, props.state.policy.dailyCapCents / 100) * 100),
       },
     });
     // Closing shows what was actually saved, clamped, rather than what was typed.
@@ -235,7 +256,11 @@ const working = computed(() => props.state.awake.length);
       </div>
 
       <template v-if="!editing">
-        <div v-if="business" class="body" v-html="render(business)" />
+        <!-- Focusable region: the max-height clip below has no focusable child
+             for a plain-prose brief, so without this a keyboard user cannot
+             scroll past the fold to read the rest. -->
+        <div v-if="business" class="body" tabindex="0" role="region"
+             aria-label="The brief" v-html="render(business)" />
         <p v-else class="muted none">
           Nothing was written down when this company was founded, so its CEO
           decided what it was for on their own.
@@ -327,6 +352,15 @@ const working = computed(() => props.state.awake.length);
             100 means never stop.
           </span>
         </label>
+        <label class="dial">
+          <span class="k">Daily spend cap</span>
+          <span class="pct">$<input v-model.number="capUsd" type="number" min="0" max="100000" step="1" /></span>
+          <span class="why faint">
+            Rule 4. A per-treasurer, per-day ceiling on spend. 0 is no cap. On a subscription
+            the figure is imputed list price, not money billed — set it as a daily work ceiling,
+            or leave 0 and pace by the window instead.
+          </span>
+        </label>
 
         <p class="muted note">
           Saving lets the company go and builds it again, because the scheduler reads these once.
@@ -393,6 +427,9 @@ h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: v
 
 .brief { border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
   padding: 16px 18px 18px; margin-bottom: 22px; }
+/* A long brief scrolls within the panel instead of pushing the overview down
+   the page. A page-length brief is normal — Fathom's fifth was 3,755 chars. */
+.body { max-height: 40vh; overflow-y: auto; padding-right: 6px; }
 .bar { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
 .grow { flex: 1; }
 .none { font-size: 14px; }

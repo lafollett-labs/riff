@@ -1,5 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { DEFAULT_POLICY, readPolicy } from '../src/core/config.ts';
 
 /**
@@ -53,3 +54,26 @@ describe('a company can be tuned without being broken', () => {
     assert.equal(p.commonsCeiling, 41);
   });
 });
+
+describe('the Tune panel edits the whole policy schema', () => {
+  // The one that would have caught this: maxSessionHours, portfolioCeiling,
+  // dailyCapCents and shiftTimeoutMinutes were all real, parsed policy fields
+  // with no editor in the console — the operator could not set the very bounds
+  // that keep an unattended run from spending the plan. A restated copy of the
+  // type in desk had even dropped portfolioCeiling, so it typechecked blind.
+  test('every policy field has an editor in Overview.vue, and none is stray', () => {
+    const src = readFileSync(new URL('../desk/src/views/Overview.vue', import.meta.url), 'utf8');
+    // Plain dials declare themselves as `{ key: 'field', label: ... }`.
+    const dialKeys = [...src.matchAll(/key: '([a-zA-Z]+)', label:/g)].map((m) => m[1]!);
+    // Fields whose value is transformed in the field (percent, dollars) are
+    // handled outside DIALS and sent by name in the save patch.
+    const special = ['throttleAboveUtilization', 'pauseAboveUtilization', 'dailyCapCents'];
+    const editable = new Set([...dialKeys, ...special]);
+    const schema = Object.keys(DEFAULT_POLICY);
+
+    const missing = schema.filter((k) => !editable.has(k));
+    assert.deepEqual(missing, [], `policy fields with no editor in the Tune panel: ${missing.join(', ')}`);
+    const stray = [...editable].filter((k) => !schema.includes(k));
+    assert.deepEqual(stray, [], `Tune panel edits keys that are not policy fields: ${stray.join(', ')}`);
+  });
+})

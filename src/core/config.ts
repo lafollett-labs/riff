@@ -193,6 +193,21 @@ export const readPolicy = (raw: unknown): CompanyPolicy => {
   };
 };
 
+/**
+ * One entry in a company's `services` allowlist: where a named service's calls
+ * are forwarded, and which vault secret authenticates them. Never a value.
+ */
+export type ServiceRoute = {
+  /** Upstream base URL the proxy forwards to, e.g. https://openrouter.ai/api/v1 */
+  upstream: string;
+  /** The vault secret name to inject. Resolved by the proxy, never by the app. */
+  secret: string;
+  /** Header to inject the credential into. Default 'authorization'. */
+  header?: string;
+  /** Scheme prefix on the value. Default 'Bearer'; '' injects the raw secret. */
+  scheme?: string;
+};
+
 export type RiffConfig = {
   version: 1;
   /**
@@ -227,6 +242,16 @@ export type RiffConfig = {
    * `external.write`, which always lands as a draft.
    */
   connectors: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
+  /**
+   * External services the company's product may call through the key-injecting
+   * proxy. Names and upstream hosts ONLY — never a secret value. The proxy maps
+   * a request for <name> onto <upstream>, injecting the vault secret <secret>
+   * (see `src/core/secrets.ts` and `/api/secrets`) so the real key reaches the
+   * call without ever entering the factory. `header`/`scheme` default to
+   * `Authorization: Bearer <value>`; a service wanting `X-Api-Key: <value>`
+   * raw sets header and an empty scheme.
+   */
+  services: Record<string, ServiceRoute>;
   /**
    * How approved work physically leaves, when no connector is wired.
    *
@@ -428,6 +453,7 @@ const fromHome = (home: string): RiffConfig => {
     board: [{ id: slugId(name), name, role: 'Chairman' }],
     ceo: { id: 'ceo', name: 'CEO' },
     connectors: {},
+    services: {},
     release: 'none',
     policy: DEFAULT_POLICY,
   };
@@ -520,6 +546,7 @@ export const resolveConfig = (cwd = process.cwd(), slug?: string): RiffConfig =>
         ? { id: slugId(env['RIFF_CEO'].trim()), name: env['RIFF_CEO'].trim() }
         : { id: 'ceo', name: 'CEO' }),
     connectors: merged.connectors ?? {},
+    services: merged.services ?? {},
     release: merged.release === 'bundle' ? 'bundle' : 'none',
     // Companies founded before policy existed have none written down, and
     // read back at the defaults rather than at zero.

@@ -1,4 +1,5 @@
 import type { Agent, AgentId } from '../core/types.ts';
+import type { ServiceRoute } from '../core/config.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
@@ -103,6 +104,10 @@ type Deps = {
   ledger: Ledger; gate: Gate; world: World; clock: Clock;
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
   release?: 'none' | 'bundle';
+  /** This company, and the services its product may reach through the
+   *  key-injecting proxy — passed to each shift so it can mint a scoped token. */
+  companySlug?: string;
+  services?: Record<string, ServiceRoute>;
   options?: Partial<SchedulerOptions>;
   onTick?: (r: TickResult) => void;
   /**
@@ -561,6 +566,8 @@ export class Scheduler {
         ...(this.#opts.cacheDir ? { cacheDir: this.#opts.cacheDir } : {}),
         ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
         ...(this.#d.release ? { release: this.#d.release } : {}),
+        ...(this.#d.companySlug && this.#d.services && Object.keys(this.#d.services).length
+          ? { companySlug: this.#d.companySlug, services: this.#d.services } : {}),
         signal: this.#abort.signal,
       });
       this.#spentToday += r.costUsd;

@@ -214,6 +214,51 @@ logs every request, so what was fetched is answerable after the fact. Those are
 a workflow control, a scope control and an audit trail. None of them is a wall.
 Run this on hardware you are willing to have a determined process act from.
 
+### A company's own keys live one container away, not in the factory
+
+The subscription token above is the platform's, shared by every company. A
+company also has keys of its OWN — a model backend it pays for, its product's
+API — and the rule that "anything in the factory box is readable by a shell that
+has run long enough" applies to those too. So they are not put in the box.
+
+Three parts hold that line, and only the third is new to reason about:
+
+- **The vault.** `src/core/secrets.ts` encrypts each company's secrets with a
+  per-company data key, itself wrapped under a master key at `~/.riff/master.key`
+  (`0600`). The master key and the vault files sit at the installation root,
+  **outside every world**, so the shift sandbox — which re-allows a shift to read
+  only its own world — never sees the ciphertext, let alone the key that unwraps
+  it. `/api/secrets` writes a value and can list names; there is no endpoint that
+  reads a value back.
+
+- **The proxy.** `src/keyproxy/main.ts` runs in its OWN container
+  (`docker/compose.yaml`, service `keyproxy`), hardened to the egress bar and
+  mounting the data volume read-only. It is the one process that decrypts a real
+  key, and it does so to inject it on a call and forward it upstream. The factory
+  never runs this code and never holds the key.
+
+- **The scoped token.** A shift's product calls `http://keyproxy:8890/svc/<name>`
+  with a per-shift token that says only "the bearer is company X, until time T",
+  signed with a secret at the installation root the sandbox cannot read
+  (`src/core/proxytoken.ts`). The agent may read its own token — that is the
+  point, its product uses it — but cannot forge one for another company, and
+  never sees the key the proxy swaps in.
+
+**What this buys, precisely:** a company's real key is never on the factory's
+disk, in its env, in `config.json`, in git, or in a `.riff.tar.gz` — an exported
+company carries its `services` routing but not its vault, so a copy handed to
+someone else authenticates to nothing. The proxy injects only for a request to a
+service the company declared, at a host fixed by config, and logs one line per
+call without the key in it.
+
+**What it does not buy, and do not mistake it for more:** a scoped token that a
+neighbouring shift could read out of this one's process environment is a valid
+token — the exposure is a shared `/proc` under one uid, a container-model
+property, not the token's. Signing makes a token unforgeable, not unstealable,
+and the residual is a company spending against another's key up to that key's
+own cap, not reading it. The real key is unaffected: it is in the proxy, which
+no shift's `/proc` reaches.
+
 ### One writer per installation
 
 The host and the container mount the same `~/.riff` on purpose. Two servers

@@ -11,6 +11,7 @@ import { vitals } from '../analytics/vitals.ts';
 import { exportCompany, exportName, importCompany } from '../company/transfer.ts';
 import { isOperatorError, installRoot } from '../core/config.ts';
 import { takeInstallationLock, type Lock } from '../core/lock.ts';
+import { putSecret, listSecretNames, deleteSecret } from '../core/secrets.ts';
 import { readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -787,6 +788,32 @@ const server = createServer(async (req, res) => {
         scheduler.nudge(who);
         if (!scheduler.running) await registry.setRunning(co.slug, true);
         return json(res, { waking: who, running: true });
+      }
+
+      // A company's secrets: write-only, like GitHub's. The store encrypts at
+      // rest and the injecting proxy hands values to a call without them ever
+      // entering the factory, so the endpoint that WRITES a value never has a
+      // sibling that reads one back. GET returns names, and only names — the
+      // one thing a management surface may say about a secret it holds.
+      if (p === '/api/secrets' && method === 'GET') {
+        return json(res, { names: listSecretNames(co.slug) });
+      }
+      if (p === '/api/secrets' && method === 'PUT') {
+        const b = await readBody(req);
+        const name = typeof b['name'] === 'string' ? b['name'] : '';
+        const value = typeof b['value'] === 'string' ? b['value'] : '';
+        try {
+          putSecret(co.slug, name, value);
+        } catch (e) {
+          // A bad name or an empty value is the caller's error, not a 500.
+          return json(res, { error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+        // Never echo the value. The name is enough to confirm the write landed.
+        return json(res, { ok: true, name });
+      }
+      if (p === '/api/secrets' && method === 'DELETE') {
+        const name = url.searchParams.get('name') ?? '';
+        return json(res, { deleted: deleteSecret(co.slug, name) });
       }
     }
 

@@ -12,6 +12,7 @@ import {
 import type { Clock } from '../core/clock.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync } from 'node:fs';
+import { dropVault } from '../core/secrets.ts';
 import { join } from 'node:path';
 
 /**
@@ -197,6 +198,7 @@ export class Registry {
       board,
       ceo: { id: ceoId, name: ceo },
       connectors: {},
+      services: {},
       release: input.release === 'bundle' ? 'bundle' : 'none',
       // Absent means every default, and every named field is clamped, so a
       // request cannot ask for a thousand concurrent agents.
@@ -248,6 +250,10 @@ export class Registry {
       onBoundReached: () => { setRunningFlag(cfg.home, false); },
       ...(Object.keys(cfg.connectors ?? {}).length ? { connectors: cfg.connectors } : {}),
       ...(cfg.release === 'bundle' ? { release: 'bundle' as const } : {}),
+      // The company and its declared services travel with the scheduler so each
+      // shift can mint a scoped token for the key-injecting proxy. Only when
+      // there is a service to reach — a company with none pays nothing for this.
+      ...(Object.keys(cfg.services ?? {}).length ? { companySlug: slug, services: cfg.services } : {}),
     });
     const company: Company = { slug, cfg, ledger, world, gate, constitution, scheduler };
     this.#open.set(slug, company);
@@ -360,6 +366,11 @@ export class Registry {
     const stamp = this.#clock.iso().replace(/[:.]/g, '-');
     const at = join(dir, `${slug}-${stamp}`);
     renameSync(companyHome(slug), at);
+    // Secrets live outside the company home, so the move above does not carry
+    // them off. Drop them rather than archive them: a decryptable credential
+    // blob for a company nobody is running is a liability, not a backup, and a
+    // restored company re-enters its keys.
+    dropVault(slug);
     return { ok: true, at };
   }
 

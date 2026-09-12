@@ -174,3 +174,33 @@ EXPOSE 4173
 # zombies behind for the life of the container.
 ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
 CMD ["node", "src/gateway/server.ts"]
+
+# ------------------------------------------------------------------ keyproxy
+# The key-injecting proxy. It is the single most sensitive container in the
+# system — it mounts the whole installation read-only and is the one process
+# that decrypts a company's real keys — so it gets the SMALLEST image, not the
+# factory's. No bash, no compiler, no browser, no Claude CLI: a foothold here
+# lands in a box with none of the exfil tooling the factory carries, and the
+# proxy needs none of it. It imports only node: builtins and src/core, so it
+# needs no node_modules at all; keep that true, or this stage stops building.
+#
+# ca-certificates is the one dependency a TLS client legitimately needs, to
+# validate the upstream it forwards a real key to.
+FROM node:26-slim AS keyproxy
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# nologin, not bash: nothing here is ever meant to open a shell.
+RUN useradd -m -u 10001 -s /usr/sbin/nologin labs \
+ && mkdir -p /data /app \
+ && chown -R labs:labs /data /app
+WORKDIR /app
+# package.json only for `"type": "module"`, so node reads the .ts files as ESM
+# and strips their types. No npm install — there are no dependencies to fetch.
+COPY --chown=labs:labs package.json ./
+COPY --chown=labs:labs src/core ./src/core
+COPY --chown=labs:labs src/keyproxy ./src/keyproxy
+USER labs
+ENV NODE_ENV=production \
+    RIFF_ROOT=/data \
+    KEYPROXY_PORT=8890
+ENTRYPOINT ["node", "src/keyproxy/main.ts"]

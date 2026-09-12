@@ -17,7 +17,13 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    depends_on: [egress]
+    # keyproxy gated on health so a shift never races a proxy that is not yet
+    # listening; egress only needs to have started.
+    depends_on:
+      egress:
+        condition: service_started
+      keyproxy:
+        condition: service_healthy
     networks: [walled]
     # No published port here on purpose. A container attached only to an
     # internal network cannot be NAT-ed into either — no gateway means no
@@ -53,7 +59,11 @@ services:
       HTTPS_PROXY: http://egress:8888
       http_proxy: http://egress:8888
       https_proxy: http://egress:8888
-      NO_PROXY: localhost,127.0.0.1,egress
+      # keyproxy is internal and holds a company's own keys; its calls must go
+      # to it DIRECT, not out through egress, so it is exempt here alongside the
+      # loopback names. A product reaches it at http://keyproxy:8890.
+      NO_PROXY: localhost,127.0.0.1,egress,keyproxy
+      no_proxy: localhost,127.0.0.1,egress,keyproxy
     # Docker Desktop maps bind-mount ownership, so on macOS the image's own
     # unprivileged user writes files that come back owned by you. A rootful
     # Linux daemon does not map anything — uncomment this and set UID/GID in
@@ -135,6 +145,50 @@ services:
     security_opt: ['no-new-privileges:true']
     pids_limit: 64
     mem_limit: 64m
+
+  # The key-injecting proxy. It holds the real per-company keys and the master
+  # key that unwraps them, so the FACTORY never does — the one structural way to
+  # keep a credential a shift genuinely cannot read (SECURITY.md: anything in the
+  # factory box is readable by a shell that has run long enough). A product calls
+  # http://keyproxy:8890/svc/<service>/... with a per-shift SCOPED token; the
+  # proxy verifies it, swaps in the real key on the way out, and forwards. Same
+  # image as the factory for one Node/TS runtime, a different command, and NONE
+  # of the factory's environment: no Claude token, no agent, no shell anyone
+  # reaches. The data volume is read-only — a key-holder that cannot alter the
+  # routes it authorises against is one less thing to reason about.
+  keyproxy:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      # The minimal stage — Node + ca-certificates + src only. NOT the factory
+      # image: the one container that can decrypt every company's keys does not
+      # also carry bash, a compiler, a browser, or the Claude CLI.
+      target: keyproxy
+    # Docker's own init as PID 1 for signal handling; the minimal image ships no
+    # tini and the proxy spawns no children to reap.
+    init: true
+    networks: [walled, outside]
+    environment:
+      RIFF_ROOT: /data
+      KEYPROXY_PORT: 8890
+    volumes:
+      - ${RIFF_DATA:-${HOME}/.riff}:/data:ro
+    restart: unless-stopped
+    security_opt:
+      - 'no-new-privileges:true'
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,uid=10001,gid=10001,mode=1777
+      - /home/labs:size=64m,uid=10001,gid=10001,mode=0700
+    pids_limit: 128
+    mem_limit: 256m
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://127.0.0.1:8890/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   egress:
     build:

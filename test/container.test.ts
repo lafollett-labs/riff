@@ -149,6 +149,25 @@ describe('what the factory can reach', () => {
     assert.ok(!ingress.includes('build:'), 'ingress runs a stock image, not ours');
   });
 
+  test('the key-injecting proxy holds keys but never the token, and mounts data read-only', () => {
+    // keyproxy exists so a company's real keys are NOT in a box an agent can
+    // reach. Its whole value is undone if it ever gains the subscription token
+    // or a factory secret, or if its data mount becomes writable. This is the
+    // regression guard for exactly that — the same shape as the ingress guard.
+    const keyproxy = service('keyproxy');
+    assert.ok(!keyproxy.includes('CLAUDE_CODE_OAUTH_TOKEN'),
+      'keyproxy must never see the subscription token');
+    assert.ok(!keyproxy.includes('RIFF_WAIT_FOR_CREDENTIALS') && !keyproxy.includes('RIFF_CREDENTIALS'),
+      'keyproxy must carry no credentials env');
+    assert.match(keyproxy, /:\/data:ro\b/, 'keyproxy mounts the installation read-only');
+    // Minimal image, not the factory's: the crown-jewel container carries no
+    // shell/compiler/browser to a foothold.
+    assert.match(keyproxy, /target:\s*keyproxy/, 'keyproxy builds the minimal stage');
+    assert.match(keyproxy, /read_only:\s*true/);
+    assert.match(keyproxy, /cap_drop:\s*\[ALL\]/);
+    assert.match(keyproxy, /no-new-privileges:true/);
+  });
+
   test('its network has no route off the machine', () => {
     assert.match(compose, /walled:\s*\n\s*internal:\s*true/);
     // The factory is on the walled network only; the proxy bridges out.
@@ -685,11 +704,13 @@ describe('one company cannot read another', () => {
     assert.match(staff, /allowUnsandboxedCommands: false/);
   });
 
-  test('the fence is around the other companies, not around the company', () => {
-    assert.match(staff, /denyRead: \[dirname\(dirname\(world\.root\)\)/,
-      'deny where every company lives');
-    assert.match(staff, /allowRead: \[dirname\(world\.root\)\]/,
-      'then re-allow this one; the more specific path wins');
+  test('the fence is around the whole installation root, not just the companies', () => {
+    // Denying only companies/ left the secrets store (master.key, the vaults,
+    // keyproxy.secret) a `cat` away — CRITICAL-001. The deny is the whole root.
+    assert.match(staff, /denyRead: \[installRoot\(\)/,
+      'deny the whole installation root, secrets store included');
+    assert.match(staff, /allowRead: \[dirname\(worldRoot\)\]/,
+      'then re-allow this one company; the more specific path wins');
   });
 
   test('and around the subscription token, which the shell could simply read', () => {
@@ -704,9 +725,9 @@ describe('one company cannot read another', () => {
   });
 
   test('and around the transcripts, which are one company talking', () => {
-    // They moved to /data/sessions to survive a restart, which put them
-    // outside the /data/companies deny and outside the home directory too.
-    assert.match(staff, /denyRead: \[dirname\(dirname\(world\.root\)\), sessionStore\(\),/);
+    // They moved to /data/sessions to survive a restart; the install-root deny
+    // now covers them (they live under it) and sessionStore() names them too.
+    assert.match(staff, /denyRead: \[installRoot\(\), sessionStore\(\),/);
   });
 
   test('the wall around the network is the egress proxy, not the sandbox', () => {
@@ -726,7 +747,7 @@ describe('one company cannot read another', () => {
     // Everything outside allowWrite is read-only inside the sandbox, so a
     // missing home directory turns `npm install` into EROFS. Marlow hit this
     // on the first shift under the sandbox.
-    assert.match(staff, /allowWrite: \[dirname\(world\.root\), home\('\.npm'\), home\('\.cache'\)/);
+    assert.match(staff, /allowWrite: \[dirname\(worldRoot\), home\('\.npm'\), home\('\.cache'\)/);
   });
 
   test('the container ships what the Linux sandbox needs', () => {

@@ -9,7 +9,8 @@ import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import { createTools, TOOL_NAMESPACE } from './tools.ts';
 import { makeCanUseTool, shellIsContained } from './permissions.ts';
-import { DEFAULT_POLICY } from '../core/config.ts';
+import { DEFAULT_POLICY, installRoot, type ServiceRoute } from '../core/config.ts';
+import { mintScopedToken } from '../core/proxytoken.ts';
 import { worstWindow, isWeekly, windowsFromUsage, limitsReadable, mergeWindow,
          isKnownLimit } from './limits.ts';
 import { RULES_TEXT } from '../policy/rules.ts';
@@ -52,6 +53,40 @@ export const transcriptExists = (id: string, store = sessionStore()): boolean =>
   return dirs.some((d) => existsSync(join(store, d, `${id}.jsonl`)));
 };
 
+/**
+ * The read/write map handed to Claude Code's Bash sandbox — the kernel boundary
+ * between one company and the next. Exported so a test can assert its shape
+ * without a container: bubblewrap is Linux-only and cannot run in the host test
+ * suite, so the guard is on the list rather than on a live read.
+ *
+ * Deny the whole INSTALLATION ROOT, not just companies/. bubblewrap reads are
+ * allow-by-default, so anything under the root that is not denied is readable —
+ * and the root holds the secrets store: master.key (wraps every company's key),
+ * secrets/<slug>.vault and keyproxy.secret (mints scoped tokens), plus archive/
+ * and the transfer staging dir. Denying only companies/ once left every one of
+ * those a `cat /data/master.key` away, which would decrypt EVERY company's keys
+ * and forge a token for any of them — the exact cross-company read the sandbox
+ * exists to stop. allowRead re-admits this company's own home (under the root),
+ * and more-specific-wins keeps it while the root stays closed.
+ *
+ * The credentials measurement that motivated the named denies: on 2026-09-07 a
+ * sandboxed shift read `.credentials.json` (the live subscription token) and
+ * `.claude.json`; Claude Code write-protects both but does not deny reading
+ * them, and the transcript store is one company's conversations, not another's.
+ *
+ * allowWrite carries the build caches alongside the company dir: outside the
+ * allow list is read-only inside the sandbox, and with the home directory left
+ * out `npm install` and anything else keeping a cache fails EROFS (Marlow's
+ * `undo.mjs` died on exactly this).
+ */
+export const sandboxFilesystem = (worldRoot: string): {
+  denyRead: string[]; allowRead: string[]; allowWrite: string[];
+} => ({
+  denyRead: [installRoot(), sessionStore(), home('.claude/.credentials.json'), home('.claude.json')],
+  allowRead: [dirname(worldRoot)],
+  allowWrite: [dirname(worldRoot), home('.npm'), home('.cache'), home('.undo')],
+});
+
 export type TickDeps = {
   agent: Agent;
   ledger: Ledger;
@@ -75,6 +110,13 @@ export type TickDeps = {
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
   /** How approved work leaves when no connector is wired. See RiffConfig.release. */
   release?: 'none' | 'bundle';
+  /** This shift's company, for minting the scoped proxy token. */
+  companySlug?: string;
+  /** External services the product may reach through the key-injecting proxy.
+   *  staff mints a per-shift scoped token and injects it under each service's
+   *  secret name, so the product reads its usual env var and the real key never
+   *  enters this box — it lives in the proxy. See src/keyproxy and RiffConfig. */
+  services?: Record<string, ServiceRoute>;
   /** Observe the shift: every tool the staff member reaches for, and why it
    *  was allowed or refused, for diagnosing a shift. */
   trace?: (line: string) => void;
@@ -951,6 +993,22 @@ export const tick = async (
   let planVisible: boolean | null = null;
 
   /**
+   * The scoped tokens this shift's product uses to reach the key-injecting
+   * proxy. One token per shift, scoped to this company, valid a little past the
+   * shift's own clock; injected under each declared service's secret name, so
+   * the product reads its ordinary env var (`OPENROUTER_API_KEY`, say) and gets
+   * a capability — never the real key, which stays in the proxy's container. An
+   * agent can read its own token; it cannot forge one for another company (the
+   * signing secret is outside every world) and it never sees the key at all.
+   */
+  const secretEnv: Record<string, string> = {};
+  if (d.companySlug && d.services && Object.keys(d.services).length) {
+    const ttlSeconds = Math.ceil((d.shiftTimeoutMs ?? 45 * 60_000) / 1000) + 300;
+    const token = mintScopedToken(d.companySlug, ttlSeconds);
+    for (const route of Object.values(d.services)) secretEnv[route.secret] = token;
+  }
+
+  /**
    * Ask what is left of the subscription, rather than waiting to be told.
    *
    * `rate_limit_event` is a push and a rare one — 0 of 14 shifts across a
@@ -1068,33 +1126,10 @@ export const tick = async (
           // no. So this defers to the proxy rather than duplicating it.
           // strictAllowlist stays off with it; nothing here is an allowlist.
           network: { allowedDomains: ['*'] },
-          filesystem: {
-            // Deny where every company lives, then re-allow this one. The
-            // more specific path wins, so the company keeps its own directory
-            // — ledger, world and scratch — and loses its neighbours'.
-            // The shell runs as the same uid that owns these, so 0600 is not
-            // a boundary — only this list is. Measured on 2026-09-07 under
-            // the profile shipped the day before: a sandboxed shift read
-            // `.credentials.json`, which holds the live subscription token,
-            // and `.claude.json`. Claude Code write-protects both and does
-            // not deny reading them. The transcript store goes with them:
-            // one company's conversations are not another's to read, and
-            // after the move below they are no longer under a home directory
-            // this could cover by denying the home directory.
-            denyRead: [dirname(dirname(world.root)), sessionStore(),
-                       home('.claude/.credentials.json'), home('.claude.json')],
-            allowRead: [dirname(world.root)],
-            // The company's own directory, plus the caches a build writes to.
-            // Everything outside the allow list is read-only INSIDE the
-            // sandbox, so with the home directory left out `npm install` and
-            // anything else that keeps a cache fails with EROFS. Marlow hit
-            // exactly this on the first shift under the sandbox: `undo.mjs`
-            // could not create ~/.undo and died with a raw mkdirSync stack.
-            // A boundary that stops the company building is the wrong
-            // boundary — the point is to separate companies, not to disarm
-            // them.
-            allowWrite: [dirname(world.root), home('.npm'), home('.cache'), home('.undo')],
-          },
+          // The kernel boundary between companies. See sandboxFilesystem: it
+          // denies the whole installation root — the secrets store included —
+          // and re-allows only this company's own home.
+          filesystem: sandboxFilesystem(world.root),
         } } : {}),
         // DO NOT CHANGE THIS. 'default' is the only mode that consults
         // canUseTool, and canUseTool is the gate — the single chokepoint every
@@ -1124,8 +1159,11 @@ export const tick = async (
 
         // Spread process.env rather than replace it — omitting `env` inherits
         // it, so naming the field at all means naming everything the CLI
-        // needs, the subscription token included.
-        ...(d.cacheDir ? { env: { ...process.env, ...cacheEnv(d.cacheDir) } } : {}),
+        // needs, the subscription token included. The toolchain cache redirect
+        // and the scoped proxy tokens are added on top.
+        ...(d.cacheDir || Object.keys(secretEnv).length
+          ? { env: { ...process.env, ...(d.cacheDir ? cacheEnv(d.cacheDir) : {}), ...secretEnv } }
+          : {}),
 
         // ---- continuity ----
         ...(session ? { resume: session } : {}),

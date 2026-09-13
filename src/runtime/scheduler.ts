@@ -159,6 +159,13 @@ export const selectDue = (
  * limits and cost, partly because twenty-two agents waking simultaneously
  * makes the company look like a seizure instead of a place where people work.
  */
+/** Windows older than this are not trusted to pace on. A dead poller freezes
+ *  the last reading, and pacing on a stale "all clear" would over-run the real
+ *  window; past this the company falls back to its spend and session-time caps
+ *  and says so once. Generous against the poll cadence, so one missed poll is
+ *  not called blind. */
+const WINDOW_STALE_MS = 30 * 60_000;
+
 export class Scheduler {
   #d: Deps;
   #opts: SchedulerOptions;
@@ -176,6 +183,14 @@ export class Scheduler {
   #throttle = 1;
   /** Epoch ms. The company rests until the rate-limit window resets. */
   #pausedUntil = 0;
+  /**
+   * Whether pacing is flying without a fresh window reading. Starts true — a
+   * company has no windows until the poller feeds it — so the first fresh
+   * reading announces itself once (pacing_restored) and a feed that later dies
+   * announces itself once (pacing_blind), rather than either being silent. See
+   * pacing() and usagePoll.ts.
+   */
+  #pacingBlind = true;
   #lastRateLimit: SDKRateLimitInfo | null = null;
   /**
    * The most recent reading of each window, kept apart rather than collapsed.
@@ -368,6 +383,28 @@ export class Scheduler {
     }
   }
 
+  /**
+   * What the company is pacing on right now, and whether it can trust it.
+   *
+   * Windows when a reading is fresh; otherwise the fallback the operator set —
+   * the daily spend cap, then the session-time deadline (which always stops an
+   * unattended run). `blind` is true when no window is fresh enough to trust: a
+   * dead poller freezes the last reading, and pacing on a stale "all clear"
+   * would over-run the real window, so past WINDOW_STALE_MS the company leans on
+   * those caps instead. `now` is injectable for tests; the readings are stamped
+   * with Date.now() (see applyUsage), so this compares against the same clock.
+   */
+  pacing(now = Date.now()): { blind: boolean; windowAgeMs: number | null; fallback: 'spend' | 'time' | 'none' } {
+    let newest = 0;
+    for (const t of this.#readAt.values()) if (t > newest) newest = t;
+    const windowAgeMs = newest > 0 ? now - newest : null;
+    const blind = windowAgeMs == null || windowAgeMs > WINDOW_STALE_MS;
+    const fallback = this.#opts.dailyBudgetUsd != null ? 'spend'
+      : (this.#opts.until != null || this.#opts.maxSessionMs > 0) ? 'time'
+        : 'none';
+    return { blind, windowAgeMs, fallback };
+  }
+
   /** Rank sets cadence: an executive wakes about 1.5x as often as a member. */
   #intervalFor(a: Agent): number {
     const rank = RANK[a.tier];
@@ -492,6 +529,20 @@ export class Scheduler {
         break;
       }
 
+      // Announce once when the window feed goes stale or comes back: the
+      // throttle is then flying on a frozen reading, and the company is really
+      // governed by its spend and session-time caps until fresh windows return.
+      // Silent otherwise. See usagePoll.ts for the feed this depends on.
+      const pace = this.pacing();
+      if (pace.blind !== this.#pacingBlind) {
+        this.#pacingBlind = pace.blind;
+        this.#d.ledger.emit('company',
+          pace.blind ? 'company.pacing_blind' : 'company.pacing_restored', null,
+          pace.blind
+            ? { windowAgeMs: pace.windowAgeMs, fallback: pace.fallback }
+            : { windowAgeMs: pace.windowAgeMs });
+      }
+
       // Rate-limited: rest rather than hammering a spent window.
       if (Date.now() < this.#pausedUntil) {
         await sleep(30_000, this.#abort.signal);
@@ -563,6 +614,11 @@ export class Scheduler {
         maxTurns: this.#opts.maxTurns,
         rotateAtContextPct: this.#opts.rotateAtContextPct,
         ...(this.#opts.shiftTimeoutMs > 0 ? { shiftTimeoutMs: this.#opts.shiftTimeoutMs } : {}),
+        // The engine's own state, so the shift can wind down before the cap and
+        // pace on the window instead of learning it by being throttled.
+        ...(this.#opts.until != null ? { sessionEndsAt: this.#opts.until } : {}),
+        ...(this.#windows.size ? { usageWindows: this.windows.map(
+          (w) => ({ kind: w.kind, utilization: w.utilization })) } : {}),
         ...(this.#opts.cacheDir ? { cacheDir: this.#opts.cacheDir } : {}),
         ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
         ...(this.#d.release ? { release: this.#d.release } : {}),

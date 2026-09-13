@@ -56,7 +56,10 @@ const win = (kind: string, utilization: number): [string, SDKRateLimitInfo] =>
   [kind, { status: 'allowed', utilization,
            rateLimitType: kind as NonNullable<SDKRateLimitInfo['rateLimitType']> }];
 
-const harness = () => {
+const harness = (opts: Partial<{
+  dailyBudgetUsd: number; maxSessionMs: number;
+  throttleAboveUtilization: number; pauseAboveUtilization: number;
+}> = {}) => {
   const events: Array<{ kind: string; data: Record<string, unknown> }> = [];
   const ledger = {
     emit: (_a: string, kind: string, _s: unknown, data: unknown) =>
@@ -66,7 +69,7 @@ const harness = () => {
   const clock = { now: () => new Date('2026-09-11T23:00:00Z'), day: () => '2026-09-11' } as unknown as Clock;
   const s = new Scheduler({
     ledger, clock, gate: {} as unknown as Gate, world: {} as unknown as World,
-    options: { throttleAboveUtilization: 0.7, pauseAboveUtilization: 0.92 },
+    options: { throttleAboveUtilization: 0.7, pauseAboveUtilization: 0.92, ...opts },
   });
   return { s, events };
 };
@@ -122,4 +125,31 @@ test('an empty injection changes nothing', () => {
   s.applyUsage([]);
   assert.equal(s.binding, null);
   assert.equal(events.length, 0);
+});
+
+// ---------------------------------------------------- pacing when blind
+
+test('with no reading yet the company is blind and names its fallback', () => {
+  const { s } = harness();
+  const p = s.pacing();
+  assert.equal(p.blind, true, 'no window read means pacing cannot trust one');
+  assert.equal(p.windowAgeMs, null);
+  // No spend cap here, but the session-time cap is always the last resort.
+  assert.equal(p.fallback, 'time');
+});
+
+test('a just-read window is trusted; the same reading half an hour on is not', () => {
+  const { s } = harness();
+  s.applyUsage([win('seven_day', 0.3)]);
+  const now = Date.now();
+  assert.equal(s.pacing(now).blind, false, 'a fresh reading paces the company');
+  assert.ok((s.pacing(now).windowAgeMs ?? 1e9) < 1_000);
+  // A dead poller freezes this reading; past the horizon it is no longer trusted
+  // and the company falls back to its caps.
+  assert.equal(s.pacing(now + 31 * 60_000).blind, true);
+});
+
+test('a spend cap is the named fallback ahead of time when the feed is blind', () => {
+  const { s } = harness({ dailyBudgetUsd: 5 });
+  assert.equal(s.pacing().fallback, 'spend');
 });

@@ -1,5 +1,7 @@
 import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { Ledger } from '../ledger/ledger.ts';
+import { TranscriptStore } from '../ledger/transcript.ts';
 import { World } from '../worldfs/world.ts';
 import { constitutionFor, RULES_TEXT } from '../policy/rules.ts';
 import { scaffoldConfig, type RiffConfig } from '../core/config.ts';
@@ -16,13 +18,15 @@ import type { Clock } from '../core/clock.ts';
  * cast the CEO argues for is the beginning of one.
  */
 export const found = (cfg: RiffConfig, clock: Clock): {
-  ledger: Ledger; world: World; firstRun: boolean;
+  ledger: Ledger; world: World; transcript: TranscriptStore; firstRun: boolean;
 } => {
   const firstRun = !existsSync(cfg.ledgerPath);
   scaffoldConfig(cfg);
 
   const world = new World(cfg.worldDir, clock);
   const ledger = new Ledger(cfg.ledgerPath, clock);
+  // Beside the ledger, its own file — see TranscriptStore for why not a table.
+  const transcript = new TranscriptStore(join(cfg.home, 'transcript.db'), clock);
   world.ensure();
 
   // ---- the board and the CEO: written ONCE, at founding ----
@@ -148,5 +152,5 @@ export const found = (cfg: RiffConfig, clock: Clock): {
     });
     world.git.commitAs({ id: 'company', name: cfg.company.name }, `${cfg.company.name} is founded`);
   }
-  return { ledger, world, firstRun };
+  return { ledger, world, transcript, firstRun };
 };

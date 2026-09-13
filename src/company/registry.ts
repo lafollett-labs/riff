@@ -1,4 +1,5 @@
 import { Ledger } from '../ledger/ledger.ts';
+import { TranscriptStore } from '../ledger/transcript.ts';
 import { World } from '../worldfs/world.ts';
 import { Gate } from '../policy/gate.ts';
 import { constitutionFor, type Constitution } from '../policy/rules.ts';
@@ -32,6 +33,7 @@ export type Company = {
   slug: string;
   cfg: RiffConfig;
   ledger: Ledger;
+  transcript: TranscriptStore;
   world: World;
   gate: Gate;
   constitution: Constitution;
@@ -226,7 +228,7 @@ export class Registry {
   }
 
   #build(slug: string, cfg: RiffConfig): Company {
-    const { ledger, world } = found(cfg, this.#clock);
+    const { ledger, world, transcript } = found(cfg, this.#clock);
     // Made at open, so a volume that cannot be written to says so now rather
     // than a day later in the middle of somebody's build.
     const cacheDir = join(cfg.home, 'scratch', 'cache');
@@ -255,7 +257,7 @@ export class Registry {
       has: (name) => world.listProjects().includes(name),
     });
     const scheduler = new Scheduler({
-      ledger, gate, world, clock: this.#clock,
+      ledger, transcript, gate, world, clock: this.#clock,
       options: {
         maxTurns: p.maxTurns,
         rotateAtContextPct: p.rotateAtContextPct,
@@ -282,7 +284,7 @@ export class Registry {
       // there is a service to reach — a company with none pays nothing for this.
       ...(Object.keys(cfg.services ?? {}).length ? { companySlug: slug, services: cfg.services } : {}),
     });
-    const company: Company = { slug, cfg, ledger, world, gate, constitution, scheduler };
+    const company: Company = { slug, cfg, ledger, transcript, world, gate, constitution, scheduler };
     this.#open.set(slug, company);
     return company;
   }
@@ -305,6 +307,7 @@ export class Registry {
     // the wrong trade. Pause it first if the shift matters.
     await c.scheduler.stop({ drain: opts?.drain !== false });
     c.ledger.close();
+    c.transcript.close();
     this.#open.delete(slug);
   }
 

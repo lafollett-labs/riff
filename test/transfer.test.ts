@@ -95,6 +95,31 @@ describe('a company travels whole', () => {
       `Rune's commit did not survive the trip: ${JSON.stringify(history)}`);
   });
 
+  test('the audit of what it did travels with it', () => {
+    // The transcript store is its own db beside the ledger; a move that carried
+    // the ledger but not the audit would land a company with no record of how it
+    // got where it is.
+    const res = JSON.parse(run(`${PRELUDE}
+      const r = new Registry(systemClock);
+      const a = r.found({ name: 'Auditco', business: 'x', ceo: 'Ada', chair: 'Cali' });
+      if (!a.ok) throw new Error('found failed');
+      a.company.transcript.append({ sessionId: 's1', agentId: 'ada', role: 'assistant', kind: 'text', text: 'did the thing' });
+      a.company.transcript.append({ sessionId: 's1', agentId: 'ada', role: 'assistant', kind: 'tool_use', name: 'Bash', text: '{}' });
+      await r.close('auditco');
+
+      const file = '${out}/audit.tar.gz';
+      T.exportCompany('auditco', file);
+      const landed = T.importCompany(file);
+      const r2 = new Registry(systemClock);
+      const back = r2.get(landed.slug);
+      const turns = back.transcript.bySession('s1');
+      console.log(JSON.stringify({ n: turns.length, kinds: turns.map((t) => t.kind), first: turns[0] ? turns[0].text : null }));
+    `)) as Record<string, unknown>;
+    assert.equal(res['n'], 2, 'both recorded blocks arrived');
+    assert.deepEqual(res['kinds'], ['text', 'tool_use']);
+    assert.equal(res['first'], 'did the thing');
+  });
+
   test('a company folder can simply be moved, because it never says where it is', () => {
     // The config used to carry absolute home/worldDir/ledgerPath, so a company
     // that arrived from another machine pointed at that machine's disk — and

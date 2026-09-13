@@ -1,7 +1,7 @@
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
-import { query, type CanUseTool, type SDKRateLimitInfo, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Gate } from '../policy/gate.ts';
@@ -11,6 +11,7 @@ import { createTools, TOOL_NAMESPACE } from './tools.ts';
 import { makeCanUseTool, shellIsContained } from './permissions.ts';
 import { DEFAULT_POLICY, installRoot, type ServiceRoute } from '../core/config.ts';
 import { mintScopedToken } from '../core/proxytoken.ts';
+import type { TranscriptSink } from '../ledger/transcript.ts';
 import { worstWindow, isWeekly, windowsFromUsage, limitsReadable, mergeWindow,
          isKnownLimit } from './limits.ts';
 import { RULES_TEXT } from '../policy/rules.ts';
@@ -121,6 +122,10 @@ export type TickDeps = {
    *  ledger — never inside world/, or the end-of-turn commit would stage every
    *  transcript into the company's repo. See sessionStore and sandboxFilesystem. */
   configDir?: string;
+  /** The company's own audit store. Every assistant turn, tool call, result and
+   *  tool output is recorded here as the shift runs — our schema, from the SDK
+   *  stream, not the CLI's private JSONL. Absent leaves a shift unrecorded. */
+  transcript?: TranscriptSink;
   /** Wall clock the whole shift may take before it is stopped. See
    *  CompanyPolicy.shiftTimeoutMinutes. 0 or absent leaves it unbounded. */
   shiftTimeoutMs?: number;
@@ -798,6 +803,64 @@ export const scopedSecretEnv = (
   return env;
 };
 
+/** A tool result is a string or a list of content blocks; flatten to text. */
+const toolResultText = (content: unknown): string => {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map((b) =>
+      b && typeof b === 'object' && 'text' in b && typeof (b as { text: unknown }).text === 'string'
+        ? (b as { text: string }).text
+        : JSON.stringify(b),
+    ).join('\n');
+  }
+  return content == null ? '' : JSON.stringify(content);
+};
+
+/**
+ * Record one SDK message into the company's own audit store — the assistant's
+ * text and reasoning, every tool call and its result, and the final tally.
+ *
+ * Recorded from the stream rather than parsed back out of the CLI's transcript
+ * files, so the audit is ours (stable schema) and survives whatever backend runs
+ * underneath. Fail-soft is the whole contract: a shift must never die because
+ * its audit could not be written, so every path is inside one try/catch and a
+ * throw is swallowed. Exported so the mapping is tested without driving a shift.
+ */
+export const recordShiftMessage = (
+  sink: TranscriptSink, sessionId: string, agentId: string, m: SDKMessage,
+): void => {
+  try {
+    if (m.type === 'assistant') {
+      const model = (m.message as { model?: string }).model;
+      for (const b of m.message.content) {
+        if (b.type === 'text') {
+          if (b.text.trim()) sink.append({ sessionId, agentId, role: 'assistant', kind: 'text', text: b.text, meta: { model } });
+        } else if (b.type === 'thinking') {
+          if (b.thinking.trim()) sink.append({ sessionId, agentId, role: 'assistant', kind: 'thinking', text: b.thinking, meta: { model } });
+        } else if (b.type === 'tool_use') {
+          sink.append({ sessionId, agentId, role: 'assistant', kind: 'tool_use', name: b.name, text: JSON.stringify(b.input), meta: { model, id: b.id } });
+        }
+      }
+    } else if (m.type === 'user') {
+      const content = m.message.content;
+      if (typeof content === 'string') {
+        if (content.trim()) sink.append({ sessionId, agentId, role: 'user', kind: 'text', text: content });
+      } else {
+        for (const b of content) {
+          if (b.type === 'text') {
+            if (b.text.trim()) sink.append({ sessionId, agentId, role: 'user', kind: 'text', text: b.text });
+          } else if (b.type === 'tool_result') {
+            sink.append({ sessionId, agentId, role: 'user', kind: 'tool_result', name: b.tool_use_id, text: toolResultText(b.content), meta: { isError: b.is_error ?? false } });
+          }
+        }
+      }
+    } else if (m.type === 'result') {
+      const text = m.subtype === 'success' && 'result' in m ? String((m as { result?: unknown }).result ?? '') : '';
+      sink.append({ sessionId, agentId, role: 'result', kind: 'result', text, meta: { subtype: m.subtype, turns: m.num_turns, costUsd: m.total_cost_usd } });
+    }
+  } catch { /* recording must never fail a shift */ }
+};
+
 /**
  * Whether to hand this conversation over and carry on in a fresh one.
  *
@@ -1347,6 +1410,11 @@ export const tick = async (
     });
 
     for await (const m of q) {
+      // Record to the company's own audit store first, before any of the
+      // control logic that may `break` out of the loop — so a turn the ceiling
+      // or a blind cuts off is still on the record. session is set by the SDK's
+      // system message before any content arrives; skip until it is known.
+      if (d.transcript && session) recordShiftMessage(d.transcript, session, agent.id, m);
       if (m.type === 'assistant') {
         // Every tool-using turn, not only the gated ones — this is the count
         // the ceiling is measured against. Confirmed at 30 of 30 in both the

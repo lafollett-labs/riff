@@ -1,6 +1,7 @@
 import type { Agent, AgentId } from '../core/types.ts';
 import type { ServiceRoute } from '../core/config.ts';
 import type { Ledger } from '../ledger/ledger.ts';
+import type { TranscriptStore } from '../ledger/transcript.ts';
 import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
@@ -113,7 +114,7 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
 };
 
 type Deps = {
-  ledger: Ledger; gate: Gate; world: World; clock: Clock;
+  ledger: Ledger; transcript?: TranscriptStore; gate: Gate; world: World; clock: Clock;
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
   release?: 'none' | 'bundle';
   /** This company, and the services its product may reach through the
@@ -634,6 +635,7 @@ export class Scheduler {
           (w) => ({ kind: w.kind, utilization: w.utilization })) } : {}),
         ...(this.#opts.cacheDir ? { cacheDir: this.#opts.cacheDir } : {}),
         ...(this.#opts.configDir ? { configDir: this.#opts.configDir } : {}),
+        ...(this.#d.transcript ? { transcript: this.#d.transcript } : {}),
         ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
         ...(this.#d.release ? { release: this.#d.release } : {}),
         ...(this.#d.companySlug && this.#d.services && Object.keys(this.#d.services).length

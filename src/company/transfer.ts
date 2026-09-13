@@ -103,6 +103,18 @@ export const exportCompany = (slug: string, outPath: string): Manifest => {
     try { copy.exec("DELETE FROM meta WHERE key LIKE 'session:%'"); }
     finally { copy.close(); }
 
+    // The audit store travels too, so a moved company keeps the record of what
+    // it did. VACUUM INTO like the ledger — one clean file, no WAL to carry.
+    // Nothing to strip: its rows are a historical record, not resume state, so
+    // unlike session meta they are meaningless to no one on the new machine.
+    // Guarded: a company that never opened on this install has no store yet.
+    const tPath = join(home, 'transcript.db');
+    if (existsSync(tPath)) {
+      const tsrc = new DatabaseSync(tPath, { readOnly: true });
+      try { tsrc.exec(`VACUUM INTO '${join(work, 'transcript.db').replace(/'/g, "''")}'`); }
+      finally { tsrc.close(); }
+    }
+
     if (existsSync(join(home, 'world'))) {
       // node_modules is regenerable, enormous, and the only thing in a world
       // that routinely contains symlinks — which the importer refuses.

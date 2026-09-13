@@ -93,7 +93,7 @@ describe('the scoped tokens actually reach the shift subprocess env', () => {
 
   test('secretEnv is spread into the env handed to query(), on top of process.env', () => {
     const src = staff();
-    assert.match(src, /env: \{ \.\.\.process\.env,.*\.\.\.secretEnv \}/,
+    assert.match(src, /env: \{ \.\.\.process\.env,[\s\S]*?\.\.\.secretEnv \}/,
       'the shift child-process env must include ...secretEnv');
   });
 
@@ -101,6 +101,6 @@ describe('the scoped tokens actually reach the shift subprocess env', () => {
     // Naming `env` replaces the inherited environment, so the guard that decides
     // to name it must fire on secretEnv too — otherwise a company with services
     // but no cache dir would run with tokens dropped.
-    assert.match(staff(), /d\.cacheDir \|\| Object\.keys\(secretEnv\)\.length/);
+    assert.match(staff(), /d\.cacheDir \|\| d\.configDir \|\| Object\.keys\(secretEnv\)\.length/);
   });
 });

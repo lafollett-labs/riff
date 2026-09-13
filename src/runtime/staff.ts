@@ -79,10 +79,23 @@ export const transcriptExists = (id: string, store = sessionStore()): boolean =>
  * out `npm install` and anything else keeping a cache fails EROFS (Marlow's
  * `undo.mjs` died on exactly this).
  */
-export const sandboxFilesystem = (worldRoot: string): {
+export const sandboxFilesystem = (worldRoot: string, configDir?: string): {
   denyRead: string[]; allowRead: string[]; allowWrite: string[];
 } => ({
-  denyRead: [installRoot(), sessionStore(), home('.claude/.credentials.json'), home('.claude.json')],
+  // CLAUDE_CONFIG_DIR moves the CLI's store onto the volume under the company's
+  // OWN home, which allowRead re-admits — so deny that subtree straight back, or
+  // a shift reads its own conversation history through Bash. This is ADDED to the
+  // default $HOME denies, never traded for them: $HOME (/home/labs) is one tmpfs
+  // shared by every company, reads there are allow-by-default, and anything the
+  // CLI leaves in it despite the redirect would otherwise be a cross-company
+  // read. Denying both stores costs nothing — the CLI writes as the unsandboxed
+  // parent; only the agent's Bash is fenced. Cross-company isolation is the
+  // installRoot deny; these keep a shift out of any transcript store, either place.
+  denyRead: [
+    installRoot(),
+    sessionStore(), home('.claude/.credentials.json'), home('.claude.json'),
+    ...(configDir ? [configDir] : []),
+  ],
   allowRead: [dirname(worldRoot)],
   allowWrite: [dirname(worldRoot), home('.npm'), home('.cache'), home('.undo')],
 });
@@ -102,6 +115,12 @@ export type TickDeps = {
   rotateAtContextPct?: number;
   /** Somewhere with real disk for toolchain caches. See cacheEnv. */
   cacheDir?: string;
+  /** The CLI's config + transcript store (CLAUDE_CONFIG_DIR), on the volume
+   *  rather than the container's tmpfs HOME, so transcripts survive a restart
+   *  and a shift resumes instead of starting cold. Per company, beside its
+   *  ledger — never inside world/, or the end-of-turn commit would stage every
+   *  transcript into the company's repo. See sessionStore and sandboxFilesystem. */
+  configDir?: string;
   /** Wall clock the whole shift may take before it is stopped. See
    *  CompanyPolicy.shiftTimeoutMinutes. 0 or absent leaves it unbounded. */
   shiftTimeoutMs?: number;
@@ -850,8 +869,12 @@ export const tick = async (
    *  one. Changes twice in a shift that rotates. */
   let session = (opts?.withoutResume ? null : ledger.getMeta(`session:${agent.id}`)) || null;
   // A conversation the CLI no longer holds is not a resume, so do not spend a
-  // leg discovering that. See transcriptExists.
-  if (session && !transcriptExists(session)) {
+  // leg discovering that. See transcriptExists. The store has to be the one the
+  // shift's CLI writes to — the per-company CLAUDE_CONFIG_DIR — not the server's
+  // own default HOME, or the check reads an empty directory and every resume is
+  // wrongly reset to a cold start.
+  const store = d.configDir ? sessionStore({ CLAUDE_CONFIG_DIR: d.configDir }) : undefined;
+  if (session && !transcriptExists(session, store)) {
     ledger.setMeta(`session:${agent.id}`, '');
     ledger.emit(agent.id, 'session.reset', null, { was: session, why: 'transcript is gone' });
     session = null;
@@ -1276,7 +1299,7 @@ export const tick = async (
           // The kernel boundary between companies. See sandboxFilesystem: it
           // denies the whole installation root — the secrets store included —
           // and re-allows only this company's own home.
-          filesystem: sandboxFilesystem(world.root),
+          filesystem: sandboxFilesystem(world.root, d.configDir),
         } } : {}),
         // DO NOT CHANGE THIS. 'default' is the only mode that consults
         // canUseTool, and canUseTool is the gate — the single chokepoint every
@@ -1306,10 +1329,14 @@ export const tick = async (
 
         // Spread process.env rather than replace it — omitting `env` inherits
         // it, so naming the field at all means naming everything the CLI
-        // needs, the subscription token included. The toolchain cache redirect
-        // and the scoped proxy tokens are added on top.
-        ...(d.cacheDir || Object.keys(secretEnv).length
-          ? { env: { ...process.env, ...(d.cacheDir ? cacheEnv(d.cacheDir) : {}), ...secretEnv } }
+        // needs, the subscription token included. The toolchain cache redirect,
+        // the session store on the volume, and the scoped proxy tokens are
+        // added on top.
+        ...(d.cacheDir || d.configDir || Object.keys(secretEnv).length
+          ? { env: { ...process.env,
+                     ...(d.cacheDir ? cacheEnv(d.cacheDir) : {}),
+                     ...(d.configDir ? { CLAUDE_CONFIG_DIR: d.configDir } : {}),
+                     ...secretEnv } }
           : {}),
 
         // ---- continuity ----

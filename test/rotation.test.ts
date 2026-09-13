@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { shouldRotate, cacheEnv, blindWatch, sessionStore,
          transcriptExists } from '../src/runtime/staff.ts';
 import { readPolicy, DEFAULT_POLICY } from '../src/core/config.ts';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -203,5 +203,16 @@ describe('a session id outliving its transcript', () => {
     // .claude.json and backups/ there instead of into the home directory.
     assert.equal(sessionStore({ CLAUDE_CONFIG_DIR: '/data/cfg' }), '/data/cfg/projects');
     assert.match(sessionStore({}), /\.claude\/projects$/);
+  });
+
+  test('the resume check reads the per-company store, not the server HOME', () => {
+    // The shift's CLI writes transcripts under the per-company CLAUDE_CONFIG_DIR
+    // on the volume; the server process has no such env. If tick() checked its
+    // own default store it would read an empty directory and reset every resume
+    // to a cold start — persistence built and then never used. So the store
+    // handed to transcriptExists must be derived from d.configDir.
+    const src = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
+    assert.match(src, /const store = d\.configDir \? sessionStore\(\{ CLAUDE_CONFIG_DIR: d\.configDir \}\) : undefined;/);
+    assert.match(src, /transcriptExists\(session, store\)/);
   });
 });

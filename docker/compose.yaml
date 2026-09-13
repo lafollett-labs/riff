@@ -107,20 +107,23 @@ services:
     # of the filesystem is read-only, so an agent cannot rewrite its own image.
     read_only: true
     # A tmpfs mounts root-owned by default, and the factory runs as labs
-    # (10001). /home/labs is the CLI's session store: unwritable, it silently
-    # keeps no transcripts, so every resume fails and every shift starts cold.
-    # It did — 33 resume attempts, 33 resets, 0 successes — while the feature
-    # looked present and the container looked healthy.
+    # (10001), so under read_only the CLI's HOME has to be a writable mount or
+    # everything it writes there silently EROFSes.
     #
-    # The transcripts stay here, and are therefore emptied by every restart
-    # while the session ids in the ledger survive on the volume. Both ways of
-    # moving them were measured on 2026-09-08 and both cost more than they
-    # bought: CLAUDE_CONFIG_DIR moves the credentials lookup with them, which
-    # would put the subscription token on the operator's disk (`Not logged in
-    # · Please run /login`), and a symlink out of $HOME stops bubblewrap dead
-    # — `Can't mount on symlink destination` — which took the shell away from
-    # a whole shift. tick() checks the store before resuming instead, so a
-    # transcript that is gone costs a cold start and nothing else.
+    # The transcripts NO LONGER live here. Each shift's CLAUDE_CONFIG_DIR points
+    # at /data/companies/<slug>/.claude (registry.ts / staff.ts), so the whole
+    # CLI store — transcripts, sessions, .claude.json — is on the volume, per
+    # company, and survives a restart; resume works across one and the ledger's
+    # session ids still resolve. The 2026-09-08 objection to CLAUDE_CONFIG_DIR —
+    # that it drags the credentials lookup onto the operator's disk (`Not logged
+    # in`) — is void: the factory runs on CLAUDE_CODE_OAUTH_TOKEN from the env,
+    # there is no credentials file to move (verified in-container, no
+    # .credentials.json). A symlink out of $HOME is still forbidden — bubblewrap
+    # dies `Can't mount on symlink destination`, which took the shell away from a
+    # whole shift. This tmpfs now only backs ephemeral HOME scratch that ignores
+    # CLAUDE_CONFIG_DIR (e.g. .claude/bridge-spawn); losing it on restart is
+    # correct. tick() still checks the store before resuming, so a transcript
+    # that is genuinely gone costs a cold start and nothing else.
     tmpfs:
       - /tmp:size=512m,uid=10001,gid=10001,mode=1777
       - /home/labs:size=256m,uid=10001,gid=10001,mode=0700

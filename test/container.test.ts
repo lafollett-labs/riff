@@ -589,19 +589,23 @@ describe('the session store is somewhere the factory can actually write', () => 
     assert.match(compose, /\/home\/labs:size=\d+m,uid=10001/);
   });
 
-  test('moving the transcripts off it costs more than it buys', () => {
-    // Both ways were measured on 2026-09-08. CLAUDE_CONFIG_DIR moves the
-    // credentials lookup with the transcripts, so the subscription token would
-    // have to live on the operator's disk — pointed elsewhere, the CLI answers
-    // `Not logged in`. A symlink out of $HOME stops bubblewrap dead with
-    // `Can't mount on symlink destination`, which took the shell away from
-    // every Bash call of a whole shift before anyone noticed.
+  test('transcripts persist on the volume via CLAUDE_CONFIG_DIR, not a symlink', () => {
+    // Two ways were ruled out on 2026-09-08 and only one lesson survives. A
+    // symlink out of $HOME still stops bubblewrap dead (`Can't mount on symlink
+    // destination`) and took the shell away from a whole shift — that holds. The
+    // other objection is now void: CLAUDE_CONFIG_DIR was rejected because it moved
+    // the credentials lookup onto the operator's disk (`Not logged in`), but the
+    // factory runs on CLAUDE_CODE_OAUTH_TOKEN from the env — there is no
+    // credentials file to move (verified: none in-container). So the store is set
+    // per company, on the volume, in staff.ts; the entrypoint must still not
+    // symlink it.
+    const staff = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
     assert.doesNotMatch(entrypoint, /ln -s .*\.claude\/projects/,
       'bwrap cannot mount on a symlink, and the shell is the point of the box');
-    assert.doesNotMatch(entrypoint, /CLAUDE_CONFIG_DIR/,
-      'the config dir holds the credentials; it does not go on the volume');
+    assert.match(staff, /CLAUDE_CONFIG_DIR: d\.configDir/,
+      'the store follows the per-company config dir onto the volume');
     assert.match(compose, /Can't mount on symlink destination/,
-      'the next person to try this should find out here, not from a dead shift');
+      'the next person to try a symlink should find out here, not from a dead shift');
   });
 
   test('a shift does not have to fail to find out the conversation is gone', () => {
@@ -609,7 +613,7 @@ describe('the session store is somewhere the factory can actually write', () => 
     // conversation found with session ID`, and the runtime caught the string
     // and retook the leg cold. That healed Marlow and not Idris or Rue.
     const staff = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
-    assert.match(staff, /if \(session && !transcriptExists\(session\)\)/);
+    assert.match(staff, /if \(session && !transcriptExists\(session, store\)\)/);
     assert.match(staff, /why: 'transcript is gone'/);
     // And it asks the disk, not the CLI's wording, which is free to change.
     assert.match(staff, /existsSync\(join\(store, d, `\$\{id\}\.jsonl`\)\)/);
@@ -718,7 +722,7 @@ describe('one company cannot read another', () => {
   test('the fence is around the whole installation root, not just the companies', () => {
     // Denying only companies/ left the secrets store (master.key, the vaults,
     // keyproxy.secret) a `cat` away — CRITICAL-001. The deny is the whole root.
-    assert.match(staff, /denyRead: \[installRoot\(\)/,
+    assert.match(staff, /denyRead: \[\s*installRoot\(\)/,
       'deny the whole installation root, secrets store included');
     assert.match(staff, /allowRead: \[dirname\(worldRoot\)\]/,
       'then re-allow this one company; the more specific path wins');
@@ -736,9 +740,15 @@ describe('one company cannot read another', () => {
   });
 
   test('and around the transcripts, which are one company talking', () => {
-    // They moved to /data/sessions to survive a restart; the install-root deny
-    // now covers them (they live under it) and sessionStore() names them too.
-    assert.match(staff, /denyRead: \[installRoot\(\), sessionStore\(\),/);
+    // They live on the volume now, under the company's own home
+    // (CLAUDE_CONFIG_DIR), so a restart no longer wipes them. That home is what
+    // allowRead re-admits, so the deny names the on-volume config store back —
+    // ADDED to the default $HOME denies, never traded for them: /home/labs is
+    // one tmpfs shared by every company, so anything left there stays denied too.
+    assert.match(staff, /sessionStore\(\), home\('\.claude\/\.credentials\.json'\), home\('\.claude\.json'\),/,
+      'the shared $HOME store is always denied');
+    assert.match(staff, /\.\.\.\(configDir \? \[configDir\] : \[\]\)/,
+      'and the on-volume config store is denied on top when set');
   });
 
   test('the wall around the network is the egress proxy, not the sandbox', () => {

@@ -231,6 +231,14 @@ export class Registry {
     // than a day later in the middle of somebody's build.
     const cacheDir = join(cfg.home, 'scratch', 'cache');
     mkdirSync(cacheDir, { recursive: true });
+    // The CLI's session store, on the volume beside the ledger rather than the
+    // container's tmpfs HOME — so transcripts survive a restart and shifts
+    // resume instead of starting cold. Beside the world, never inside it: the
+    // end-of-turn commit stages the whole tree, and a conversation log is not
+    // part of anybody's work. Created here so a volume that cannot be written
+    // to says so now, not mid-shift.
+    const configDir = join(cfg.home, '.claude');
+    mkdirSync(configDir, { recursive: true });
     const p = cfg.policy;
     const constitution = constitutionFor({
       ceo: cfg.ceo.id,
@@ -254,6 +262,7 @@ export class Registry {
         // Beside the world, never inside it: the end-of-turn commit stages the
         // whole tree, and a build cache is not part of anybody's work.
         cacheDir,
+        configDir,
         concurrency: p.concurrency,
         baseIntervalMs: Math.round(p.baseIntervalMinutes * 60_000),
         throttleAboveUtilization: p.throttleAboveUtilization,

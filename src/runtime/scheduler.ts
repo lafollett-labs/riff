@@ -54,6 +54,13 @@ export type SchedulerOptions = {
    */
   cacheDir: string;
   /**
+   * The CLI's config + transcript store (CLAUDE_CONFIG_DIR), on the volume
+   * rather than the container's tmpfs HOME. Empty leaves it on the default
+   * under $HOME, which the container wipes on every restart — so a shift never
+   * resumes and always starts cold. See sessionStore / sandboxFilesystem.
+   */
+  configDir: string;
+  /**
    * Hard ceilings for an unattended run. Neither is a cost estimate — they are
    * stops. Leaving something unbounded running on somebody's machine overnight
    * is not a thing to do, and a subscription that gets exhausted at 3am means
@@ -98,6 +105,7 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
   maxTurns: 60,
   rotateAtContextPct: 50,
   cacheDir: '',
+  configDir: '',
   // 1.6x the longest shift ever recorded here. See CompanyPolicy.
   shiftTimeoutMs: 45 * 60_000,
   maxSessionMs: 2 * 60 * 60_000,
@@ -625,6 +633,7 @@ export class Scheduler {
         ...(this.#windows.size ? { usageWindows: this.windows.map(
           (w) => ({ kind: w.kind, utilization: w.utilization })) } : {}),
         ...(this.#opts.cacheDir ? { cacheDir: this.#opts.cacheDir } : {}),
+        ...(this.#opts.configDir ? { configDir: this.#opts.configDir } : {}),
         ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
         ...(this.#d.release ? { release: this.#d.release } : {}),
         ...(this.#d.companySlug && this.#d.services && Object.keys(this.#d.services).length

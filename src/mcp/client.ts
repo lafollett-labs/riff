@@ -115,6 +115,13 @@ export class RiffClient {
     return this.#req('GET', '/api/usage');
   }
 
+  /** Inject a subscription usage reading. `body` is the `/api/oauth/usage`
+   *  response verbatim (its rate_limits map); the gateway folds it into every
+   *  running company's throttle. See src/mcp/usagePoll.ts. */
+  postUsage(body: unknown): Promise<RiffResponse> {
+    return this.#req('POST', '/api/usage', body);
+  }
+
   state(slug: string): Promise<RiffResponse> {
     return this.#req('GET', `/api/state${q(slug)}`);
   }

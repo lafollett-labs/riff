@@ -10,6 +10,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { RiffClient, normalizeBase, type RiffResponse } from './client.ts';
+import { startUsagePolling } from './usagePoll.ts';
 
 const BASE = normalizeBase(process.env['RIFF_API']);
 const client = new RiffClient(BASE);
@@ -205,6 +206,17 @@ server.registerTool('riff_decide', {
   ...(as !== undefined ? { as } : {}),
   ...(reason !== undefined ? { reason } : {}),
 })));
+
+// The window feed. Only an interactive login can read the plan's rate-limit
+// windows (a setup-token cannot), and that login is on the host — where this
+// server runs. So while a session holds this MCP, keep the throttle fed with
+// real windows. It is unref'd and fail-silent; `RIFF_USAGE_POLL=off` disables
+// it (e.g. when the standalone daemon in usage-daemon.ts owns the feed) and
+// `RIFF_USAGE_POLL_MS` tunes the cadence. See usagePoll.ts.
+if (process.env['RIFF_USAGE_POLL'] !== 'off') {
+  startUsagePolling(client, process.env['RIFF_USAGE_POLL_MS']
+    ? { intervalMs: Number(process.env['RIFF_USAGE_POLL_MS']) } : {});
+}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

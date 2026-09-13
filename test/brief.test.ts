@@ -104,3 +104,54 @@ describe('a change to the brief reaches the people working under it', () => {
     assert.doesNotMatch(p, /brief for this company has changed/);
   });
 });
+
+/**
+ * The engine the company runs on tells the company its own state — the same
+ * "wind down before the cap, pace on the window" the company is building into
+ * its product. Surfaced only when it should change what the shift does, so a
+ * quiet tick pays nothing for it.
+ */
+describe('a shift is told the state of the engine it runs on', () => {
+  const wakeWith = (extra: {
+    sessionEndsAt?: number;
+    usageWindows?: ReadonlyArray<{ kind: string; utilization: number | null }>;
+  }): string =>
+    buildTickPrompt({ agent: person('rae'), ledger, world, gate, clock, ...extra });
+
+  test('near the cap it is told to wind down to a checkpoint', () => {
+    const p = wakeWith({ sessionEndsAt: clock.now().getTime() + 10 * 60_000 });
+    assert.match(p, /## The engine you run on/);
+    assert.match(p, /stops in about 10 min/);
+    assert.match(p, /Wind down now/);
+    // The dogfood line: being cut mid-write is the failure, not stopping.
+    assert.match(p, /cut mid-write/);
+  });
+
+  test('with room and a quiet window it is told nothing — the tick stays cheap', () => {
+    const p = wakeWith({
+      sessionEndsAt: clock.now().getTime() + 3 * 60 * 60_000,
+      usageWindows: [{ kind: 'five_hour', utilization: 0.2 }],
+    });
+    assert.doesNotMatch(p, /The engine you run on/);
+  });
+
+  test('a high window surfaces the figure and the pacing, without a wind-down order', () => {
+    const p = wakeWith({
+      sessionEndsAt: clock.now().getTime() + 3 * 60 * 60_000,
+      usageWindows: [
+        { kind: 'five_hour', utilization: 0.85 },
+        { kind: 'seven_day', utilization: 0.49 },
+      ],
+    });
+    assert.match(p, /## The engine you run on/);
+    // Utilization is stored 0–1; it is shown as a percentage.
+    assert.match(p, /5h 85%/);
+    assert.match(p, /7d 49%/);
+    assert.match(p, /slows your wakes, then pauses them/);
+    assert.doesNotMatch(p, /Wind down now/);
+  });
+
+  test('an unbounded run with no reading says nothing about the engine', () => {
+    assert.doesNotMatch(wakeWith({}), /The engine you run on/);
+  });
+});

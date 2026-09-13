@@ -105,6 +105,15 @@ export type TickDeps = {
   /** Wall clock the whole shift may take before it is stopped. See
    *  CompanyPolicy.shiftTimeoutMinutes. 0 or absent leaves it unbounded. */
   shiftTimeoutMs?: number;
+  /** When this run's session cap stops the scheduler (epoch ms), or absent when
+   *  the run is unbounded. Surfaced to the shift so it winds down to a
+   *  checkpoint before the cap rather than being cut mid-write. See
+   *  Scheduler.until / CompanyPolicy.maxSessionHours. */
+  sessionEndsAt?: number;
+  /** The subscription's current usage windows (utilization 0–1), the same
+   *  reading the scheduler paces on, so the shift can pace with it rather than
+   *  learn it only by being throttled. See Scheduler.windows. */
+  usageWindows?: ReadonlyArray<{ kind: string; utilization: number | null }>;
   /** External MCP servers (image generation, calendar, inbox). Everything they
    *  reach still crosses the gate — canUseTool sees these calls too. */
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
@@ -344,8 +353,15 @@ const buildSystemPrompt = (d: TickDeps): string => {
 };
 
 /** The volatile half — what changed since this staff member last woke. */
+/** Show the engine-state note only when it should change what the shift does:
+ *  within this many minutes of the session cap, or at/above this utilization
+ *  (0–1). Display thresholds only — the scheduler owns the real throttle and
+ *  pause; these decide when it is worth spending a tick's tokens to say so. */
+const WINDDOWN_MINUTES = 25;
+const NOTICE_UTILIZATION = 0.7;
+
 export const buildTickPrompt = (d: TickDeps): string => {
-  const { agent, ledger, clock } = d;
+  const { agent, ledger, clock, sessionEndsAt, usageWindows } = d;
   const parts: string[] = [`It is ${clock.now().toLocaleString()}. You have woken up.`];
 
   /**
@@ -401,6 +417,48 @@ export const buildTickPrompt = (d: TickDeps): string => {
       );
     }
     parts.push('', 'Answer what you agree with by changing the work, and say plainly where you disagree.');
+  }
+
+  // The engine you run on, surfaced only when it should change what you do.
+  //
+  // Riff stops a run at its session cap and slows, then pauses, wakes as the
+  // subscription's usage climbs. It is the same "wind down, do not get cut" and
+  // "pace on the window" the company is building into its own product: a shift
+  // that cannot see the cap coming gets cut mid-write, and one that cannot see
+  // the window cannot pace. Silent until near the cap or the window is high, so
+  // a quiet tick pays nothing for it.
+  {
+    const minutesLeft = sessionEndsAt != null
+      ? Math.max(0, Math.round((sessionEndsAt - clock.now().getTime()) / 60_000))
+      : null;
+    const windows = (usageWindows ?? []).filter((w) => w.utilization != null);
+    const worst = windows.reduce((m, w) => Math.max(m, w.utilization ?? 0), 0);
+    const nearCap = minutesLeft != null && minutesLeft <= WINDDOWN_MINUTES;
+    if (nearCap || worst >= NOTICE_UTILIZATION) {
+      const label = (k: string): string =>
+        k === 'five_hour' ? '5h' : k === 'seven_day' ? '7d' : k;
+      parts.push('', '## The engine you run on');
+      if (nearCap) {
+        parts.push(
+          '',
+          `This session stops in about ${minutesLeft} min. Wind down now: finish or`,
+          'safely park what you are on, commit it, and leave a note saying where to',
+          'resume. Do not start what you cannot land in the time left. Being stopped',
+          'is not a failure; being cut mid-write is.',
+        );
+      } else if (minutesLeft != null) {
+        parts.push('', `This session stops in about ${minutesLeft} min.`);
+      }
+      if (windows.length) {
+        parts.push(
+          '',
+          `Subscription usage now: ${windows.map(
+            (w) => `${label(w.kind)} ${Math.round((w.utilization ?? 0) * 100)}%`).join(', ')}.`
+          + ' This is the whole plan, not just you — as it climbs the engine first'
+          + ' slows your wakes, then pauses them. Pace accordingly.',
+        );
+      }
+    }
   }
 
   /**
@@ -1058,8 +1116,36 @@ export const tick = async (
     // against the conversation we have already decided to discard — and its
     // closing words are about note-taking rather than about the work.
     if (!handover) contextTokens = 0;
+
+    // Hold the prompt open as a one-message stream instead of passing a string.
+    //
+    // A string prompt makes the SDK mark the query single-turn and close stdin
+    // the instant the first result lands (0.3.243, Query.readMessages: "First
+    // result received for single-turn query, closing stdin"). stdin carries the
+    // canUseTool control channel, so on a RESUMED session — whose transcript
+    // loads over async I/O that jitters startup ordering — the result can land
+    // at or before the first tool turn, stdin closes, and every later gate call
+    // comes back `Stream closed`: gateCalls stays 0 while the model keeps
+    // calling tools, which is shift.blind. An async iterable is routed through
+    // streamInput, is never marked single-turn, and keeps stdin (the gate) alive
+    // until the leg's own result releases it below — so the channel the blind
+    // watch and recoverBlind exist to catch no longer dies on turn one.
+    let releaseInput!: () => void;
+    const inputOpen = new Promise<void>((r) => { releaseInput = r; });
+    async function* onePrompt(): AsyncGenerator<SDKUserMessage> {
+      yield {
+        type: 'user',
+        parent_tool_use_id: null,
+        message: { role: 'user', content: prompt },
+      } as SDKUserMessage;
+      // Parked so the iterable does not complete: streamInput closes stdin when
+      // its input stream ends, so returning here would reintroduce the very
+      // close we are avoiding. Released on the leg's result (or its exit).
+      await inputOpen;
+    }
+
     const q = query({
-      prompt,
+      prompt: onePrompt(),
       options: {
         cwd: world.root,
         model: agent.model,
@@ -1292,15 +1378,25 @@ export const tick = async (
           tokens.cacheRead += u.cacheReadInputTokens;
           tokens.cacheWrite += u.cacheCreationInputTokens;
         }
-        if (handover) continue;
+        if (handover) { releaseInput(); continue; }
         contextWindow = m.modelUsage?.[agent.model]?.contextWindow ?? contextWindow;
         // "ended: error_max_turns" was going into the journal and the commit
         // message — an error code standing in for the agent's own account of
         // its shift. Their last words are a truer record than the subtype.
         summary = m.subtype === 'success' ? m.result : (said || `ended: ${m.subtype}`);
         await readUsage(q);
+        // The leg's one turn is done. Release the held input AFTER the usage
+        // read (which needs a live stdin), so streamInput completes, closes
+        // stdin, the CLI exits and this loop ends. Released here, inside the
+        // loop on the result — not in a post-loop finally, which the held-open
+        // stream would never reach on the happy path (deadlock).
+        releaseInput();
       }
     }
+    // Break paths (blind, tools_missing, stream-error, abort) leave the loop
+    // before any result; abort tears the stream down, and this releases the
+    // parked generator so it cannot outlive the leg. Idempotent.
+    releaseInput();
   };
 
   let prompt = buildTickPrompt(d);

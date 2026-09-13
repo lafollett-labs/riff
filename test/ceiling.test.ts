@@ -165,6 +165,47 @@ describe('a blind leg on a resumed session is retried cold, once', () => {
   });
 });
 
+/**
+ * The cure beneath recoverBlind: the prompt is streamed, never a string.
+ *
+ * A string prompt makes the SDK mark the query single-turn and close stdin —
+ * the channel canUseTool rides on — the instant the first result lands. On a
+ * resumed session that result races the first tool turn, stdin closes, the
+ * gate is never asked (gateCalls: 0) while tools are called, and the leg goes
+ * blind. A held-open one-message async iterable is routed through streamInput
+ * and never marked single-turn, so stdin stays alive until the leg's own
+ * result releases it. recoverBlind is the backstop; this is the fix.
+ */
+describe('the permission channel is kept alive by streaming the prompt, not passing a string', () => {
+  const runLeg = () => {
+    const src = staff();
+    const from = src.indexOf('const runLeg');
+    assert.notEqual(from, -1, 'runLeg must exist');
+    return src.slice(from, src.indexOf('let prompt = buildTickPrompt', from));
+  };
+
+  test('the prompt handed to the SDK is a held-open stream, never a bare string', () => {
+    const src = runLeg();
+    // One user turn, then parked: completing the input stream is what closes
+    // stdin, so the generator must not return while the leg is live.
+    assert.match(src, /async function\* onePrompt\(\)/);
+    assert.match(src, /await inputOpen;/);
+    assert.match(src, /query\(\{\s*prompt: onePrompt\(\),/);
+    // A bare string straight into query is the blinding shape, and the bug.
+    assert.doesNotMatch(src, /query\(\{\s*prompt,/);
+  });
+
+  test('the held input is released on the result and again after the loop', () => {
+    // Released after the usage read on the happy path (usage needs a live
+    // stdin), on the handover result, and once more after the loop for the
+    // break paths — a post-loop release alone would never be reached on the
+    // happy path, because the held-open stream keeps the loop from ending.
+    const src = runLeg();
+    assert.ok((src.match(/releaseInput\(\);/g) ?? []).length >= 3,
+      'released on the result, on the handover result, and after the loop');
+  });
+});
+
 describe('the dead control stream is read at its source, not inferred from silence', () => {
   // A user message carrying tool_result blocks, the shape the SDK emits when it
   // answers the assistant's tool calls.

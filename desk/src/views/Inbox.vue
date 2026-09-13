@@ -369,7 +369,7 @@ const when = (iso: string) => {
           </ul>
         </span>
       </div>
-      <textarea v-model="note" rows="5"
+      <textarea v-model="note" rows="12"
         placeholder="Markdown is fine. They read it when they next wake — you do not wait here for an answer." />
       <div class="actions">
         <button class="go" :disabled="!canPost || posting" @click="post">
@@ -510,7 +510,7 @@ const when = (iso: string) => {
 .opt.more:hover { background: none; }
 .compose textarea { font: inherit; font-size: 14px; line-height: 1.55; background: #15100d;
   color: var(--ink); border: 1px solid var(--line-2); border-radius: 6px; padding: 10px 12px;
-  resize: vertical; }
+  width: 100%; box-sizing: border-box; min-height: 200px; resize: vertical; }
 .compose .actions { display: flex; align-items: center; gap: 8px; }
 .compose .hint { font-size: 11px; }
 .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }

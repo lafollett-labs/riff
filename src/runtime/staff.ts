@@ -748,6 +748,38 @@ export const cacheEnv = (dir: string): Record<string, string> => ({
 });
 
 /**
+ * The scoped proxy tokens a shift's product carries, keyed by the env var each
+ * service's secret is read from.
+ *
+ * One token per shift, scoped to this company and valid a little past the
+ * shift's own clock, injected under every declared service's `secret` name — so
+ * the product reads its ordinary env var (`OPENROUTER_API_KEY`,
+ * `ANTHROPIC_AUTH_TOKEN`) and gets a capability, never the real key, which
+ * stays in the proxy's container. An agent can read its own token; it cannot
+ * forge one for another company (the signing secret is outside every world) and
+ * it never sees the key at all.
+ *
+ * Two services that name the same secret share the one token, which is correct:
+ * the token identifies the company, not the service, and the proxy resolves the
+ * real key per route. Empty when the company declares no services.
+ *
+ * Extracted so the wiring can be tested against verifyScopedToken directly — the
+ * child-process env is built from real query() options a unit test cannot drive.
+ */
+export const scopedSecretEnv = (
+  companySlug: string | undefined,
+  services: Record<string, ServiceRoute> | undefined,
+  shiftTimeoutMs: number | undefined,
+): Record<string, string> => {
+  const env: Record<string, string> = {};
+  if (!companySlug || !services || !Object.keys(services).length) return env;
+  const ttlSeconds = Math.ceil((shiftTimeoutMs ?? 45 * 60_000) / 1000) + 300;
+  const token = mintScopedToken(companySlug, ttlSeconds);
+  for (const route of Object.values(services)) env[route.secret] = token;
+  return env;
+};
+
+/**
  * Whether to hand this conversation over and carry on in a fresh one.
  *
  * Unknown is not "yes": with no window reported there is no denominator, and
@@ -1083,21 +1115,10 @@ export const tick = async (
   /** Null until a usage call answers either way. See limitsReadable. */
   let planVisible: boolean | null = null;
 
-  /**
-   * The scoped tokens this shift's product uses to reach the key-injecting
-   * proxy. One token per shift, scoped to this company, valid a little past the
-   * shift's own clock; injected under each declared service's secret name, so
-   * the product reads its ordinary env var (`OPENROUTER_API_KEY`, say) and gets
-   * a capability — never the real key, which stays in the proxy's container. An
-   * agent can read its own token; it cannot forge one for another company (the
-   * signing secret is outside every world) and it never sees the key at all.
-   */
-  const secretEnv: Record<string, string> = {};
-  if (d.companySlug && d.services && Object.keys(d.services).length) {
-    const ttlSeconds = Math.ceil((d.shiftTimeoutMs ?? 45 * 60_000) / 1000) + 300;
-    const token = mintScopedToken(d.companySlug, ttlSeconds);
-    for (const route of Object.values(d.services)) secretEnv[route.secret] = token;
-  }
+  // The scoped proxy tokens this shift's product carries, keyed by each
+  // service's secret env var. See scopedSecretEnv — extracted so the wiring is
+  // tested directly. Merged into the shift's child-process env below.
+  const secretEnv = scopedSecretEnv(d.companySlug, d.services, d.shiftTimeoutMs);
 
   /**
    * Ask what is left of the subscription, rather than waiting to be told.

@@ -583,6 +583,9 @@ test('answering mail between colleagues reaches both, not just the one who wrote
 
   await overheard.locator('.row').click();
   await overheard.getByRole('button', { name: 'Reply' }).click();
+  // The reply is a full Markdown editor too, not a bare box — same toolbar as
+  // the composer.
+  await expect(overheard.locator('.reply').getByRole('button', { name: 'Bold' })).toBeVisible();
   // The box names everyone it is about to reach, before anything is sent.
   const placeholder = (await overheard.locator('textarea').getAttribute('placeholder')) ?? '';
   expect(placeholder.toLowerCase()).toContain(`${wrote} and ${written}`);

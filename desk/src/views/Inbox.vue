@@ -27,6 +27,9 @@ const open = ref(new Set<string>());
 const replyTo = ref<string | null>(null);
 const draft = ref('');
 const sending = ref(false);
+// As with the composer, a reply must not be sent while an image it embeds is
+// still uploading (the body would carry the `![uploading…]` placeholder).
+const replyBusy = ref(false);
 const page = ref(0);
 const filter = ref('');
 
@@ -308,15 +311,19 @@ const audienceLabel = (m: Message) =>
 const startReply = (m: Message) => {
   replyTo.value = replyTo.value === m.id ? null : m.id;
   draft.value = '';
+  // A fresh editor reports nothing until an upload starts, so reset the flag a
+  // prior reply's unmount may have left set.
+  replyBusy.value = false;
   if (!isOpen(m)) toggle(m);
 };
 
 const send = async (m: Message) => {
-  if (!draft.value.trim()) return;
+  if (!draft.value.trim() || replyBusy.value) return;
   sending.value = true;
   await api.say(replyAudience(m), draft.value.trim(), speakingAs.value);
   draft.value = '';
   replyTo.value = null;
+  replyBusy.value = false;
   sending.value = false;
   emit('changed');
 };
@@ -457,11 +464,11 @@ const when = (iso: string) => {
         </p>
         <div class="body" v-html="render(m.body)" />
         <div v-if="replyTo === m.id" class="reply">
-          <textarea v-model="draft" rows="3"
+          <MarkdownEditor v-model="draft" min-height="120px" @busy="replyBusy = $event"
             :placeholder="`Reply to ${audienceLabel(m)} — they read it on their next waking.`" />
           <div class="actions">
-            <button class="go" :disabled="sending || !draft.trim()" @click="send(m)">Send</button>
-            <button class="ghost" @click="replyTo = null">Cancel</button>
+            <button class="go" :disabled="sending || replyBusy || !draft.trim()" @click="send(m)">Send</button>
+            <button class="ghost" @click="replyTo = null; replyBusy = false">Cancel</button>
           </div>
         </div>
         <div v-else class="actions">
@@ -568,9 +575,6 @@ input { background: #15100d; color: var(--ink); border: 1px solid var(--line-2);
 
 .body { font-size: 15px; padding: 4px 18px 0; }
 .reply { padding: 14px 18px 4px; }
-.reply textarea { width: 100%; font: inherit; font-size: 13px; line-height: 1.6;
-  background: #15100d; color: var(--ink); border: 1px solid var(--line-2);
-  border-radius: 5px; padding: 10px; resize: vertical; }
 .actions { display: flex; gap: 8px; padding: 12px 18px 16px; }
 
 @media (prefers-reduced-motion: reduce) { .chev { transition: none; } }

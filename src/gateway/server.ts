@@ -125,6 +125,38 @@ const spool = async (req: IncomingMessage, to: string): Promise<number> => {
   return size;
 };
 
+/**
+ * Read a raw binary request body, refusing anything past `max`. The JSON
+ * readBody caps at 1MB and parses; an image is neither, so it needs its own.
+ */
+const readBinaryBody = async (req: IncomingMessage, max: number): Promise<Buffer> => {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const c of req) {
+    size += (c as Buffer).length;
+    if (size > max) throw new Error('body too large');
+    chunks.push(c as Buffer);
+  }
+  return Buffer.concat(chunks);
+};
+
+/**
+ * The extension for an image, decided by its bytes rather than the client's
+ * word. Only raster types a paste or a screenshot actually produces — SVG is
+ * refused because it is the one "image" that can carry script, and nothing
+ * pastes one anyway. Unrecognized bytes return null and the upload is refused,
+ * so the world never gains a file whose contents do not match its name.
+ */
+const sniffImage = (b: Buffer): string | null => {
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return 'png';
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'jpg';
+  if (b.length >= 6 && b.toString('latin1', 0, 4) === 'GIF8') return 'gif';
+  if (b.length >= 12 && b.toString('latin1', 0, 4) === 'RIFF' && b.toString('latin1', 8, 12) === 'WEBP') return 'webp';
+  // AVIF/HEIF: an ISO-BMFF 'ftyp' box whose major/compatible brand is avif.
+  if (b.length >= 12 && b.toString('latin1', 4, 8) === 'ftyp' && b.toString('latin1', 8, 12).startsWith('avi')) return 'avif';
+  return null;
+};
+
 const readBody = async (req: IncomingMessage): Promise<Record<string, unknown>> => {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -708,6 +740,24 @@ const server = createServer(async (req, res) => {
           // Missing, or a path trying to leave the world.
           return json(res, { error: 'forbidden' }, 403);
         }
+      }
+
+      /**
+       * Store an operator-pasted or chosen image and hand back the world path
+       * to reference it by. The bytes are the body; the type is decided by
+       * sniffing them, never by the client's content-type — a mislabelled or
+       * exotic upload cannot write a file whose name lies about its contents.
+       * The store is gitignored (see World.writeAttachment), so this adds
+       * nothing to the company's authored history.
+       */
+      if (p === '/api/attachment' && method === 'POST') {
+        let bytes: Buffer;
+        try { bytes = await readBinaryBody(req, 12_000_000); }
+        catch { return json(res, { error: 'image too large — 12MB max' }, 413); }
+        if (!bytes.length) return json(res, { error: 'no image in the request' }, 400);
+        const ext = sniffImage(bytes);
+        if (!ext) return json(res, { error: 'not a supported image (PNG, JPEG, GIF, WebP or AVIF)' }, 415);
+        return json(res, { path: world.writeAttachment(bytes, ext) }, 201);
       }
 
       if (p === '/api/whathappened' && method === 'GET') {

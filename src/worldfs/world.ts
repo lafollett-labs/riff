@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, realpathSync, rmSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join, resolve, sep, dirname, relative } from 'node:path';
 import { parse, stringify, field, type Doc, type Frontmatter } from './frontmatter.ts';
 import { WorldGit } from './git.ts';
@@ -267,6 +268,27 @@ export class World {
     if (!existsSync(abs)) return false;
     rmSync(abs, { recursive: true, force: true });
     return true;
+  }
+
+  // ------------------------------------------------------------ attachments
+  /**
+   * Store an operator-supplied image (pasted or chosen while composing a
+   * message) and return its world-relative path, which a message body then
+   * references as `![image](<path>)` and /api/file serves back.
+   *
+   * `attachments/` is gitignored, not committed: an attachment is operator
+   * metadata for a message, not staff-authored work, so it must not appear in
+   * the world's history, inflate anyone's artifact count, or be swept into a
+   * staff commit by `add -A`. The random name keeps two pastes in one day from
+   * colliding; `ext` comes from the server sniffing the bytes, never the client.
+   */
+  writeAttachment(bytes: Buffer, ext: string): string {
+    this.git.ignore('attachments/');
+    const rel = `attachments/${this.#clock.day()}-${randomBytes(6).toString('hex')}.${ext}`;
+    const abs = this.path(rel);
+    mkdirSync(dirname(abs), { recursive: true });
+    writeFileSync(abs, bytes);
+    return rel;
   }
 
   listDrafts(id: AgentId): string[] {

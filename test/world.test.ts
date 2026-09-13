@@ -172,6 +172,42 @@ describe('git — attribution is the audit trail', () => {
   });
 });
 
+describe('attachments — operator image metadata, not authored work', () => {
+  // A real PNG signature plus a few bytes; writeAttachment does not parse it,
+  // the endpoint does, so any bytes stand in here.
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+
+  test('an attachment lands under attachments/ and its bytes round-trip', () => {
+    const rel = world.writeAttachment(png, 'png');
+    assert.match(rel, /^attachments\/2026-08-24-[0-9a-f]{12}\.png$/);
+    assert.deepEqual(readFileSync(world.path(rel)), png);
+  });
+
+  test('attachments are gitignored, so a fresh one never makes the world dirty', () => {
+    world.writeAttachment(png, 'png');
+    assert.equal(world.git.isDirty(), false, 'the attachment must be ignored, not left staged');
+  });
+
+  test('a staff commit does not sweep an attachment into their name or count', () => {
+    world.ensureStaff('greg');
+    world.writeAttachment(png, 'png');              // the operator pastes an image
+    world.writeNote('greg', null, 'a', 'real work'); // then greg does actual work
+    world.git.commitAs({ id: 'greg', name: 'Greg' }, 'greg works');
+
+    // Greg's commit must hold his note and NOT the attachment — otherwise the
+    // operator's paste inflates the artifacts greg is measured on, the same
+    // failure the .DS_Store ignore exists to prevent.
+    const files = execFileSync('git',
+      ['-C', world.root, 'show', '--name-only', '--pretty=format:', 'HEAD'], { encoding: 'utf8' });
+    assert.match(files, /staff\/greg\/notes\//, "greg's own work belongs in his commit");
+    assert.doesNotMatch(files, /attachments\//, 'the attachment was swept into a staff commit');
+  });
+
+  test('two pastes the same day do not collide', () => {
+    assert.notEqual(world.writeAttachment(png, 'png'), world.writeAttachment(png, 'png'));
+  });
+});
+
 describe('documents the staff wrote themselves', () => {
   test('frontmatter in the body is absorbed, never stacked', () => {
     world.writeDoc('commons/theirs.md', {

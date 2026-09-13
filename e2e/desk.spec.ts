@@ -654,6 +654,38 @@ test('a message can be started from scratch, to one person or to the company', a
   await expect(page.locator('.msg .addressed')).toHaveText(/EVERYONE/i);
 });
 
+test('the composer formats a selection and embeds a chosen image', async ({ page }) => {
+  // The bodies render as Markdown, so the composer is a Markdown editor. The
+  // toolbar wraps the selection so you need not remember the syntax, and an
+  // image is uploaded into the world and referenced, not left to a broken link.
+  await go(page, 'Inbox');
+  await page.getByRole('button', { name: 'Compose' }).click();
+  const composer = page.locator('.compose');
+  const ta = composer.locator('textarea');
+
+  // Bold wraps the selected word, and only it.
+  await ta.fill('make this bold');
+  await ta.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(10, 14));
+  await composer.getByRole('button', { name: 'Bold' }).click();
+  await expect(ta).toHaveValue('make this **bold**');
+
+  // A chosen image uploads and lands as a world reference the renderer can
+  // serve — a 1x1 PNG stands in for whatever the operator pastes or picks. The
+  // reference lands at the caret, so put the caret at the end first.
+  await ta.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(el.value.length, el.value.length));
+  const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
+  await composer.locator('input[type=file]').setInputFiles({
+    name: 'shot.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64'),
+  });
+  await expect(ta).toHaveValue(/make this \*\*bold\*\*!\[image\]\(attachments\/[\w-]+\.png\)/, { timeout: 5000 });
+
+  // And a non-image upload is refused, not written under a lying name.
+  await composer.locator('input[type=file]').setInputFiles({
+    name: 'note.png', mimeType: 'image/png', buffer: Buffer.from('this is not a PNG'),
+  });
+  await expect(composer.locator('.status.err')).toBeVisible();
+});
+
 test('a long roster stays a field to type in, not a wall to read', async ({ page }) => {
   // Forty toggles is not a control. The menu caps at what fits above the
   // message you came here to write, and says how much it is not showing.

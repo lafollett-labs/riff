@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, nextTick } from 'vue';
+import { api } from './api';
 
 /**
  * A textarea for Markdown prose, with a formatting toolbar over it.
@@ -7,7 +8,8 @@ import { ref, nextTick } from 'vue';
  * The console renders message and document bodies as Markdown (`markdown.ts`),
  * so the composer was already a Markdown editor — it just made you remember the
  * syntax. The buttons and ⌘B/⌘I/⌘K wrap the selection for you, keeping it
- * selected afterwards so the caret never jumps to the end.
+ * selected afterwards so the caret never jumps to the end; pasting or choosing
+ * an image uploads it and drops an `![image](…)` reference the renderer serves.
  */
 const props = withDefaults(defineProps<{
   modelValue: string;
@@ -18,6 +20,10 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{ 'update:modelValue': [string] }>();
 
 const ta = ref<HTMLTextAreaElement | null>(null);
+const fileInput = ref<HTMLInputElement | null>(null);
+const uploading = ref(0);
+const error = ref('');
+let seq = 0;
 
 /** Focus the box (used after a button click so typing continues in it). */
 const focus = () => ta.value?.focus();
@@ -67,6 +73,51 @@ const onKey = (e: KeyboardEvent) => {
 
 const onInput = (e: Event) =>
   emit('update:modelValue', (e.target as HTMLTextAreaElement).value);
+
+/**
+ * Upload an image and drop its reference where the caret is. A unique
+ * placeholder holds the spot while the bytes are in flight, so the caret can
+ * keep moving and typing continue — on success it becomes the real reference,
+ * on failure it is removed rather than left as a broken link.
+ */
+const insertImage = async (blob: Blob) => {
+  const el = ta.value;
+  const token = `![uploading…](#upload-${++seq})`;
+  const at = el ? el.selectionStart : props.modelValue.length;
+  emit('update:modelValue', props.modelValue.slice(0, at) + token + props.modelValue.slice(at));
+  uploading.value++;
+  error.value = '';
+  try {
+    const { path } = await api.uploadAttachment(blob);
+    swap(token, `![image](${path})`);
+  } catch (e) {
+    swap(token, '');
+    error.value = e instanceof Error ? e.message : 'that image would not upload';
+  } finally {
+    uploading.value--;
+  }
+};
+
+/** Replace a placeholder in whatever the value is now — the user may have kept
+ *  typing around it, so we cannot assume its old position. */
+const swap = (token: string, withText: string) => {
+  if (props.modelValue.includes(token)) emit('update:modelValue', props.modelValue.replace(token, withText));
+};
+
+const onPaste = (e: ClipboardEvent) => {
+  const item = [...(e.clipboardData?.items ?? [])].find((it) => it.type.startsWith('image/'));
+  const file = item?.getAsFile();
+  if (!file) return;               // ordinary text paste falls through untouched
+  e.preventDefault();
+  void insertImage(file);
+};
+
+const onPick = (e: Event) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (file) void insertImage(file);
+  input.value = '';                // let the same file be chosen again next time
+};
 </script>
 
 <template>
@@ -85,9 +136,23 @@ const onInput = (e: Event) =>
           <path d="M14 11a5 5 0 0 0-7.07 0l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
         </svg>
       </button>
+      <button type="button" class="fmt" title="Add an image — or just paste one"
+              aria-label="Add an image" @click="fileInput?.click()">
+        <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"
+             fill="none" stroke="currentColor" stroke-width="2"
+             stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="18" height="18" rx="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <path d="M21 15l-5-5L5 21" />
+        </svg>
+      </button>
+      <span v-if="uploading" class="status faint mono" aria-live="polite">uploading…</span>
+      <span v-else-if="error" class="status err" role="alert">{{ error }}</span>
+      <input ref="fileInput" type="file" hidden
+             accept="image/png,image/jpeg,image/gif,image/webp,image/avif" @change="onPick" />
     </div>
     <textarea ref="ta" :value="modelValue" :placeholder="placeholder"
-              :style="{ minHeight }" @input="onInput" @keydown="onKey" />
+              :style="{ minHeight }" @input="onInput" @keydown="onKey" @paste="onPaste" />
   </div>
 </template>
 
@@ -105,6 +170,8 @@ const onInput = (e: Event) =>
 .fmt:focus-visible { outline: none; border-color: var(--line-2); color: var(--ink); }
 .fmt.bold { font-weight: 700; }
 .fmt.ital { font-style: italic; font-family: var(--serif); }
+.status { margin-left: auto; align-self: center; font-size: 11px; padding-right: 4px; }
+.status.err { color: var(--alert); }
 
 textarea { font: inherit; font-size: 14px; line-height: 1.55; color: var(--ink);
   background: none; border: 0; padding: 10px 12px; width: 100%; box-sizing: border-box;

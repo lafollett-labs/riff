@@ -246,6 +246,22 @@ export const api = {
     send<{ ok: boolean; name: string }>('/api/services', 'PUT', { name, ...route }),
   deleteService: (name: string) =>
     send<{ deleted: boolean }>(`/api/services?name=${encodeURIComponent(name)}`, 'DELETE'),
+  /**
+   * Upload an image pasted or chosen while composing, and get back the
+   * world-relative path to reference it by (`![image](<path>)`). The bytes are
+   * the body; the server sniffs the real type and refuses anything that is not
+   * a raster image, so the content-type here is only a hint.
+   */
+  uploadAttachment: async (blob: Blob): Promise<{ path: string }> => {
+    const r = await fetch(withCompany('/api/attachment'), {
+      method: 'POST',
+      headers: { 'content-type': blob.type || 'application/octet-stream' },
+      body: blob,
+    });
+    const data = await r.json().catch(() => ({})) as { path: string; error?: string };
+    if (!r.ok) throw new Error(data.error ?? `attachment → ${r.status}`);
+    return data;
+  },
   commons: () => get<{ held: number; ceiling: number; documents: CommonsDoc[] }>('/api/commons'),
   vitals: (window = '7.days') =>
     get<Vitals>(`/api/vitals?window=${encodeURIComponent(window)}`),

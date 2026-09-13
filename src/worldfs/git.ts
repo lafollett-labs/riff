@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { realpathSync, existsSync, writeFileSync } from 'node:fs';
+import { realpathSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { systemClock, type Clock } from '../core/clock.ts';
 
@@ -100,6 +100,27 @@ export class WorldGit {
 
   isDirty(): boolean {
     return this.#git(['status', '--porcelain']).length > 0;
+  }
+
+  /**
+   * Ensure a pattern is gitignored, committing the .gitignore change itself as
+   * infrastructure if it had to be added.
+   *
+   * Same reasoning as #ignoreDroppings: an operator's pasted attachment must
+   * never be swept into a staff member's commit by the next `add -A`, nor
+   * counted toward the artifacts they made. Committed via a pathspec so only
+   * .gitignore lands, whatever else happens to be in the index.
+   */
+  ignore(pattern: string): void {
+    const path = join(this.#dir, '.gitignore');
+    const cur = existsSync(path) ? readFileSync(path, 'utf8') : '';
+    if (cur.split('\n').some((l) => l.trim() === pattern)) return;
+    writeFileSync(path, (cur && !cur.endsWith('\n') ? cur + '\n' : cur) + pattern + '\n', 'utf8');
+    this.#git(['add', '.gitignore']);   // works whether it is new or already tracked
+    this.#git([
+      '-c', 'user.name=Riff', '-c', 'user.email=riff@localhost',
+      'commit', '-q', '-m', `Ignore ${pattern}`, '--', '.gitignore',
+    ]);
   }
 
   /**

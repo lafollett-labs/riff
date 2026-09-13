@@ -529,7 +529,7 @@ const server = createServer(async (req, res) => {
       }, 404);
     }
     if (co) {
-      const { cfg, ledger, world, gate, constitution, scheduler } = co;
+      const { cfg, ledger, transcript, world, gate, constitution, scheduler } = co;
 
       if (p === '/api/state' && method === 'GET') {
         const agents = ledger.listAgents();
@@ -701,6 +701,19 @@ const server = createServer(async (req, res) => {
           // world.path() throws on anything escaping the world root.
           return json(res, { error: 'forbidden' }, 403);
         }
+      }
+
+      // Review a shift: the company's own audit of what a staff member actually
+      // did. `agent` is required; `session` picks one of that agent's sessions,
+      // defaulting to the most recent. `sessions` lets the console offer the
+      // rest without a second round trip.
+      if (p === '/api/transcript' && method === 'GET') {
+        const who = url.searchParams.get('agent') ?? '';
+        if (!who) return json(res, { error: 'name an agent with ?agent=<id>' }, 400);
+        const sessions = transcript.sessionsFor(who);
+        const wanted = url.searchParams.get('session') ?? sessions[0]?.sessionId ?? null;
+        const turns = wanted ? transcript.bySession(wanted) : [];
+        return json(res, { agent: who, sessionId: wanted, sessions, turns });
       }
 
       /*

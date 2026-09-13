@@ -4,7 +4,9 @@
 // exits 0 anyway, so scripts/check-sfc-types.mjs enforces it instead.
 import type { Vitals, Trend } from '../../src/analytics/types.ts';
 import type { CompanyRef as ConfigCompanyRef, CompanyPolicy, ServiceRoute } from '../../src/core/config.ts';
+import type { Turn, SessionSummary } from '../../src/ledger/transcript.ts';
 export type { ServiceRoute };
+export type { Turn, SessionSummary };
 export type { Vitals, Trend };
 
 /** Everything the Desk knows, it knows from these. */
@@ -272,6 +274,14 @@ export const api = {
   doc: (path: string) =>
     get<{ path: string; body: string; title: string | null; author: string | null; updated: string | null }>(
       `/api/doc?path=${encodeURIComponent(path)}`),
+  /**
+   * Review a shift: the company's own audit of what an agent did, recorded from
+   * the SDK stream. `sessions` is that agent's history for a picker; `turns` is
+   * the chosen session (the most recent unless one is named).
+   */
+  transcript: (agent: string, session?: string) =>
+    get<{ agent: string; sessionId: string | null; sessions: SessionSummary[]; turns: Turn[] }>(
+      `/api/transcript?agent=${encodeURIComponent(agent)}${session ? `&session=${encodeURIComponent(session)}` : ''}`),
   decide: async (id: string, approved: boolean, reason: string) => {
     const r = await fetch(withCompany(`/api/approvals/${id}`), {
       method: 'POST', headers: { 'content-type': 'application/json' },

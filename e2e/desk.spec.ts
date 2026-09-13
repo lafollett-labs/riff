@@ -116,6 +116,14 @@ test('opening a colleague shows the persona they were given', async ({ page }) =
   await expect(page.locator('.detail .meta')).toContainText('hired');
 });
 
+test('a shift can be reviewed agent by agent, and says so honestly when empty', async ({ page }) => {
+  await go(page, 'Shift', 'Review a Shift');
+  // Staff are pickable; board members are people and run no shifts.
+  await expect(page.locator('.agents button').filter({ hasText: 'Wren' })).toBeVisible();
+  // The fixture has run no shifts, so the audit is empty rather than fabricated.
+  await expect(page.locator('main')).toContainText(/No recorded shifts/);
+});
+
 test('the commons lists documents under the titles their authors chose', async ({ page }) => {
   await go(page, 'Commons');
   await expect(page.locator('.doc .t')).toHaveText(['What we are for', 'Scores, including ours']);

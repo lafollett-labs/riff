@@ -3,6 +3,7 @@ import { ref, onMounted, onUnmounted, computed, watch } from 'vue';
 import { api, stream, setCompany, type State, type Event, type CompanyRef } from './api';
 import Envelope from './views/Envelope.vue';
 import Record from './views/Record.vue';
+import Shift from './views/Shift.vue';
 import Staff from './views/Staff.vue';
 import Feed from './views/Feed.vue';
 import Commons from './views/Commons.vue';
@@ -20,6 +21,7 @@ const VIEWS = [
   { id: 'envelope', label: 'Envelope', comp: Envelope },
   { id: 'inbox',    label: 'Inbox',    comp: Inbox },
   { id: 'record',   label: 'Record',   comp: Record },
+  { id: 'shift',    label: 'Shift',    comp: Shift },
   { id: 'staff',    label: 'Staff',    comp: Staff },
   { id: 'work',     label: 'Work',     comp: Work },
   { id: 'commons',  label: 'Commons',  comp: Commons },

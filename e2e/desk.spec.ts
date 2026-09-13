@@ -684,6 +684,34 @@ test('the composer formats a selection and embeds a chosen image', async ({ page
     name: 'note.png', mimeType: 'image/png', buffer: Buffer.from('this is not a PNG'),
   });
   await expect(composer.locator('.status.err')).toBeVisible();
+
+  // The keyboard does the same as the buttons. Italic wraps the selection...
+  await ta.fill('word');
+  await ta.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(0, 4));
+  await ta.press('Meta+i');
+  await expect(ta).toHaveValue('*word*');
+
+  // ...and a link keeps the selection as the label, landing the caret on "url"
+  // so the address types straight over it (the offset math that had no test).
+  await ta.fill('see docs');
+  await ta.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(4, 8));
+  await ta.press('Meta+k');
+  await expect(ta).toHaveValue('see [docs](url)');
+  const selected = await ta.evaluate((el: HTMLTextAreaElement) =>
+    el.value.slice(el.selectionStart, el.selectionEnd));
+  expect(selected).toBe('url');
+
+  // Pasting an image is the same path as choosing one — the paste handler
+  // uploads it and drops the reference at the caret.
+  await ta.fill('shot: ');
+  await ta.evaluate((el: HTMLTextAreaElement) => el.setSelectionRange(el.value.length, el.value.length));
+  await ta.evaluate((el: HTMLTextAreaElement, b64: string) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'paste.png', { type: 'image/png' }));
+    el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
+  }, png);
+  await expect(ta).toHaveValue(/shot: !\[image\]\(attachments\/[\w-]+\.png\)/, { timeout: 5000 });
 });
 
 test('a long roster stays a field to type in, not a wall to read', async ({ page }) => {

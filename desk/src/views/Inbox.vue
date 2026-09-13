@@ -143,6 +143,9 @@ const audience = ref<string[]>([]);
 const toEveryone = ref(false);
 const note = ref('');
 const posting = ref(false);
+// True while the editor has an image upload in flight — the note then still
+// holds an `![uploading…]` placeholder, which must not be sent.
+const editorBusy = ref(false);
 
 /** Everyone you could write to. Not yourself, and not anyone who has left. */
 const roster = computed(() => props.state.agents
@@ -237,7 +240,7 @@ watch(composing, async (on) => {
 });
 
 const canPost = computed(() =>
-  Boolean(note.value.trim()) && (toEveryone.value || audience.value.length > 0));
+  Boolean(note.value.trim()) && !editorBusy.value && (toEveryone.value || audience.value.length > 0));
 
 const discard = () => {
   composing.value = false;
@@ -246,6 +249,9 @@ const discard = () => {
   toEveryone.value = false;
   query.value = '';
   menuOpen.value = false;
+  // The editor unmounts with the panel, so its final busy(false) may never
+  // arrive; clear it here or the next compose opens with Send stuck disabled.
+  editorBusy.value = false;
 };
 
 // Which board member is speaking. A board of two had one voice, because this
@@ -370,7 +376,7 @@ const when = (iso: string) => {
           </ul>
         </span>
       </div>
-      <MarkdownEditor v-model="note"
+      <MarkdownEditor v-model="note" @busy="editorBusy = $event"
         placeholder="Markdown is fine. They read it when they next wake — you do not wait here for an answer." />
       <div class="actions">
         <button class="go" :disabled="!canPost || posting" @click="post">

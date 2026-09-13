@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, nextTick } from 'vue';
+import { ref, watch, nextTick } from 'vue';
 import { api } from './api';
 
 /**
@@ -17,13 +17,18 @@ const props = withDefaults(defineProps<{
   minHeight?: string;
 }>(), { placeholder: '', minHeight: '200px' });
 
-const emit = defineEmits<{ 'update:modelValue': [string] }>();
+const emit = defineEmits<{ 'update:modelValue': [string]; busy: [boolean] }>();
 
 const ta = ref<HTMLTextAreaElement | null>(null);
 const fileInput = ref<HTMLInputElement | null>(null);
 const uploading = ref(0);
 const error = ref('');
 let seq = 0;
+
+// The parent gates Send on this: a body still holding an `![uploading…]`
+// placeholder must not be sent (it ships as a broken image and orphans the
+// file the upload is about to write).
+watch(uploading, (n) => emit('busy', n > 0));
 
 /** Focus the box (used after a button click so typing continues in it). */
 const focus = () => ta.value?.focus();
@@ -99,9 +104,10 @@ const insertImage = async (blob: Blob) => {
 };
 
 /** Replace a placeholder in whatever the value is now — the user may have kept
- *  typing around it, so we cannot assume its old position. */
+ *  typing around it, so we cannot assume its old position. The replacer is a
+ *  function so a `$` in the path can never be read as a replace pattern. */
 const swap = (token: string, withText: string) => {
-  if (props.modelValue.includes(token)) emit('update:modelValue', props.modelValue.replace(token, withText));
+  if (props.modelValue.includes(token)) emit('update:modelValue', props.modelValue.replace(token, () => withText));
 };
 
 const onPaste = (e: ClipboardEvent) => {
@@ -122,7 +128,7 @@ const onPick = (e: Event) => {
 
 <template>
   <div class="editor">
-    <div class="bar" role="toolbar" aria-label="Formatting">
+    <div class="bar" role="group" aria-label="Formatting">
       <button type="button" class="fmt bold" title="Bold — ⌘B" aria-label="Bold"
               @click="surround('**')">B</button>
       <button type="button" class="fmt ital" title="Italic — ⌘I" aria-label="Italic"
@@ -146,8 +152,10 @@ const onPick = (e: Event) => {
           <path d="M21 15l-5-5L5 21" />
         </svg>
       </button>
-      <span v-if="uploading" class="status faint mono" aria-live="polite">uploading…</span>
-      <span v-else-if="error" class="status err" role="alert">{{ error }}</span>
+      <!-- One region, always present, so a screen reader announces changes into
+           it — and an error is never masked by another upload still running. -->
+      <span class="status mono" :class="{ err: !!error, faint: !error }"
+            role="status" aria-live="polite">{{ error || (uploading ? 'uploading…' : '') }}</span>
       <input ref="fileInput" type="file" hidden
              accept="image/png,image/jpeg,image/gif,image/webp,image/avif" @change="onPick" />
     </div>

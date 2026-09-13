@@ -125,6 +125,16 @@ export type CompanyPolicy = {
    * rather than silent, and an operator who wants longer raises this.
    */
   maxSessionHours: number;
+  /**
+   * Attach a per-leg operation trace to blind and tools-missing events: the
+   * ordering of SDK messages, the tools the model reached for, the gate asks
+   * and the CLI's own stderr in the run-up to the failure. Off by default —
+   * it is an audit tool for diagnosing the permission-channel races (a blind
+   * then shows tool wants with no gate ask between them, with timing, instead
+   * of only turns:0 gateCalls:0), and it carries a payload every time one
+   * fires. See runLeg's legTrace.
+   */
+  blindTrace: boolean;
 };
 
 /**
@@ -154,12 +164,17 @@ export const DEFAULT_POLICY: CompanyPolicy = {
   // Long enough to be a real run, short enough that forgetting to stop it is
   // not a night's worth of somebody's window.
   maxSessionHours: 2,
+  // Off until someone is hunting a blind: the trace is diagnostic weight, not
+  // steady-state record.
+  blindTrace: false,
 };
 
 /** Clamp anything a config file or an API caller offers into a workable range. */
 export const readPolicy = (raw: unknown): CompanyPolicy => {
   const o = (raw ?? {}) as Partial<Record<keyof CompanyPolicy, unknown>>;
-  const num = (k: keyof CompanyPolicy, lo: number, hi: number): number => {
+  // Only the numeric dials; blindTrace is a flag and is read separately below.
+  type NumericKey = { [K in keyof CompanyPolicy]: CompanyPolicy[K] extends number ? K : never }[keyof CompanyPolicy];
+  const num = (k: NumericKey, lo: number, hi: number): number => {
     const raw = o[k];
     // Absent is not zero, and Number() disagrees: null, '' and [] all coerce
     // to a finite 0, which clamps to the minimum instead of falling back. A
@@ -191,6 +206,8 @@ export const readPolicy = (raw: unknown): CompanyPolicy => {
     shiftTimeoutMinutes: num('shiftTimeoutMinutes', 0, 1440),
     // 0 likewise: a run with no end, for someone who means it.
     maxSessionHours: num('maxSessionHours', 0, 720),
+    // A plain flag, not a clamped number: anything but a real true is off.
+    blindTrace: typeof o.blindTrace === 'boolean' ? o.blindTrace : DEFAULT_POLICY.blindTrace,
   };
 };
 

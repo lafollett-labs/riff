@@ -195,6 +195,24 @@ describe('the permission channel is kept alive by streaming the prompt, not pass
     assert.doesNotMatch(src, /query\(\{\s*prompt,/);
   });
 
+  test('the blind trace is gated on the flag and rides the blind events', () => {
+    // The audit trace is diagnostic weight: it must be a no-op when off, and
+    // when a blind fires it must carry the leg's operation trail, not just
+    // turns:0 gateCalls:0.
+    const src = staff();
+    const leg = runLeg();
+    // Off is a real no-op path, so a quiet shift pays nothing.
+    assert.match(src, /const tracing = d\.blindTrace \?\? false;/);
+    assert.match(src, /\(_op: string\): void => \{ \/\* auditing off \*\/ \}/);
+    // Both blind emits and the tools-missing emit carry the audit tail.
+    assert.equal((leg.match(/\.\.\.auditTail\(\)/g) ?? []).length, 3,
+      'the two blind emits and tools_missing all carry the trace when auditing');
+    // The trace records the ordering that makes a blind legible: the gate ask
+    // is logged in the shift-level gate wrapper, the leg start inside the leg.
+    assert.match(src, /trace\(`gate ask \$\{name\}`\)/);
+    assert.match(leg, /trace\(`leg start /);
+  });
+
   test('the held input is released on the result and again after the loop', () => {
     // Released after the usage read on the happy path (usage needs a live
     // stdin), on the handover result, and once more after the loop for the

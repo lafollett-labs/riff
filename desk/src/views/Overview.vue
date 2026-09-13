@@ -97,7 +97,13 @@ const DIALS = [
     min: 0, max: 720, step: 0.5 },
 ] as const;
 
-const policy = ref<Record<string, number>>({ ...props.state.policy });
+// The editable dials are all numeric; blindTrace is a diagnostic flag set
+// elsewhere. Keep it out of the number map the dials bind to — the save merges
+// server-side, so leaving it out here never resets it.
+const numericDials = (p: Record<string, unknown>): Record<string, number> =>
+  Object.fromEntries(Object.entries(p).filter(([, v]) => typeof v === 'number')) as Record<string, number>;
+
+const policy = ref<Record<string, number>>(numericDials(props.state.policy));
 const tuning = ref(false);
 const saving = ref(false);
 const perr = ref('');
@@ -117,7 +123,7 @@ const pausePct = ref(Math.round(props.state.policy.pauseAboveUtilization * 100))
 const capUsd = ref(props.state.policy.dailyCapCents / 100);
 
 const resetDials = () => {
-  policy.value = { ...props.state.policy };
+  policy.value = numericDials(props.state.policy);
   throttlePct.value = Math.round(props.state.policy.throttleAboveUtilization * 100);
   pausePct.value = Math.round(props.state.policy.pauseAboveUtilization * 100);
   capUsd.value = props.state.policy.dailyCapCents / 100;

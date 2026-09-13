@@ -114,6 +114,10 @@ export type TickDeps = {
    *  reading the scheduler paces on, so the shift can pace with it rather than
    *  learn it only by being throttled. See Scheduler.windows. */
   usageWindows?: ReadonlyArray<{ kind: string; utilization: number | null }>;
+  /** Attach a per-leg operation trace to blind/tools-missing events, for
+   *  diagnosing the permission-channel races. Off by default. See
+   *  CompanyPolicy.blindTrace and runLeg's legTrace. */
+  blindTrace?: boolean;
   /** External MCP servers (image generation, calendar, inbox). Everything they
    *  reach still crosses the gate — canUseTool sees these calls too. */
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
@@ -970,11 +974,40 @@ export const tick = async (
    * Failing safe is not the same as failing loudly.
    */
   let gateCalls = 0;
+
+  // A per-leg operation trace for the permission-channel races, built only when
+  // blindTrace is on (it rides every blind/tools-missing event). It records the
+  // ordering — leg start (resumed or cold), each SDK message, the tools the
+  // model reached for, each gate ask, the result — with a millisecond offset,
+  // so a blind reads as tool wants with NO gate ask between them instead of a
+  // bare turns:0 gateCalls:0. Reset per leg by runLeg; `trace` is a no-op when
+  // off, so a shift that is not being audited pays nothing.
+  const tracing = d.blindTrace ?? false;
+  let legClock = clock.now().getTime();
+  let legTrace: string[] = [];
+  let legResumed = false;
+  const trace = tracing
+    ? (op: string): void => {
+      legTrace.push(`+${clock.now().getTime() - legClock}ms ${op}`);
+      if (legTrace.length > 80) legTrace.shift();
+    }
+    : (_op: string): void => { /* auditing off */ };
+
   const gate2 = makeCanUseTool({
     actor: agent.id, world, gate, toolCapabilities: capabilities,
     ...(d.trace ? { onDecision: (t, o, why) => d.trace!(`  gate  ${o.padEnd(5)} ${t} ${why}`) } : {}),
   });
-  const gated: CanUseTool = (name, input, opts) => { gateCalls++; return gate2(name, input, opts); };
+  const gated: CanUseTool = (name, input, opts) => {
+    gateCalls++;
+    trace(`gate ask ${name}`);
+    return gate2(name, input, opts);
+  };
+
+  // The diagnostic tail a blind or tools-missing event carries while auditing:
+  // the leg's whole operation trace, whether it was resumed, whether its tools
+  // came up, and the CLI's own last words. Empty when auditing is off.
+  const auditTail = (): Record<string, unknown> =>
+    tracing ? { resumed: legResumed, toolsUp, trace: legTrace.slice(), noise: noise.slice(-800) } : {};
 
   /**
    * One controller per LEG, chained to the shift's own signal.
@@ -1116,6 +1149,13 @@ export const tick = async (
     // against the conversation we have already decided to discard — and its
     // closing words are about note-taking rather than about the work.
     if (!handover) contextTokens = 0;
+
+    // Start this leg's trace. resumed-vs-cold is the first correlator of a
+    // blind, so it leads the record.
+    legClock = clock.now().getTime();
+    legTrace = [];
+    legResumed = session != null;
+    trace(`leg start ${legResumed ? `resumed ${(session ?? '').slice(0, 8)}` : 'cold'}${handover ? ' handover' : ''}`);
 
     // Hold the prompt open as a one-message stream instead of passing a string.
     //
@@ -1268,9 +1308,15 @@ export const tick = async (
         }
         const wantsGated = m.message.content.some(
           (b) => b.type === 'tool_use' && reachesGate(b.name));
+        if (tracing) {
+          const toolNames: string[] = [];
+          for (const b of m.message.content) if (b.type === 'tool_use') toolNames.push(b.name);
+          if (toolNames.length) trace(`assistant wants [${toolNames.join(',')}] gated=${wantsGated}`);
+        }
         if (watch.turn(gateCalls, wantsGated)) {
           wentBlind = true;
-          ledger.emit(agent.id, 'shift.blind', null, { turns, gateCalls, after: BLIND_TURNS });
+          ledger.emit(agent.id, 'shift.blind', null,
+            { turns, gateCalls, after: BLIND_TURNS, ...auditTail() });
           stop.abort();
           break;
         }
@@ -1304,7 +1350,9 @@ export const tick = async (
       // blindWatch, which fails it loudly rather than looping.
       if (m.type === 'user' && session && gateCalls === 0 && streamClosedResult(m)) {
         wentBlind = true;
-        ledger.emit(agent.id, 'shift.blind', null, { turns, gateCalls, after: 0, via: 'stream-error' });
+        trace('user stream-closed (gate never answered)');
+        ledger.emit(agent.id, 'shift.blind', null,
+          { turns, gateCalls, after: 0, via: 'stream-error', ...auditTail() });
         stop.abort();
         break;
       }
@@ -1324,11 +1372,16 @@ export const tick = async (
       if (m.type === 'system' && m.subtype === 'init') {
         const server = m.mcp_servers.find((x) => x.name === TOOL_NAMESPACE);
         toolsUp = server?.status === 'connected';
+        trace(`init tools=${server?.status ?? 'absent'}`);
         if (!toolsUp) {
           ledger.emit(agent.id, 'shift.tools_missing', null, {
             status: server?.status ?? 'absent',
             servers: m.mcp_servers,
-            resumed: session != null,
+            // legResumed, not `session != null`: this init message may have just
+            // set session (line above), which would mislabel a cold start as
+            // resumed. legResumed is captured at leg start, before any of that.
+            resumed: legResumed,
+            ...auditTail(),
           });
           stop.abort();
           break;
@@ -1352,6 +1405,7 @@ export const tick = async (
         });
       }
       if (m.type === 'result') {
+        trace(`result ${m.subtype} turns=${m.num_turns}`);
         turns += m.num_turns;
         costUsd += m.total_cost_usd;
         legs.push({ budget: maxTurns, turns: m.num_turns, subtype: m.subtype });

@@ -53,6 +53,14 @@ describe('a company can be tuned without being broken', () => {
     assert.equal(p.concurrency, 2);
     assert.equal(p.commonsCeiling, 41);
   });
+
+  test('the blind-trace flag is off by default and takes only a real boolean', () => {
+    assert.equal(readPolicy({}).blindTrace, false);
+    assert.equal(readPolicy({ blindTrace: true }).blindTrace, true);
+    // Diagnostic weight should never switch on by a stray truthy value.
+    assert.equal(readPolicy({ blindTrace: 'true' }).blindTrace, false);
+    assert.equal(readPolicy({ blindTrace: 1 }).blindTrace, false);
+  });
 });
 
 describe('the Tune panel edits the whole policy schema', () => {
@@ -68,7 +76,10 @@ describe('the Tune panel edits the whole policy schema', () => {
     // Fields whose value is transformed in the field (percent, dollars) are
     // handled outside DIALS and sent by name in the save patch.
     const special = ['throttleAboveUtilization', 'pauseAboveUtilization', 'dailyCapCents'];
-    const editable = new Set([...dialKeys, ...special]);
+    // Diagnostic-only, deliberately off the operator's Tune panel: set via the
+    // API/config when someone is hunting a blind, not a knob to graze past.
+    const diagnostic = ['blindTrace'];
+    const editable = new Set([...dialKeys, ...special, ...diagnostic]);
     const schema = Object.keys(DEFAULT_POLICY);
 
     const missing = schema.filter((k) => !editable.has(k));

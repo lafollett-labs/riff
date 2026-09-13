@@ -78,6 +78,9 @@ export type SchedulerOptions = {
    * run. See CompanyPolicy.maxSessionHours.
    */
   maxSessionMs: number;
+  /** Attach the per-leg operation trace to blind/tools-missing events. See
+   *  CompanyPolicy.blindTrace. */
+  blindTrace: boolean;
 };
 
 /** Defaults assume a Claude subscription: no dollar caps, paced by rate limit. */
@@ -98,6 +101,7 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
   // 1.6x the longest shift ever recorded here. See CompanyPolicy.
   shiftTimeoutMs: 45 * 60_000,
   maxSessionMs: 2 * 60 * 60_000,
+  blindTrace: false,
 };
 
 type Deps = {
@@ -614,6 +618,7 @@ export class Scheduler {
         maxTurns: this.#opts.maxTurns,
         rotateAtContextPct: this.#opts.rotateAtContextPct,
         ...(this.#opts.shiftTimeoutMs > 0 ? { shiftTimeoutMs: this.#opts.shiftTimeoutMs } : {}),
+        ...(this.#opts.blindTrace ? { blindTrace: true } : {}),
         // The engine's own state, so the shift can wind down before the cap and
         // pace on the window instead of learning it by being throttled.
         ...(this.#opts.until != null ? { sessionEndsAt: this.#opts.until } : {}),

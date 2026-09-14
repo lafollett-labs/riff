@@ -25,9 +25,11 @@ import { atomicWriteFileSync } from './atomicwrite.ts';
  *   5. the only company that exists       the common case
  *   6. built-in defaults                  only ever used to WRITE a new one
  *
- * Identity — RIFF_COMPANY, RIFF_BUSINESS, RIFF_CHAIR,
- * RIFF_CEO — overrides the stored config on every read, which is what
- * makes a container run reproducible from environment alone.
+ * Identity — RIFF_COMPANY, RIFF_BUSINESS, RIFF_CHAIR, RIFF_CEO — SEEDS a
+ * company that does not exist yet; stored config always wins on a read. These
+ * used to override every read, until the container's placeholder values renamed
+ * every real company inside it — the resolver below folds stored over env over
+ * built-in, in that order.
  */
 
 /**

@@ -25,7 +25,7 @@ company has no endpoint, that is the bug, not a missing script.
 
 ---
 
-## The six rules
+## The seven rules
 
 1. Work well together.
 2. Work however you see fit inside your mandate — the CEO approves what needs approving.
@@ -33,11 +33,14 @@ company has no endpoint, that is the bug, not a missing script.
 4. Only the treasurer may spend, up to $5.00 a day.
 5. If the board is not around, do not stop.
 6. The commons holds 40 documents. To add one past that, remove one.
+7. You may carry a set number of projects at once. To start another, retire one.
 
-**Rules 2, 3, 4 and 6 are code.** Every action an agent attempts crosses one
+**Rules 2, 3, 4, 6 and 7 are code.** Every action an agent attempts crosses one
 gate before it happens, and no tool bypasses it. Rule 3 has exactly one member
 and no configuration to loosen it: there is one door to the outside world and
-it opens onto your desk as a draft.
+it opens onto your desk as a draft. Rule 7 is off for a company whose
+`portfolioCeiling` is zero, and stated in the agents' own rules only when it
+is on.
 
 Rules 1 and 5 are deliberately not enforced. One is a disposition, the other is
 a property of the scheduler.
@@ -60,7 +63,7 @@ stay in step.
 | tier | who | what the gate does |
 | - | - | - |
 | `board` | humans | terminal authority; bypasses the gate because it *is* the gate |
-| `executive` | the CEO | signs hires and cross-desk writes |
+| `executive` | the CEO | signs hires, project retirements and cross-desk writes |
 | `lead` | whoever the CEO hires | may hire, with the CEO's signature |
 | `member` | whoever the leads hire | works inside a mandate |
 
@@ -83,7 +86,8 @@ silent.
       staff/<id>/                persona · memory · journal · notes · drafts
       commons/                   shared ground, no schema
     ledger.db                    node:sqlite
-    config.json                  who this company is, and its connectors
+    transcript.db                a separate audit of every SDK turn, beside the ledger
+    config.json                  who this company is, its connectors and services
   archive/<slug>-<stamp>/        removed companies, moved not deleted
 ```
 
@@ -127,11 +131,14 @@ be reviewable. It opens on an **Overview** of every company and drops into one:
 | **Companies** | found, rename, start, pause, archive, export and import |
 | **Envelope** | everything waiting on the board, each draft rendered in full |
 | **Record** | what actually landed in the world, by author, over a window |
+| **Shift** | the company's own audit of what a staff member did in a shift — the recorded SDK turns, thinking, tool calls and results |
 | **Staff** | the report tree, each persona, and a way to leave word |
 | **Commons** | the shelf, under the titles the authors chose |
 | **Inbox** | what the staff wrote to you, and a reply that reaches them — or every message anyone here sent, since most of a company's conversation never reaches the board |
 | **Work** | tasks in flight, dropped and finished; broken reporting lines |
 | **Vitals** | whether any of this is working — cost, output, and the rules that actually bit, against the window before |
+| **Secrets** | per-company keys, written into the encrypted vault, masked and never echoed back |
+| **Services** | which outside hosts a company may reach, and which secret authenticates each — names and hosts only, never values |
 | **Feed** | live events over SSE, newest first |
 
 Every surface updates itself as the company works — a document posted while
@@ -155,15 +162,17 @@ npm run mcp             # stdio; RIFF_API points at the gateway, default loopbac
 ```
 
 `.mcp.json` registers it for this checkout, so a Claude Code session gets
-fifteen typed `riff_*` tools — `riff_state`, `riff_vitals`, `riff_events`,
-`riff_found`, `riff_running`, `riff_decide` and the rest — instead of URLs and
-JSON bodies to assemble by hand.
+seventeen typed `riff_*` tools — `riff_state`, `riff_vitals`, `riff_events`,
+`riff_found`, `riff_running`, `riff_decide`, `riff_transcript` and the rest —
+instead of URLs and JSON bodies to assemble by hand.
 
-The whole surface is two files: `src/mcp/client.ts` is a typed client and the
+The tool surface is two files: `src/mcp/client.ts` is a typed client and the
 only thing that knows an endpoint's shape; `src/mcp/server.ts` is thin wiring
 over it. Because every tool is a call into that one client, the MCP surface
 cannot become a second implementation that drifts from the API — the same
-reason the console is a client and not a shortcut.
+reason the console is a client and not a shortcut. (`usagePoll.ts` beside them
+feeds the plan's rate-limit windows to the gateway while a session holds the
+MCP — see *Vitals* below.)
 
 ---
 
@@ -185,9 +194,13 @@ RIFF_WORLD / RIFF_LEDGER  →  RIFF_HOME  →  RIFF_COMPANY_ID
 `RIFF_ROOT` moves the whole installation, which is how the test suite keeps
 its hands off yours.
 
-Identity — `RIFF_COMPANY`, `RIFF_BUSINESS`, `RIFF_CHAIR`,
-`RIFF_CEO` — overrides the stored config on every read, which is what makes
-a container run reproducible from environment alone.
+Identity — `RIFF_COMPANY`, `RIFF_BUSINESS`, `RIFF_CHAIR`, `RIFF_CEO` — **seeds
+a company that does not exist yet**; stored config always wins on a read. These
+used to override on every read, from when an installation held exactly one
+company. With many, the container's placeholder `RIFF_COMPANY`/`RIFF_CEO` then
+renamed every real company "Untitled Company" and gave it a phantom executive —
+so stored beats environment beats built-in, and the environment only fills in
+what was never written down.
 
 ---
 
@@ -230,11 +243,12 @@ something ask for it, so `up.sh logs`, `ps`, `down` and `config` never make
 your password manager prompt. To keep this checkout free of your configuration
 entirely, put the file anywhere and set `RIFF_ENV` to its path.
 
-Three containers, and the shape is the point:
+Four containers, and the shape is the point:
 
 | | |
 | - | - |
 | `factory` | the real tools, the shell, your token. On a network with **no route off the machine** |
+| `keyproxy` | holds a company's real API keys and injects them on the way out, so the factory carries a scoped token it cannot trade for the key |
 | `egress` | the only way out, to an anchored-regex allowlist. Logs what it refused |
 | `ingress` | the only way in: a TCP forwarder with no token and no agent code |
 
@@ -371,7 +385,18 @@ numbers rather than as impressions.
 
 Riff knows nothing about any provider. Anything a connector reaches still
 crosses the gate: touching the outside world is `external.write`, which always
-lands as a draft. Credentials go in that file, which is gitignored.
+lands as a draft.
+
+A company's own API keys — the ones its **product** calls out with, not the
+connectors above — do not go in `config.json` at all. They live in a per-company
+**encrypted vault** (`src/core/secrets.ts`), written through the **Secrets** desk
+tab, and a **Service** (`services` in config, the **Services** tab) declares the
+one outside host each may reach and which secret authenticates it. The `keyproxy`
+sidecar holds the real key and injects it on egress; the shift's own process only
+ever carries a **scoped, per-shift token** the proxy swaps for the key on the way
+out (`src/core/proxytoken.ts`). So a company can *use* a key it can never *read* —
+the factory is never handed the value, and the key is never written to
+`config.json`, the volume, or a log.
 
 ---
 

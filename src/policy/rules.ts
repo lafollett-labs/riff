@@ -3,9 +3,10 @@ import type { AgentId, Capability } from '../core/types.ts';
 /**
  * The company's constitution.
  *
- * Six rules. Four are enforced here and in the gate; two deliberately are not,
- * because they are dispositions rather than permissions and pretending
- * otherwise would be theatre.
+ * Seven rules — R7 only when a portfolio ceiling is set. The enforced ones
+ * (R2, R3, R4, R6, and R7 when on) live here and in the gate; R1 and R5 are
+ * deliberately not, because they are dispositions rather than permissions and
+ * pretending otherwise would be theatre.
  */
 export type Constitution = {
   /** R4: the only seats that may touch money. Everyone else is refused. */

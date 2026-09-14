@@ -63,7 +63,8 @@ env: { ...process.env, HOME: tmp, RIFF_ROOT: join(tmp, '.riff'),
 Every operator action is an HTTP endpoint in `src/gateway/server.ts`, and
 everything else is a client of it: the console, the `riff_*` MCP tools, and
 whatever you write. `scripts/` holds build and dev utilities only —
-`check-sfc-types.mjs` and whatever a git hook needs.
+`check-sfc-types.mjs`, `usage-poller.sh` (host-side, POSTs the plan's rate-limit
+windows to the gateway), and whatever a git hook needs.
 
 ```
 if a thing an operator does has no endpoint:
@@ -98,6 +99,13 @@ reading a company:
     either    -> docker/up.sh exec -T factory node -e '...'   # inside, always safe
 ```
 
+`transcript.db` sits beside the ledger and is a second WAL database with the
+identical hazard — the shift audit store (`src/ledger/transcript.ts`, read
+through `/api/transcript`). The same rule covers it: a running company's
+transcript is read through the API or from inside the container, never by host
+`sqlite3`. And "stopped" means the whole container is down — while the gateway
+holds the handles open, read from inside.
+
 Stop a company before `docker/up.sh up --build` or `restart`, for the same
 reason: recreating the container kills a shift mid-write.
 
@@ -118,7 +126,9 @@ Shell is decided by `shellIsContained()`, which requires both
 `RIFF_CONTAINED=1` and a container marker, and fails closed. Do not relax
 either signal, and never weaken any of this to make a test
 pass. Read `SECURITY.md` before touching `src/runtime/permissions.ts`,
-`src/policy/gate.ts`, `src/company/transfer.ts`, or anything under `docker/`.
+`src/policy/gate.ts`, `src/company/transfer.ts`, the secrets path
+(`src/keyproxy/main.ts`, `src/core/secrets.ts`, `src/core/proxytoken.ts` — it
+holds and injects a company's real keys), or anything under `docker/`.
 
 ## Docker
 

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { RiffClient, normalizeBase, shapeEvents } from '../src/mcp/client.ts';
+import { RiffClient, normalizeBase, shapeEvents, shapeTranscript } from '../src/mcp/client.ts';
 
 interface Recorded { method: string; url: string; body: unknown; }
 
@@ -149,6 +149,71 @@ test('events requests a limit and shapes the reply', async () => {
     const data = r.data as { count: number; events: Array<Record<string, unknown>> };
     assert.equal(data.count, 1);
     assert.deepEqual(data.events[0]?.data, { error: 'x' });
+  } finally {
+    await s.close();
+  }
+});
+
+test('shapeTranscript filters entries by kind and by error, and reports how much it scanned', () => {
+  const raw = {
+    agent: 'lynn', sessionId: 's1', sessions: [{ sessionId: 's1' }, { sessionId: 's0' }],
+    more: true, nextAfter: 42,
+    turns: [
+      { seq: 1, kind: 'text', text: 'hi', meta: {} },
+      { seq: 2, kind: 'tool_use', name: 'Bash', text: '{"command":"ls"}', meta: {} },
+      { seq: 3, kind: 'tool_result', name: 'tu_1', text: 'refused', meta: { isError: true } },
+      { seq: 4, kind: 'tool_result', name: 'tu_2', text: 'ok', meta: { isError: false } },
+      { seq: 5, kind: 'result', text: 'done', meta: { subtype: 'error_max_turns' } },
+    ],
+  };
+
+  // No filter: everything comes back, and the cursor/scan fields pass through.
+  const all = shapeTranscript(raw);
+  assert.equal(all.scanned, 5);
+  assert.equal(all.shown, 5);
+  assert.equal(all.more, true);
+  assert.equal(all.nextAfter, 42);
+  assert.deepEqual(all.sessions, [{ sessionId: 's1' }, { sessionId: 's0' }]);
+
+  // kinds keeps only the named entry kinds.
+  const tools = shapeTranscript(raw, { kinds: 'tool_use' });
+  assert.equal(tools.shown, 1);
+  assert.equal(tools.scanned, 5);
+  assert.equal(tools.turns[0]?.['seq'], 2);
+
+  // errorsOnly keeps errored tool results AND a non-success shift result.
+  const errs = shapeTranscript(raw, { errorsOnly: true });
+  assert.deepEqual(errs.turns.map((t) => t['seq']), [3, 5]);
+
+  // A success result is not an error.
+  const success = shapeTranscript({ turns: [{ seq: 9, kind: 'result', meta: { subtype: 'success' } }] }, { errorsOnly: true });
+  assert.equal(success.shown, 0);
+});
+
+test('transcript asks a small page by default, a large one when filtering, and shapes the reply', async () => {
+  const s = await stub();
+  try {
+    const client = new RiffClient(s.base);
+
+    // Unfiltered: a modest page so a long shift is not dumped through the model.
+    s.reply({ agent: 'lynn', sessionId: 's1', sessions: [], turns: [], more: false, nextAfter: 0 });
+    await client.transcript('shipit', { agent: 'lynn' });
+    assert.equal(last(s.calls).url, '/api/transcript?c=shipit&agent=lynn&after=0&limit=60');
+
+    // Filtering scans a large page and returns only the matches.
+    s.reply({
+      agent: 'lynn', sessionId: 's1', sessions: [], more: false, nextAfter: 3,
+      turns: [
+        { seq: 1, kind: 'text', meta: {} },
+        { seq: 2, kind: 'tool_result', meta: { isError: true } },
+      ],
+    });
+    const r = await client.transcript('shipit', { agent: 'lynn', session: 's1', errorsOnly: true });
+    assert.equal(last(s.calls).url, '/api/transcript?c=shipit&agent=lynn&session=s1&after=0&limit=500');
+    const data = r.data as { scanned: number; shown: number; turns: Array<Record<string, unknown>> };
+    assert.equal(data.scanned, 2);
+    assert.equal(data.shown, 1);
+    assert.equal(data.turns[0]?.['seq'], 2);
   } finally {
     await s.close();
   }

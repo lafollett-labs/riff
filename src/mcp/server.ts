@@ -113,6 +113,27 @@ server.registerTool('riff_whathappened', {
   inputSchema: { company, since: z.string().optional().describe('e.g. "3.days", "12.hours"') },
 }, ({ company: c, since }) => run(() => client.whathappened(c, since)));
 
+server.registerTool('riff_transcript', {
+  title: 'Riff: review a shift transcript',
+  description: 'The company\'s own audit of what a staff member did in a shift — the recorded SDK turns (thinking, tool calls, tool results, the closing result). `agent` is required; `session` picks one of that agent\'s sessions (default the most recent) and the response lists the rest. Filter entries with `kinds` (comma-separated: text,thinking,tool_use,tool_result,result) and/or `errorsOnly` (errored tool results + non-success shift results). Unfiltered returns a small recent page; filtering scans a larger page (raise `limit`, max 2000, or page with `after`=nextAfter to scan a long shift) and returns only the matches — `scanned` says how many turns were looked at, `more` whether another page waits. Turn counts and tool I/O only — never report dollars.',
+  inputSchema: {
+    company,
+    agent: z.string().describe('agent id whose shift to read'),
+    session: z.string().optional().describe('session id; defaults to the most recent'),
+    kinds: z.string().optional().describe('comma-separated entry kinds to keep: text,thinking,tool_use,tool_result,result'),
+    errorsOnly: z.boolean().optional().describe('keep only errored tool results and non-success shift results'),
+    after: z.number().int().min(0).optional().describe('cursor: the last seq already seen (0 from the start)'),
+    limit: z.number().int().min(1).max(2000).optional().describe('turns to scan per page (default 60, or 500 when filtering)'),
+  },
+}, ({ company: c, agent, session, kinds, errorsOnly, after, limit }) => run(() => client.transcript(c, {
+  agent,
+  ...(session !== undefined ? { session } : {}),
+  ...(kinds !== undefined ? { kinds } : {}),
+  ...(errorsOnly !== undefined ? { errorsOnly } : {}),
+  ...(after !== undefined ? { after } : {}),
+  ...(limit !== undefined ? { limit } : {}),
+})));
+
 // ------------------------------------------------------------- run control
 server.registerTool('riff_running', {
   title: 'Riff: start or pause a company',

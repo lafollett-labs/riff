@@ -79,6 +79,55 @@ export const shapeEvents = (
   return { count: events.length, events };
 };
 
+/**
+ * A shift's recorded turns, filtered to the entries a reader asked for. The
+ * endpoint pages by seq and returns every kind; a reviewer usually wants one
+ * slice — the tool calls, or only what errored — and returning the whole page
+ * back through the model is how a 300-turn shift becomes unreadable. `kinds`
+ * keeps only the named entry kinds; `errorsOnly` keeps errored tool results and
+ * any shift result whose subtype is not success. The filter runs over the page
+ * the endpoint returned, so `scanned` says how much was looked at and `more`
+ * whether another page waits — raise `limit` or page with `after` to see more.
+ */
+export const shapeTranscript = (
+  data: unknown,
+  opts?: { kinds?: string; errorsOnly?: boolean },
+): {
+  agent: unknown; sessionId: unknown; sessions: unknown[];
+  scanned: number; shown: number; more: unknown; nextAfter: unknown;
+  turns: Array<Record<string, unknown>>;
+} => {
+  const d = asRecord(data);
+  const raw = Array.isArray(d['turns']) ? (d['turns'] as unknown[]) : [];
+  const rows = raw.map((r) => asRecord(r));
+  const want = opts?.kinds
+    ? new Set(opts.kinds.split(',').map((s) => s.trim()).filter((s) => s.length > 0))
+    : null;
+  const errored = (t: Record<string, unknown>): boolean => {
+    const m = asRecord(t['meta']);
+    if (m['isError'] === true) return true;
+    // A shift's own closing result: any subtype but success is a failed leg.
+    if (t['kind'] === 'result') {
+      const st = m['subtype'];
+      return typeof st === 'string' && st !== 'success';
+    }
+    return false;
+  };
+  const turns = rows.filter((t) =>
+    (want === null || (typeof t['kind'] === 'string' && want.has(t['kind'] as string))) &&
+    (!opts?.errorsOnly || errored(t)));
+  return {
+    agent: d['agent'] ?? null,
+    sessionId: d['sessionId'] ?? null,
+    sessions: Array.isArray(d['sessions']) ? (d['sessions'] as unknown[]) : [],
+    scanned: rows.length,
+    shown: turns.length,
+    more: d['more'] ?? false,
+    nextAfter: d['nextAfter'] ?? 0,
+    turns,
+  };
+};
+
 const q = (slug: string): string => `?c=${encodeURIComponent(slug)}`;
 
 export type Fetcher = typeof fetch;
@@ -160,6 +209,38 @@ export class RiffClient {
   whathappened(slug: string, since?: string): Promise<RiffResponse> {
     const s = since ? `&since=${encodeURIComponent(since)}` : '';
     return this.#req('GET', `/api/whathappened${q(slug)}${s}`);
+  }
+
+  /**
+   * Review a shift: the company's own audit of what a staff member did.
+   * `agent` is required; `session` defaults server-side to that agent's most
+   * recent. Unfiltered we ask for a small page (a shift dumps hundreds of turns
+   * and each one costs tokens); when filtering we scan a large page and hand
+   * back only the matches, so "the errors in this shift" is one call for any
+   * shift under the page size. `after`/`limit` page a longer one.
+   */
+  async transcript(
+    slug: string,
+    opts: { agent: string; session?: string; after?: number; limit?: number; kinds?: string; errorsOnly?: boolean },
+  ): Promise<RiffResponse> {
+    const filtering = Boolean(opts.kinds) || opts.errorsOnly === true;
+    const limit = opts.limit && opts.limit > 0
+      ? Math.min(2000, Math.round(opts.limit))
+      : (filtering ? 500 : 60);
+    const after = opts.after && opts.after > 0 ? Math.round(opts.after) : 0;
+    const session = opts.session ? `&session=${encodeURIComponent(opts.session)}` : '';
+    const r = await this.#req(
+      'GET',
+      `/api/transcript${q(slug)}&agent=${encodeURIComponent(opts.agent)}${session}&after=${after}&limit=${limit}`,
+    );
+    if (r.status >= 400) return r;
+    return {
+      status: r.status,
+      data: shapeTranscript(r.data, {
+        ...(opts.kinds !== undefined ? { kinds: opts.kinds } : {}),
+        ...(opts.errorsOnly !== undefined ? { errorsOnly: opts.errorsOnly } : {}),
+      }),
+    };
   }
 
   // ---------------------------------------------------------- run control

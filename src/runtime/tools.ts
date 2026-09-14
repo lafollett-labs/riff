@@ -403,7 +403,10 @@ export const createTools = (ctx: Ctx) => {
   // existing. portfolio and retire_project both shipped registered-but-unmapped
   // and were dead at the agent's hand. Fail at construction, not at theirs.
   for (const t of registered) {
-    if (!(t.name in capabilities)) {
+    // Object.hasOwn, not `in`: a tool named `toString`/`constructor`/etc. would
+    // inherit a truthy value off the prototype and slip the guard (and then be
+    // allowed at the chokepoint for the same reason).
+    if (!Object.hasOwn(capabilities, t.name)) {
       throw new Error(`company tool '${t.name}' has no capability in tools.ts — canUseTool would deny it`);
     }
   }

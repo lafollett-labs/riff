@@ -171,7 +171,10 @@ export const makeCanUseTool = (deps: PermissionDeps): CanUseTool => {
     // In-process company tools declare their own capability at definition time.
     const bare = toolName.startsWith(TOOL_PREFIX) ? toolName.slice(TOOL_PREFIX.length) : null;
     if (bare) {
-      const cap = toolCapabilities[bare];
+      // Object.hasOwn, not a bare lookup: a tool named `toString`/`constructor`/
+      // etc. would resolve to an inherited prototype value and be allowed as
+      // though it were a real, mapped tool.
+      const cap = Object.hasOwn(toolCapabilities, bare) ? toolCapabilities[bare] : undefined;
       if (!cap) return deny(`Unknown company tool '${bare}'.`);
       // The tool body performs its own gate call with a real summary; this
       // pass only rejects what is categorically barred for this actor.

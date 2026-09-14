@@ -100,6 +100,14 @@ describe('the chokepoint', () => {
   test('a tool under the right prefix that we never defined is still refused', async () => {
     denied(await call(`${TOOL_PREFIX}drop_the_database`));
   });
+
+  test('a company tool named after a prototype key is refused, not inherited from Object.prototype', async () => {
+    // `toString`/`constructor`/etc. resolve off Object.prototype, so a bare
+    // lookup or an `in` check would treat them as mapped and allow them.
+    for (const name of ['toString', 'constructor', 'hasOwnProperty', 'valueOf']) {
+      denied(await call(`${TOOL_PREFIX}${name}`), name);
+    }
+  });
 });
 
 describe('the shell is decided by where the runtime is', () => {

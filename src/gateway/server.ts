@@ -712,8 +712,16 @@ const server = createServer(async (req, res) => {
         if (!who) return json(res, { error: 'name an agent with ?agent=<id>' }, 400);
         const sessions = transcript.sessionsFor(who);
         const wanted = url.searchParams.get('session') ?? sessions[0]?.sessionId ?? null;
-        const turns = wanted ? transcript.bySession(wanted) : [];
-        return json(res, { agent: who, sessionId: wanted, sessions, turns });
+        // Forward cursor: `after` is the last seq the reader already has (0 = from
+        // the start), `limit` bounds the page so a huge shift or a live tail comes
+        // back in chunks. `more` says another page waits; `nextAfter` is the cursor
+        // to ask for it (or to poll the tail of a running shift with).
+        const after = Math.max(Number(url.searchParams.get('after') ?? 0) || 0, 0);
+        const limit = Math.min(Math.max(Number(url.searchParams.get('limit') ?? 500) || 500, 1), 2000);
+        const turns = wanted ? transcript.bySession(wanted, { after, limit }) : [];
+        const more = turns.length === limit;
+        const nextAfter = turns.length ? turns[turns.length - 1]!.seq : after;
+        return json(res, { agent: who, sessionId: wanted, sessions, turns, more, nextAfter });
       }
 
       /*

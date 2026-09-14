@@ -14,7 +14,7 @@ export default async function globalSetup(): Promise<void> {
 
   const cfg: RiffConfig = resolveConfig();
   scaffoldConfig(cfg);
-  const { ledger } = found(cfg, systemClock);
+  const { ledger, transcript } = found(cfg, systemClock);
   const world = new World(cfg.worldDir, systemClock);
 
   fillSeat(ledger, world, systemClock, {
@@ -137,6 +137,36 @@ export default async function globalSetup(): Promise<void> {
     target: draftPath,
     payload: { channel: 'email', draftPath },
   });
+
+  // A recorded shift, so the Shift view is proved against a real timeline and
+  // summary, not only its empty state. Fen ran it; the mount default (the CEO,
+  // staff[0]) has none, so the honest-when-empty test still holds. The blocks
+  // are the shape the recorder writes: the wake prompt, reasoning, a word, a
+  // tool call and its result, then the closing tally.
+  const sid = 'fixture-shift-0001';
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'user', kind: 'text',
+    text: 'You have woken up. Score the run and post the floor.' });
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'assistant', kind: 'thinking',
+    text: 'The grader must not be the author — read the published artifacts only.', meta: { model: 'claude-opus-4-8' } });
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'assistant', kind: 'text',
+    text: 'Scoring the run from published artifacts now.', meta: { model: 'claude-opus-4-8' } });
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'assistant', kind: 'tool_use',
+    name: 'Bash', text: JSON.stringify({ command: 'ls artifacts/' }), meta: { model: 'claude-opus-4-8', id: 'tu_1' } });
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'user', kind: 'tool_result',
+    name: 'tu_1', text: 'run-01.json\nrun-02.json', meta: { isError: false } });
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'result', kind: 'result',
+    text: 'done', meta: { subtype: 'success', turns: 4, costUsd: 0.42 } });
+
+  // A shift longer than one page (the endpoint serves 500 blocks a page), so the
+  // console's auto-drain — pulling the rest with no button — is proved to land
+  // the whole record, and to survive being switched away from mid-drain. Wick
+  // ran it; the block count is deliberately over the page size.
+  const long = 'long-shift-0001';
+  for (let i = 1; i <= 510; i++) {
+    transcript.append({ sessionId: long, agentId: 'wick', role: 'assistant', kind: 'text',
+      text: `Reconciling ledger row ${i}.`, meta: { model: 'claude-opus-4-8' } });
+  }
+  transcript.close();
 
   ledger.close();
 }

@@ -29,6 +29,17 @@ describe('the audit store keeps a shift on the record', () => {
     assert.equal(store.bySession('B')[0]!.seq, 1, 'a second session starts its own count');
   });
 
+  test('a session pages forward from a cursor, so a long shift is never truncated', () => {
+    for (let i = 0; i < 5; i++) store.append({ sessionId: 'A', agentId: 'jack', role: 'assistant', kind: 'text', text: `b${i}` });
+    const page1 = store.bySession('A', { limit: 2 });
+    assert.deepEqual(page1.map((t) => t.seq), [1, 2], 'the first page starts at the beginning');
+    const page2 = store.bySession('A', { after: page1[page1.length - 1]!.seq, limit: 2 });
+    assert.deepEqual(page2.map((t) => t.seq), [3, 4], 'the next page is strictly after the cursor');
+    const tail = store.bySession('A', { after: page2[page2.length - 1]!.seq, limit: 2 });
+    assert.deepEqual(tail.map((t) => t.seq), [5], 'and the last page is whatever remains');
+    assert.equal(store.bySession('A', { after: 5 }).length, 0, 'past the end is empty — a quiet live tail');
+  });
+
   test('meta round-trips as an object, not a string', () => {
     store.append({ sessionId: 'A', agentId: 'jack', role: 'assistant', kind: 'text', text: 'hi', meta: { model: 'claude-opus-5' } });
     assert.deepEqual(store.bySession('A')[0]!.meta, { model: 'claude-opus-5' });

@@ -118,10 +118,78 @@ test('opening a colleague shows the persona they were given', async ({ page }) =
 
 test('a shift can be reviewed agent by agent, and says so honestly when empty', async ({ page }) => {
   await go(page, 'Shift', 'Review a Shift');
-  // Staff are pickable; board members are people and run no shifts.
-  await expect(page.locator('.agents button').filter({ hasText: 'Wren' })).toBeVisible();
-  // The fixture has run no shifts, so the audit is empty rather than fabricated.
-  await expect(page.locator('main')).toContainText(/No recorded shifts/);
+  // Staff are picked from a dropdown that scales past a row of buttons; board
+  // members are people and run no shifts, so they are not in it.
+  await expect(page.locator('#shift-agent option', { hasText: 'Wren' })).toHaveCount(1);
+  await expect(page.locator('#shift-agent option', { hasText: 'Tester' })).toHaveCount(0);
+  // The mount default (the CEO) has run no shift, so the audit is empty rather
+  // than fabricated.
+  await expect(page.locator('.feed-status')).toContainText(/No recorded shifts/);
+});
+
+test('a recorded shift reads as a timeline, with when it ran and what it ran on', async ({ page }) => {
+  await go(page, 'Shift', 'Review a Shift');
+  // The mount default (the CEO) has no shift; Fen ran the recorded one.
+  await page.selectOption('#shift-agent', 'fen');
+
+  // The summary names when it ran, how big it was, and the model it ran on —
+  // and never a dollar figure, because the cost is imputed subscription price.
+  const summary = page.locator('.summary');
+  await expect(summary).toBeVisible();
+  await expect(summary.locator('.facts')).toContainText('Started');
+  await expect(summary.locator('.tnum')).toHaveText('6');
+  await expect(summary.locator('.facts')).toContainText('claude-opus-4-8');
+  await expect(summary).not.toContainText('$');
+
+  // The timeline shows the wake prompt, a word from the agent, and the tool it
+  // ran — each block stamped with a time.
+  await expect(page.locator('.turn.text .prompt')).toContainText('Score the run');
+  await expect(page.locator('.turn.text .say')).toContainText('Scoring the run');
+  await expect(page.locator('.turn.tool_use .chip')).toContainText('Bash');
+  await expect(page.locator('.turn .stamp').first()).toBeVisible();
+
+  // The closing tally reports the shift's shape, never its cost.
+  await expect(page.locator('.turn.result .tally')).toContainText('success');
+  await expect(page.locator('.turn.result .tally')).toContainText('4 turns');
+});
+
+test('the reasoning and the tool traffic can be filtered down to the narrative', async ({ page }) => {
+  await go(page, 'Shift', 'Review a Shift');
+  await page.selectOption('#shift-agent', 'fen');
+  await expect(page.locator('.turn.thinking')).toHaveCount(1);
+  await expect(page.locator('.turn.tool_use')).toHaveCount(1);
+
+  // Turning a facet off drops that kind of block; the spoken narrative stays.
+  await page.getByRole('button', { name: 'Thinking' }).click();
+  await expect(page.locator('.turn.thinking')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Tools' }).click();
+  await expect(page.locator('.turn.tool_use')).toHaveCount(0);
+  await expect(page.locator('.turn.tool_result')).toHaveCount(0);
+  await expect(page.locator('.turn.text .say')).toContainText('Scoring the run');
+});
+
+test('a shift longer than a page loads in full, with no button to hunt for', async ({ page }) => {
+  await go(page, 'Shift', 'Review a Shift');
+  // Wick's shift is 510 blocks — past the 500-a-page limit, so the console must
+  // drain the rest on its own. Every block lands, and the progress line clears.
+  await page.selectOption('#shift-agent', 'wick');
+  await expect(page.locator('.summary .tnum')).toHaveText('510');
+  await expect(page.locator('.turn')).toHaveCount(510, { timeout: 15000 });
+  await expect(page.locator('.feed-status')).not.toContainText('Reading the rest');
+});
+
+test('switching staff mid-drain never mixes one shift into another', async ({ page }) => {
+  await go(page, 'Shift', 'Review a Shift');
+  // Start Wick's long shift draining, then switch to Fen before it can finish.
+  await page.selectOption('#shift-agent', 'wick');
+  await page.selectOption('#shift-agent', 'fen');
+  // Fen's shift is small and complete: exactly its six blocks, no Wick turns
+  // stapled on, and not left truncated with the progress line stuck.
+  await expect(page.locator('.summary .tnum')).toHaveText('6');
+  await expect(page.locator('.turn')).toHaveCount(6);
+  await expect(page.locator('.turn.text .say')).toContainText('Scoring the run');
+  await expect(page.locator('.log')).not.toContainText('Reconciling ledger row');
+  await expect(page.locator('.feed-status')).not.toContainText('Reading the rest');
 });
 
 test('the commons lists documents under the titles their authors chose', async ({ page }) => {

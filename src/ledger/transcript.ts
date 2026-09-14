@@ -112,11 +112,19 @@ export class TranscriptStore implements TranscriptSink {
     ).run(t.sessionId, t.agentId, this.#clock.iso(), t.role, t.kind, t.name ?? null, clipped, meta, t.sessionId);
   }
 
-  /** Every block of one session, in the order it was spoken. */
-  bySession(sessionId: string, limit = 5000): Turn[] {
+  /**
+   * One page of a session's blocks, in the order they were spoken, taking only
+   * those past `after` (a block's `seq`). Forward paging serves both the "load
+   * the rest of a long shift" button and the live tail — the reader holds the
+   * last seq it has and asks for what came after it — so a shift is never
+   * silently truncated at a fixed ceiling the way a bare LIMIT did.
+   */
+  bySession(sessionId: string, opts: { after?: number; limit?: number } = {}): Turn[] {
+    const after = opts.after ?? 0;
+    const limit = opts.limit ?? 5000;
     return (this.#db.prepare(
-      'SELECT * FROM turns WHERE session_id=? ORDER BY seq LIMIT ?'
-    ).all(sessionId, limit) as Row[]).map((r) => this.#toTurn(r));
+      'SELECT * FROM turns WHERE session_id=? AND seq>? ORDER BY seq LIMIT ?'
+    ).all(sessionId, after, limit) as Row[]).map((r) => this.#toTurn(r));
   }
 
   /** The sessions an agent has on record, most recent first. */

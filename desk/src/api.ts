@@ -277,11 +277,17 @@ export const api = {
   /**
    * Review a shift: the company's own audit of what an agent did, recorded from
    * the SDK stream. `sessions` is that agent's history for a picker; `turns` is
-   * the chosen session (the most recent unless one is named).
+   * one page of the chosen session (the most recent unless one is named). Pass
+   * `after` (the last seq you hold) to page through a long shift or to tail a
+   * running one; `more`/`nextAfter` in the reply drive both.
    */
-  transcript: (agent: string, session?: string) =>
-    get<{ agent: string; sessionId: string | null; sessions: SessionSummary[]; turns: Turn[] }>(
-      `/api/transcript?agent=${encodeURIComponent(agent)}${session ? `&session=${encodeURIComponent(session)}` : ''}`),
+  transcript: (agent: string, opts: { session?: string; after?: number; limit?: number } = {}) =>
+    get<{ agent: string; sessionId: string | null; sessions: SessionSummary[]; turns: Turn[];
+          more: boolean; nextAfter: number }>(
+      `/api/transcript?agent=${encodeURIComponent(agent)}`
+      + (opts.session ? `&session=${encodeURIComponent(opts.session)}` : '')
+      + (opts.after ? `&after=${opts.after}` : '')
+      + (opts.limit ? `&limit=${opts.limit}` : '')),
   decide: async (id: string, approved: boolean, reason: string) => {
     const r = await fetch(withCompany(`/api/approvals/${id}`), {
       method: 'POST', headers: { 'content-type': 'application/json' },

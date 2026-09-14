@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { withoutSecrets, streamClosedResult } from '../src/runtime/staff.ts';
+import { withoutSecrets, streamClosedResult, hasSuccessfulResult } from '../src/runtime/staff.ts';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { DEFAULT_POLICY, readPolicy } from '../src/core/config.ts';
 
@@ -272,6 +272,50 @@ describe('the dead control stream is read at its source, not inferred from silen
     const branch = src.slice(src.indexOf("if (m.type === 'user' && session"));
     assert.match(branch.slice(0, 260), /wentBlind = true;/,
       'routes through the same wentBlind -> recoverBlind path, not a new one');
+  });
+});
+
+describe('a SUCCESSFUL tool result proves the stream is live', () => {
+  const userMsg = (blocks: unknown[]): SDKUserMessage =>
+    ({ type: 'user', message: { role: 'user', content: blocks } } as unknown as SDKUserMessage);
+
+  test('a successful result is proof of life', () => {
+    assert.equal(hasSuccessfulResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', is_error: false, content: 'AGENTS.md\nCLAUDE.md' },
+    ])), true);
+    assert.equal(hasSuccessfulResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', content: 'no is_error field means success' },
+    ])), true, 'is_error absent is a success');
+  });
+
+  test('an error result is NOT proof — this is what keeps the backstop text-independent', () => {
+    // A dead control stream returns is_error aborts and nothing else. If an
+    // is_error result counted as proof, a future SDK that reworded its abort
+    // from "Stream closed" to anything else would slip past both the fast path
+    // (text miss) and the backstop (wrongly proven), and a shift would burn its
+    // whole budget calling into a dead gate, silently. So error != proof.
+    assert.equal(hasSuccessfulResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'ENOENT: no such file' },
+    ])), false, 'a genuine command error is not counted');
+    assert.equal(hasSuccessfulResult(userMsg([
+      { type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'AbortError: premature close' },
+    ])), false, 'a reworded transport abort is not counted either');
+  });
+
+  test('a plain user prompt carries no tool result', () => {
+    assert.equal(hasSuccessfulResult(
+      { type: 'user', message: { role: 'user', content: 'just text' } } as unknown as SDKUserMessage), false);
+  });
+
+  test('the loop marks the watch live on a successful result, but not on Stream closed', () => {
+    // The false positive this closes: sandboxed read-only Bash returns real
+    // output with gateCalls 0, and the watchdog must read that as alive. A
+    // Stream closed result — the dead channel — must NOT mark it live, or the
+    // fast path above would be defeated. The guard excludes it explicitly, and
+    // hasSuccessfulResult excludes every other is_error abort besides.
+    const src = staff();
+    assert.match(src,
+      /if \(m\.type === 'user' && !streamClosedResult\(m\) && hasSuccessfulResult\(m\)\) \{\s*\n\s*watch\.result\(\);/);
   });
 });
 

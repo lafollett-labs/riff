@@ -280,6 +280,44 @@ describe('one answer from the gate proves the channel is alive', () => {
   });
 });
 
+describe('a real tool result is proof of life, even when the gate never sees it', () => {
+  /**
+   * The Bash sandbox runs a contained command without asking canUseTool — the
+   * sandbox is the authorization — so `ls && git log` returns real output with
+   * gateCalls still 0. To the gate counter alone that is identical to a dead
+   * control stream, and 44 healthy shifts were killed for opening on read-only
+   * shell to orient, their Bash results sitting in the transcript isError:false.
+   */
+  test('sandboxed shell output the gate never saw does not read as blind', () => {
+    const w = blindWatch(3);
+    assert.equal(w.turn(0, true), false); // wants Bash
+    w.result();                           // real `ls` output came back
+    assert.equal(w.turn(0, true), false); // wants Bash again, gate still silent
+    w.result();
+    for (let i = 0; i < 20; i++) assert.equal(w.turn(0, true), false, 'output is proof of life');
+  });
+
+  test('a result disarms it before the third silent turn', () => {
+    const w = blindWatch(3);
+    assert.equal(w.turn(0, true), false);
+    assert.equal(w.turn(0, true), false);
+    w.result();                           // proof arrives on turn two
+    assert.equal(w.turn(0, true), false, 'never reaches three');
+    assert.equal(w.turn(0, true), false);
+  });
+
+  test('no result and no answer is still caught — the fix keeps the backstop', () => {
+    // A truly dead stream returns Stream closed (never a result) or hangs with
+    // no result at all: no result() calls, the gate never answers, three gated
+    // turns still trips it.
+    const w = blindWatch(3);
+    assert.equal(w.turn(0, true), false);
+    assert.equal(w.turn(0, true), false);
+    assert.equal(w.turn(0, true), false);
+    assert.equal(w.turn(0, true), true);
+  });
+});
+
 describe('a link is not a way out of the world', () => {
   /**
    * `resolve` folds `..` away, so plain traversal was already caught. A

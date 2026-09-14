@@ -655,30 +655,44 @@ const reachesGate = (name: string): boolean => {
  * the moment the message arrives and the gate is asked microseconds later, so
  * measuring within a turn would report every parallel tool call as a miss.
  *
- * It watches for a channel that NEVER worked, and stops the moment one
- * answers. Whether a call reaches the gate turns out to depend on state as
- * well as on the tool: the runtime auto-approves an Edit to a file it has
- * already approved a Write to, so a stretch of ordinary iterative coding is
- * indistinguishable from a dead channel. Two shifts died that way, the second
- * after nine turns and $1.22 of real work, with four gate.allow events
- * already on the record behind it.
+ * It watches for a channel that NEVER worked, and stops the moment the
+ * pipeline proves itself. Whether a call reaches the gate turns out to depend
+ * on state as well as on the tool, in two ways, and both make a healthy leg
+ * look dead to a bare gate counter:
  *
- * So: one answer proves the channel is alive, and a channel that is alive is
- * not going to be caught by guessing at silence. A first CEO with nothing to
- * write yet — opening on Glob, Read, portfolio, every one auto-approved and
- * invisible here — is exactly the moment this must not fire, and exactly the
- * moment it did.
+ *   1. The runtime auto-approves an Edit to a file it already approved a Write
+ *      to, so a stretch of ordinary iterative coding asks the gate nothing.
+ *      Two shifts died that way, the second after nine turns and $1.22 of real
+ *      work, with four gate.allow events already on the record behind it.
+ *   2. The Bash sandbox runs a CONTAINED command without asking canUseTool at
+ *      all — the sandbox is the authorization, so `ls`, `grep`, `sed`, `cat`
+ *      execute and return real output with gateCalls still 0. A leg that opens
+ *      on read-only shell to orient (every CEO and engineer does) looked
+ *      exactly like a dead control stream: 44 shifts were killed mid-work this
+ *      way, their Bash results sitting in the transcript, `isError:false`.
+ *
+ * So the gate answering is not the only proof of life: a tool SUCCEEDING is
+ * too. A dead control stream returns is_error aborts and nothing else, so a
+ * successful result — is_error !== true, real output flowed — means the
+ * model→tool→result path is live. That an error result is NOT counted is the
+ * point: it keeps the backstop text-independent, firing on a dead stream
+ * whatever the SDK rewords `Stream closed` to (an abort is always an error).
+ * `result()` feeds success in; either proof disarms the watch. A first CEO
+ * opening on Glob/Read/portfolio, or on `ls && git log`, is exactly the moment
+ * this must not fire, and exactly the moment it did.
  */
 export const blindWatch = (limit = BLIND_TURNS) => {
   let blind = 0;
   let gateWas = 0;
   let lastWantedTools = false;
-  let everAnswered = false;
+  let proven = false;
   return {
+    /** A genuine (non-`Stream closed`) tool result proves the pipeline lives. */
+    result(): void { proven = true; },
     /** True once the gate has been silent through `limit` gated-tool turns. */
     turn(gateCalls: number, wantsTools: boolean): boolean {
-      if (gateCalls > 0) everAnswered = true;
-      if (everAnswered) return false;
+      if (gateCalls > 0) proven = true;
+      if (proven) return false;
       blind = lastWantedTools && gateCalls === gateWas ? blind + 1 : 0;
       gateWas = gateCalls;
       lastWantedTools = wantsTools;
@@ -698,10 +712,14 @@ const WENT_BLIND = 'the permission channel died mid-shift: tools were being call
  * When a resumed session brings the control stream up dead, canUseTool is never
  * reached and the SDK answers every tool call with a tool_result whose text is
  * `AbortError: Stream closed` — the transport, not a tool that ran and failed.
- * blindWatch catches this after three silent turns; reading the error itself
- * catches it on turn one, so the leg is dropped and retaken cold before three
- * turns are spent guessing. blindWatch stays as the backstop for the day the
- * SDK stops surfacing the error.
+ * Reading that text catches it on turn one, so the leg is dropped and retaken
+ * cold before three turns are spent guessing.
+ *
+ * blindWatch stays the backstop for the day the SDK rewords the abort, and that
+ * backstop is genuinely text-independent: proof of life is a SUCCESSFUL result
+ * (hasSuccessfulResult), and a transport abort is an is_error result whatever it
+ * says, so a reworded `Stream closed` still never disarms the watch — this fast
+ * path just loses its turn-one shortcut and blindWatch trips at three instead.
  *
  * Matches on `is_error` AND the closed-stream text together: a tool that merely
  * printed those words would not have is_error set, and the transport failure
@@ -725,6 +743,27 @@ export const streamClosedResult = (m: SDKUserMessage): boolean => {
         : '';
     return STREAM_CLOSED.test(text);
   });
+};
+
+/**
+ * Did this user message carry a SUCCESSFUL tool result — the proof of life
+ * blindWatch needs. A dead control stream returns `is_error` aborts and nothing
+ * else; a command that actually ran returns output. Requiring is_error !== true
+ * is what keeps the proof TEXT-INDEPENDENT: the day the SDK rewords its abort
+ * from `Stream closed` to anything else, that abort is still an error result,
+ * so it is still not proof and the blind backstop still fires. The one thing it
+ * costs is a leg whose opening turns are all genuinely-failing commands — a
+ * grep with no match, a red test — with no success between; rare, and the cold
+ * retry catches it. An is_error result is deliberately NOT counted, precisely
+ * so a reworded abort cannot masquerade as one.
+ */
+export const hasSuccessfulResult = (m: SDKUserMessage): boolean => {
+  const content = m.message?.content;
+  return Array.isArray(content)
+    && content.some((b) => {
+      const block = b as { type?: string; is_error?: boolean };
+      return block.type === 'tool_result' && block.is_error !== true;
+    });
 };
 
 /**
@@ -1471,6 +1510,19 @@ export const tick = async (
           { turns, gateCalls, after: 0, via: 'stream-error', ...auditTail() });
         stop.abort();
         break;
+      }
+      // A successful tool result is proof of life: the Bash sandbox runs a
+      // contained command without asking the gate, so a leg that opens on
+      // read-only shell returns output with gateCalls still 0 — which the
+      // counter alone could not tell from a dead stream, and 44 healthy shifts
+      // were killed for it. Success, not any result, is the tell: a dead stream
+      // returns is_error aborts and nothing else, so requiring is_error !== true
+      // keeps the backstop firing whatever the SDK rewords its abort to. The
+      // !streamClosedResult guard is belt-and-braces — a message mixing a real
+      // result with a Stream closed block does not count. See blindWatch.
+      if (m.type === 'user' && !streamClosedResult(m) && hasSuccessfulResult(m)) {
+        watch.result();
+        if (tracing) trace('user tool-result (stream live)');
       }
       if (m.type === 'system' && 'session_id' in m && typeof m.session_id === 'string') {
         session = m.session_id;

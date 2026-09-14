@@ -96,4 +96,76 @@ verification (real recorded turns served) done post-rebuild against ShipIt.
 
 ---
 
+---
+
+## Review Round 2
+
+🚫 PRIOR ROUND INVALIDATED — re-reviewing post-approval changes (a follow-on
+increment on the same view, not a fix of round 1).
+
+| | |
+| - | - |
+| **Branch** | `main` |
+| **Reviewer** | Marvin (server/store) + PE-Vue (desk, two rounds) |
+| **Review Round** | 2 |
+| **Reviewed SHA** | `c955ac6` |
+| **Title** | Page, tail, and navigate a recorded shift — cursor read path, auto-drain, live tail, timeline + summary, agent dropdown, content filters |
+| **Files Changed** | 7 |
+| **Lines Changed** | +430 / -92 |
+| **Date** | 2026-09-13 |
+
+### Summary
+
+Follow-on to rounds 1's read path. `/api/transcript` gained a forward cursor
+(`after` + `limit` → `more` + `nextAfter`); `TranscriptStore.bySession` pages
+`WHERE seq > after ORDER BY seq` (turns_session index), ending the silent 5000-row
+truncation. The console auto-drains pages (no button) and tails a running shift
+(3s poll + woke/slept, gated on newest-session-and-agent-awake). Presentation
+gained a summary card (started / ended-or-last-block / duration-or-elapsed /
+blocks / model / session) and a two-column timeline (time + gap-since-previous),
+the staff button row became a scaling Agent dropdown, and Thinking/Tool content
+filters were added. `costUsd` still never rendered; all agent content
+escaped-interpolated.
+
+### Findings Overview
+
+| Severity | Round 1 → Round 2 |
+| - | - |
+| 🔴 CRITICAL | 0 |
+| 🟠 HIGH | 0 |
+| 🟡 MEDIUM | 2 raised (drain truncation/switch-race; aria-live flood) → **both fixed & confirmed RESOLVED** |
+| 🟢 LOW | 2 (round-1 coverage gap → tests added; round-2 unmount-abort → fixed) |
+| ℹ️ INFO | XSS-clean, costUsd-clean, timer lifecycle, drainReq ownership — all verified |
+
+### PE-Vue findings — all resolved pre-commit
+
+| id | Finding | Resolution |
+| - | - | - |
+| MEDIUM-001 | `drain()` conflated done / busy / error → silent truncation on switch-race, stuck progress line; woke/slept under-filled a >1-page burst | `extend()` returns `{done, progressed}`; `drain()` retries with backoff, stops only on server `done` / reqId change / bounded stalls; woke/slept + tick use `drain()`. **Verified resolved (round 2).** |
+| MEDIUM-002 | `aria-live` on the whole log floods AT under drain/tail | log removed from live region; dedicated `.feed-status` `aria-live` status line; `.results` `:aria-busy="loading \|\| more"`. **Verified resolved (round 2).** |
+| LOW-001 (r1) | no coverage for drain / live tail / switch-race | e2e added: 510-block drain, wick→fen switch-race, content filters |
+| LOW-001 (r2) | in-flight `drain()` not aborted on unmount — keeps paging into a detached component | `alive` flag set false in `onUnmounted`, checked in the drain loop |
+
+### Server/store (Marvin's pass)
+
+- Endpoint params sanitized: `after` `NaN`→0 / negative→0; `limit` clamped [1,2000].
+  `more = turns.length === limit` (worst case one extra empty fetch); `nextAfter`
+  holds the cursor on a quiet tail poll. Company-scoped inside the resolved block.
+- **INFO (non-blocking):** the tail poll recomputes `sessionsFor` (a GROUP BY) every
+  3s. Bounded (one agent, `turns_agent` index, ≤50 groups) and single-operator, so
+  deferred, not fixed.
+
+### Verification
+
+`npm run check` (incl. SFC) clean. 589 unit + 69 e2e green. Not live-verified in
+the container: staff are stopped (weekly usage at 62%, no reset for days) and this
+is a pure read-path/UI change whose server code runs under the e2e web server.
+
+### Merge Eligibility
+
+**Locked to SHA:** `c955ac6`
+**Status:** ✅ Landed on `main`.
+
+---
+
 🤖 Generated with [Claude Code](https://claude.com/claude-code)

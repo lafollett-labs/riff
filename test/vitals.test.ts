@@ -145,13 +145,13 @@ describe('shifts', () => {
     cleanup();
   });
 
-  test('failed and blind shifts are the loop failing, and get their own rate', () => {
+  test('failed and overran shifts are the loop failing, and get their own rate', () => {
     shift('rae', [['commons.posted', 'commons/a.md']]);
     ledger.emit('vim', 'agent.woke', null, {});
-    ledger.emit('vim', 'shift.blind', null, {});
+    ledger.emit('vim', 'shift.overran', null, {});
     ledger.emit('vim', 'agent.failed', null, { error: 'nope' });
     const v = report();
-    assert.equal(v.shifts.blind, 1);
+    assert.equal(v.shifts.overran, 1);
     assert.equal(v.shifts.failed, 1);
     assert.equal(v.shifts.troubleRate, 1);       // 2 of 2 wakings went wrong
     cleanup();

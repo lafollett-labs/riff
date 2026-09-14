@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { withoutSecrets, streamClosedResult, hasSuccessfulResult } from '../src/runtime/staff.ts';
+import { withoutSecrets, streamClosedResult } from '../src/runtime/staff.ts';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { DEFAULT_POLICY, readPolicy } from '../src/core/config.ts';
 
@@ -101,63 +101,61 @@ describe('a leg that aborted itself does not hand the dead controller to the ret
   test('the shift signal is chained on every leg, not only the first', () => {
     // Otherwise a company stopping mid-retry would not reach the new leg.
     const src = staff();
-    const arm = src.slice(src.indexOf('const armStop'), src.indexOf('let watch = blindWatch'));
+    const arm = src.slice(src.indexOf('const armStop'), src.indexOf('let staleSession'));
     assert.match(arm, /d\.signal\.aborted\) stop\.abort\(\)/);
     assert.match(arm, /addEventListener\('abort'/);
   });
 
   test('every early exit still aborts — the point was the retry, not the exit', () => {
-    // shift.blind (inferred from silence), the stream-error caught at its
-    // source, shift.tools_missing and shift.overran each break the stream this
-    // way, and the signal chain is the fifth.
-    assert.equal((staff().match(/stop\.abort\(\);/g) ?? []).length, 5,
-      'four early exits plus the signal chain');
+    // The stale resumed stream, shift.tools_missing and shift.overran each break
+    // the stream this way, and the signal chain is the fourth.
+    assert.equal((staff().match(/stop\.abort\(\);/g) ?? []).length, 4,
+      'three early exits plus the signal chain');
   });
 });
 
 /**
- * A blind leg is the permission channel never waking — every observed case
- * was a resumed session whose control stream was dead from turn one, the gate
- * asked zero times, every tool back as `Stream closed`. It is the same shape
- * as a tools/list that never connects, and gets the same cure: drop the
- * resume and take the leg again cold, once.
+ * A stale resumed session is one whose control stream came up dead — the gate
+ * asked zero times, every tool back as `Stream closed`. It is the same shape as
+ * a tools/list that never connects, and gets the same cure: drop the resume and
+ * take the leg again cold, once. A shift that hangs any other way is caught by
+ * the shift timeout, not guessed at from silence.
  */
-describe('a blind leg on a resumed session is retried cold, once', () => {
+describe('a stale resumed session is retried cold, once', () => {
   const recover = () => {
     const src = staff();
-    const from = src.indexOf('const recoverBlind');
-    assert.notEqual(from, -1, 'recoverBlind must exist');
+    const from = src.indexOf('const recoverStaleSession');
+    assert.notEqual(from, -1, 'recoverStaleSession must exist');
     return src.slice(from, src.indexOf('};', from) + 2);
   };
 
   test('the retry only fires with a resume to drop, and only once', () => {
-    // A blind leg that was already cold is a real channel fault, not resume
-    // flakiness, and must fail loudly rather than loop forever.
-    assert.match(recover(), /if \(!\(session && blindRetries\+\+ < 1\)\) return false;/);
+    // A dead stream on a leg that was already cold is a real channel fault, not
+    // resume flakiness, and must fail loudly rather than loop forever.
+    assert.match(recover(), /if \(!\(session && staleRetries\+\+ < 1\)\) return false;/);
   });
 
-  test('it drops the resume and resets the latched watch', () => {
-    // The watch latches at the limit, so a retry that kept it would trip on
-    // turn one; and the session id is what carries the dead stream forward.
+  test('it drops the resume so the retake is cold', () => {
+    // The session id is what carries the dead stream forward; clearing it is
+    // what makes the next leg bring up a fresh control stream.
     const r = recover();
     assert.match(r, /session = null;/);
     assert.match(r, /setMeta\(`session:\$\{agent\.id\}`, ''\)/);
-    assert.match(r, /watch = blindWatch\(\);/);
-    assert.match(r, /wentBlind = false;/);
+    assert.match(r, /staleSession = false;/);
   });
 
-  test('both blind exits route through the retry before failing', () => {
+  test('both exits route through the retry before failing', () => {
     // The normal return from the message loop and the catch both have to try
-    // recovery first — a blind abort can surface either way.
+    // recovery first — a stale-session abort can surface either way.
     assert.equal(
-      (staff().match(/if \(recoverBlind\(\)\) continue; failure = WENT_BLIND; break;/g) ?? []).length,
+      (staff().match(/if \(recoverStaleSession\(\)\) continue; failure = STALE_SESSION; break;/g) ?? []).length,
       2,
       'the post-loop path and the catch path both recover before failing');
   });
 
   test('recovery is the same shape as the tools-missing retry it borrows from', () => {
     // Both clear the session meta, null the session, and continue the leg —
-    // the proven pattern, not a new one invented for blindness.
+    // the proven pattern, not a new one invented for a stale session.
     const src = staff();
     const tools = src.slice(src.indexOf('if (!toolsUp) {'), src.indexOf('failure = NO_TOOLS;'));
     assert.match(tools, /toolRetries\+\+ < 1/);
@@ -166,15 +164,16 @@ describe('a blind leg on a resumed session is retried cold, once', () => {
 });
 
 /**
- * The cure beneath recoverBlind: the prompt is streamed, never a string.
+ * The cure beneath recoverStaleSession: the prompt is streamed, never a string.
  *
  * A string prompt makes the SDK mark the query single-turn and close stdin —
  * the channel canUseTool rides on — the instant the first result lands. On a
  * resumed session that result races the first tool turn, stdin closes, the
- * gate is never asked (gateCalls: 0) while tools are called, and the leg goes
- * blind. A held-open one-message async iterable is routed through streamInput
- * and never marked single-turn, so stdin stays alive until the leg's own
- * result releases it. recoverBlind is the backstop; this is the fix.
+ * gate is never asked (gateCalls: 0) while tools are called, and every tool
+ * comes back `Stream closed`. A held-open one-message async iterable is routed
+ * through streamInput and never marked single-turn, so stdin stays alive until
+ * the leg's own result releases it. recoverStaleSession is the backstop; this
+ * is the fix.
  */
 describe('the permission channel is kept alive by streaming the prompt, not passing a string', () => {
   const runLeg = () => {
@@ -191,24 +190,23 @@ describe('the permission channel is kept alive by streaming the prompt, not pass
     assert.match(src, /async function\* onePrompt\(\)/);
     assert.match(src, /await inputOpen;/);
     assert.match(src, /query\(\{\s*prompt: onePrompt\(\),/);
-    // A bare string straight into query is the blinding shape, and the bug.
+    // A bare string straight into query is the stream-closing shape, and the bug.
     assert.doesNotMatch(src, /query\(\{\s*prompt,/);
   });
 
-  test('the blind trace is gated on the flag and rides the blind events', () => {
+  test('the shift trace is gated on the flag and rides the failure events', () => {
     // The audit trace is diagnostic weight: it must be a no-op when off, and
-    // when a blind fires it must carry the leg's operation trail, not just
-    // turns:0 gateCalls:0.
+    // when a shift is stopped it must carry the leg's operation trail.
     const src = staff();
     const leg = runLeg();
     // Off is a real no-op path, so a quiet shift pays nothing.
-    assert.match(src, /const tracing = d\.blindTrace \?\? false;/);
+    assert.match(src, /const tracing = d\.shiftTrace \?\? false;/);
     assert.match(src, /\(_op: string\): void => \{ \/\* auditing off \*\/ \}/);
-    // Both blind emits and the tools-missing emit carry the audit tail.
-    assert.equal((leg.match(/\.\.\.auditTail\(\)/g) ?? []).length, 3,
-      'the two blind emits and tools_missing all carry the trace when auditing');
-    // The trace records the ordering that makes a blind legible: the gate ask
-    // is logged in the shift-level gate wrapper, the leg start inside the leg.
+    // The tools-missing emit carries the audit tail.
+    assert.equal((leg.match(/\.\.\.auditTail\(\)/g) ?? []).length, 1,
+      'the tools_missing emit carries the trace when auditing');
+    // The trace records the ordering that makes a stopped shift legible: the
+    // gate ask is logged in the shift-level gate wrapper, the leg start inside.
     assert.match(src, /trace\(`gate ask \$\{name\}`\)/);
     assert.match(leg, /trace\(`leg start /);
   });
@@ -262,60 +260,17 @@ describe('the dead control stream is read at its source, not inferred from silen
       { type: 'user', message: { role: 'user', content: 'just text' } } as unknown as SDKUserMessage), false);
   });
 
-  test('the leg drops on turn one only while the gate has never answered, with a resume to drop', () => {
+  test('the leg drops on the first result only while the gate has never answered, with a resume to drop', () => {
     // The guards are what keep it from clobbering a leg that was working: a
     // live channel that closes after the gate has answered is a different
-    // fault, and a cold leg falls through to blindWatch rather than looping.
+    // fault, and a cold leg with no session to reset falls through to the shift
+    // timeout rather than looping.
     const src = staff();
     assert.match(src,
       /if \(m\.type === 'user' && session && gateCalls === 0 && streamClosedResult\(m\)\) \{/);
     const branch = src.slice(src.indexOf("if (m.type === 'user' && session"));
-    assert.match(branch.slice(0, 260), /wentBlind = true;/,
-      'routes through the same wentBlind -> recoverBlind path, not a new one');
-  });
-});
-
-describe('a SUCCESSFUL tool result proves the stream is live', () => {
-  const userMsg = (blocks: unknown[]): SDKUserMessage =>
-    ({ type: 'user', message: { role: 'user', content: blocks } } as unknown as SDKUserMessage);
-
-  test('a successful result is proof of life', () => {
-    assert.equal(hasSuccessfulResult(userMsg([
-      { type: 'tool_result', tool_use_id: 't1', is_error: false, content: 'AGENTS.md\nCLAUDE.md' },
-    ])), true);
-    assert.equal(hasSuccessfulResult(userMsg([
-      { type: 'tool_result', tool_use_id: 't1', content: 'no is_error field means success' },
-    ])), true, 'is_error absent is a success');
-  });
-
-  test('an error result is NOT proof — this is what keeps the backstop text-independent', () => {
-    // A dead control stream returns is_error aborts and nothing else. If an
-    // is_error result counted as proof, a future SDK that reworded its abort
-    // from "Stream closed" to anything else would slip past both the fast path
-    // (text miss) and the backstop (wrongly proven), and a shift would burn its
-    // whole budget calling into a dead gate, silently. So error != proof.
-    assert.equal(hasSuccessfulResult(userMsg([
-      { type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'ENOENT: no such file' },
-    ])), false, 'a genuine command error is not counted');
-    assert.equal(hasSuccessfulResult(userMsg([
-      { type: 'tool_result', tool_use_id: 't1', is_error: true, content: 'AbortError: premature close' },
-    ])), false, 'a reworded transport abort is not counted either');
-  });
-
-  test('a plain user prompt carries no tool result', () => {
-    assert.equal(hasSuccessfulResult(
-      { type: 'user', message: { role: 'user', content: 'just text' } } as unknown as SDKUserMessage), false);
-  });
-
-  test('the loop marks the watch live on a successful result, but not on Stream closed', () => {
-    // The false positive this closes: sandboxed read-only Bash returns real
-    // output with gateCalls 0, and the watchdog must read that as alive. A
-    // Stream closed result — the dead channel — must NOT mark it live, or the
-    // fast path above would be defeated. The guard excludes it explicitly, and
-    // hasSuccessfulResult excludes every other is_error abort besides.
-    const src = staff();
-    assert.match(src,
-      /if \(m\.type === 'user' && !streamClosedResult\(m\) && hasSuccessfulResult\(m\)\) \{\s*\n\s*watch\.result\(\);/);
+    assert.match(branch.slice(0, 260), /staleSession = true;/,
+      'routes through the staleSession -> recoverStaleSession path, not a new one');
   });
 });
 
@@ -388,6 +343,6 @@ describe('a shift that is stuck rather than slow', () => {
   test('a stuck shift shows up in the report rather than only in the log', () => {
     const vitals = readFileSync(new URL('../src/analytics/vitals.ts', import.meta.url), 'utf8');
     assert.match(vitals, /const overran = n\('shift\.overran'\);/);
-    assert.match(vitals, /troubleRate: over\(failed \+ blind \+ overran, woke\)/);
+    assert.match(vitals, /troubleRate: over\(failed \+ overran, woke\)/);
   });
 });

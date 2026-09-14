@@ -38,11 +38,11 @@ export const sessionStore = (env: NodeJS.ProcessEnv = process.env): string =>
  * and the first leg of every first shift afterwards died on `No conversation
  * found with session ID`. On 2026-09-07 that cost Idris and Rue a shift each:
  * the cold retry meant to heal it worked for Marlow and not for them, and
- * both went blind instead.
+ * both died on a stale session id instead.
  *
  * Asking the disk first makes the healthy path silent — no dead leg, no
- * failure event, no blind watch — and does not depend on matching an error
- * string the CLI is free to reword.
+ * failure event — and does not depend on matching an error string the CLI is
+ * free to reword.
  *
  * The directory under `projects/` is the working directory with every `/` and
  * `.` replaced by `-`, which is the CLI's business and not ours. It scans
@@ -138,10 +138,10 @@ export type TickDeps = {
    *  reading the scheduler paces on, so the shift can pace with it rather than
    *  learn it only by being throttled. See Scheduler.windows. */
   usageWindows?: ReadonlyArray<{ kind: string; utilization: number | null }>;
-  /** Attach a per-leg operation trace to blind/tools-missing events, for
-   *  diagnosing the permission-channel races. Off by default. See
-   *  CompanyPolicy.blindTrace and runLeg's legTrace. */
-  blindTrace?: boolean;
+  /** Attach a per-leg operation trace to a leg's failure events (tools-missing,
+   *  stale-session), for diagnosing what a shift was doing when it stopped. Off
+   *  by default. See CompanyPolicy.shiftTrace and runLeg's legTrace. */
+  shiftTrace?: boolean;
   /** External MCP servers (image generation, calendar, inbox). Everything they
    *  reach still crosses the gate — canUseTool sees these calls too. */
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
@@ -611,115 +611,15 @@ const HANDOVER_TURNS = 6;
 const MAX_ROTATIONS = 2;
 
 /**
- * Assistant turns that may ask for tools without the gate hearing about it
- * before the shift is declared blind.
- *
- * One is a race — a message's tool_use blocks are counted as the message
- * arrives, and the gate is asked microseconds later. Three in a row is not a
- * race. In a healthy shift the counter moves on every single one.
- */
-const BLIND_TURNS = 3;
-
-/**
- * Tools the runtime auto-approves, which therefore never reach the gate.
- *
- * Measured against this SDK, not assumed: a probe denying everything found
- * that Write and a Read reaching outside the working directory are both asked
- * about and both refused, while Glob, Grep, Read inside it and ToolSearch run
- * without the handler being consulted at all. Everything that changes state
- * still crosses the gate; these only look at what is already there.
- *
- * They are listed here for ONE reason: so a turn spent on them is not
- * mistaken for evidence that the permission channel has died. This is not a
- * permission list and nothing may be added to it to make a tool allowed.
- */
-const UNGATED_TOOLS = new Set([
-  'Read', 'Glob', 'Grep', 'NotebookRead', 'ToolSearch', 'TodoWrite',
-]);
-
-/** An MCP tool the company declared read-only is auto-approved the same way. */
-const READ_ONLY_COMPANY_TOOLS = new Set(['commons_index', 'portfolio', 'who_is_here', 'my_drafts']);
-
-const reachesGate = (name: string): boolean => {
-  if (UNGATED_TOOLS.has(name)) return false;
-  const bare = name.startsWith(`mcp__${TOOL_NAMESPACE}__`)
-    ? name.slice(`mcp__${TOOL_NAMESPACE}__`.length) : name;
-  return !READ_ONLY_COMPANY_TOOLS.has(bare);
-};
-
-/**
- * Watches whether the gate is still there.
- *
- * Fed one call per assistant message. It compares each message against the
- * PREVIOUS one, never against itself: a message's tool_use blocks are counted
- * the moment the message arrives and the gate is asked microseconds later, so
- * measuring within a turn would report every parallel tool call as a miss.
- *
- * It watches for a channel that NEVER worked, and stops the moment the
- * pipeline proves itself. Whether a call reaches the gate turns out to depend
- * on state as well as on the tool, in two ways, and both make a healthy leg
- * look dead to a bare gate counter:
- *
- *   1. The runtime auto-approves an Edit to a file it already approved a Write
- *      to, so a stretch of ordinary iterative coding asks the gate nothing.
- *      Two shifts died that way, the second after nine turns and $1.22 of real
- *      work, with four gate.allow events already on the record behind it.
- *   2. The Bash sandbox runs a CONTAINED command without asking canUseTool at
- *      all — the sandbox is the authorization, so `ls`, `grep`, `sed`, `cat`
- *      execute and return real output with gateCalls still 0. A leg that opens
- *      on read-only shell to orient (every CEO and engineer does) looked
- *      exactly like a dead control stream: 44 shifts were killed mid-work this
- *      way, their Bash results sitting in the transcript, `isError:false`.
- *
- * So the gate answering is not the only proof of life: a tool SUCCEEDING is
- * too. A dead control stream returns is_error aborts and nothing else, so a
- * successful result — is_error !== true, real output flowed — means the
- * model→tool→result path is live. That an error result is NOT counted is the
- * point: it keeps the backstop text-independent, firing on a dead stream
- * whatever the SDK rewords `Stream closed` to (an abort is always an error).
- * `result()` feeds success in; either proof disarms the watch. A first CEO
- * opening on Glob/Read/portfolio, or on `ls && git log`, is exactly the moment
- * this must not fire, and exactly the moment it did.
- */
-export const blindWatch = (limit = BLIND_TURNS) => {
-  let blind = 0;
-  let gateWas = 0;
-  let lastWantedTools = false;
-  let proven = false;
-  return {
-    /** A genuine (non-`Stream closed`) tool result proves the pipeline lives. */
-    result(): void { proven = true; },
-    /** True once the gate has been silent through `limit` gated-tool turns. */
-    turn(gateCalls: number, wantsTools: boolean): boolean {
-      if (gateCalls > 0) proven = true;
-      if (proven) return false;
-      blind = lastWantedTools && gateCalls === gateWas ? blind + 1 : 0;
-      gateWas = gateCalls;
-      lastWantedTools = wantsTools;
-      return blind >= limit;
-    },
-  };
-};
-
-/** Said plainly, because the SDK calls every abort "aborted by user" and that
- *  is exactly what this looked like the three times it happened. */
-const WENT_BLIND = 'the permission channel died mid-shift: tools were being called and the '
-  + `gate was never asked. Stopped after ${BLIND_TURNS} blind turns.`;
-
-/**
- * The dead control stream, named at its source instead of inferred from silence.
+ * A resumed session whose control stream came up dead, named at its source.
  *
  * When a resumed session brings the control stream up dead, canUseTool is never
  * reached and the SDK answers every tool call with a tool_result whose text is
  * `AbortError: Stream closed` — the transport, not a tool that ran and failed.
- * Reading that text catches it on turn one, so the leg is dropped and retaken
- * cold before three turns are spent guessing.
- *
- * blindWatch stays the backstop for the day the SDK rewords the abort, and that
- * backstop is genuinely text-independent: proof of life is a SUCCESSFUL result
- * (hasSuccessfulResult), and a transport abort is an is_error result whatever it
- * says, so a reworded `Stream closed` still never disarms the watch — this fast
- * path just loses its turn-one shortcut and blindWatch trips at three instead.
+ * Reading that text catches it on the first result, so the stale session is
+ * dropped and the leg retaken cold rather than resuming into the same dead
+ * stream every tick. A shift that hangs some other way is caught by the shift
+ * timeout instead; this only handles the one failure the SDK names outright.
  *
  * Matches on `is_error` AND the closed-stream text together: a tool that merely
  * printed those words would not have is_error set, and the transport failure
@@ -746,27 +646,6 @@ export const streamClosedResult = (m: SDKUserMessage): boolean => {
 };
 
 /**
- * Did this user message carry a SUCCESSFUL tool result — the proof of life
- * blindWatch needs. A dead control stream returns `is_error` aborts and nothing
- * else; a command that actually ran returns output. Requiring is_error !== true
- * is what keeps the proof TEXT-INDEPENDENT: the day the SDK rewords its abort
- * from `Stream closed` to anything else, that abort is still an error result,
- * so it is still not proof and the blind backstop still fires. The one thing it
- * costs is a leg whose opening turns are all genuinely-failing commands — a
- * grep with no match, a red test — with no success between; rare, and the cold
- * retry catches it. An is_error result is deliberately NOT counted, precisely
- * so a reworded abort cannot masquerade as one.
- */
-export const hasSuccessfulResult = (m: SDKUserMessage): boolean => {
-  const content = m.message?.content;
-  return Array.isArray(content)
-    && content.some((b) => {
-      const block = b as { type?: string; is_error?: boolean };
-      return block.type === 'tool_result' && block.is_error !== true;
-    });
-};
-
-/**
  * Said plainly, because the SDK calls every abort "aborted by user" and an
  * operator reading that would go looking for the operator who did it.
  */
@@ -778,6 +657,10 @@ const overranBy = (ms: number): string =>
 /** Said plainly for the same reason: the CLI only wrote it to a debug log. */
 const NO_TOOLS = "the company's own tools never connected, twice running — the shift had no "
   + 'way to write anything down, so it was stopped instead of spending its turns finding out.';
+
+/** Said plainly, because the SDK reports the underlying abort as "aborted by user". */
+const STALE_SESSION = 'a resumed session came up dead — the control stream returned Stream closed '
+  + 'and the gate was never reached. Retaken cold once; it happened again, so this is a real fault.';
 
 /**
  * Where a toolchain is told to keep its cache.
@@ -1132,14 +1015,14 @@ export const tick = async (
    */
   let gateCalls = 0;
 
-  // A per-leg operation trace for the permission-channel races, built only when
-  // blindTrace is on (it rides every blind/tools-missing event). It records the
+  // A per-leg operation trace, built only when shiftTrace is on (it rides a
+  // leg's failure events — tools-missing, stale-session). It records the
   // ordering — leg start (resumed or cold), each SDK message, the tools the
   // model reached for, each gate ask, the result — with a millisecond offset,
-  // so a blind reads as tool wants with NO gate ask between them instead of a
-  // bare turns:0 gateCalls:0. Reset per leg by runLeg; `trace` is a no-op when
-  // off, so a shift that is not being audited pays nothing.
-  const tracing = d.blindTrace ?? false;
+  // so a stopped shift shows what it was doing when the lights went out. Reset
+  // per leg by runLeg; `trace` is a no-op when off, so a shift that is not being
+  // audited pays nothing.
+  const tracing = d.shiftTrace ?? false;
   let legClock = clock.now().getTime();
   let legTrace: string[] = [];
   let legResumed = false;
@@ -1160,9 +1043,9 @@ export const tick = async (
     return gate2(name, input, opts);
   };
 
-  // The diagnostic tail a blind or tools-missing event carries while auditing:
-  // the leg's whole operation trace, whether it was resumed, whether its tools
-  // came up, and the CLI's own last words. Empty when auditing is off.
+  // The diagnostic tail a stale-session or tools-missing event carries while
+  // auditing: the leg's whole operation trace, whether it was resumed, whether
+  // its tools came up, and the CLI's own last words. Empty when auditing is off.
   const auditTail = (): Record<string, unknown> =>
     tracing ? { resumed: legResumed, toolsUp, trace: legTrace.slice(), noise: noise.slice(-800) } : {};
 
@@ -1170,10 +1053,10 @@ export const tick = async (
    * One controller per LEG, chained to the shift's own signal.
    *
    * It used to be one for the whole shift, and two of the three ways a leg
-   * ends early fire it: the blind watch and the missing-tools check both call
-   * stop.abort() to break out of the stream. Blind ends the shift, so that was
-   * harmless. Missing tools is supposed to be worth one cold retry — and the
-   * retry handed the SDK the same, already-aborted controller, so it died on
+   * ends early fire it: the stream-closed check and the missing-tools check
+   * both call stop.abort() to break out of the stream. A stale session ends the
+   * leg for a cold retake, and missing tools is worth one cold retry too — and
+   * the retry handed the SDK the same, already-aborted controller, so it died on
    * the spot with "Operation aborted" and the shift was lost anyway.
    *
    * Rafe, 2026-09-03 23:36:26: tools_missing on a resumed session, session
@@ -1187,8 +1070,7 @@ export const tick = async (
     if (d.signal.aborted) stop.abort();
     else d.signal.addEventListener('abort', () => stop.abort(), { once: true });
   };
-  let watch = blindWatch();
-  let wentBlind = false;
+  let staleSession = false;
   /**
    * The clock on the whole shift, not on one leg.
    *
@@ -1236,7 +1118,7 @@ export const tick = async (
   /** Did the company's own MCP server come up for this leg? */
   let toolsUp = true;
   let toolRetries = 0;
-  let blindRetries = 0;
+  let staleRetries = 0;
   /** Null until a usage call answers either way. See limitsReadable. */
   let planVisible: boolean | null = null;
 
@@ -1297,7 +1179,7 @@ export const tick = async (
     if (!handover) contextTokens = 0;
 
     // Start this leg's trace. resumed-vs-cold is the first correlator of a
-    // blind, so it leads the record.
+    // stale-session failure, so it leads the record.
     legClock = clock.now().getTime();
     legTrace = [];
     legResumed = session != null;
@@ -1312,10 +1194,10 @@ export const tick = async (
     // loads over async I/O that jitters startup ordering — the result can land
     // at or before the first tool turn, stdin closes, and every later gate call
     // comes back `Stream closed`: gateCalls stays 0 while the model keeps
-    // calling tools, which is shift.blind. An async iterable is routed through
-    // streamInput, is never marked single-turn, and keeps stdin (the gate) alive
-    // until the leg's own result releases it below — so the channel the blind
-    // watch and recoverBlind exist to catch no longer dies on turn one.
+    // calling tools. An async iterable is routed through streamInput, is never
+    // marked single-turn, and keeps stdin (the gate) alive until the leg's own
+    // result releases it below — so the dead stream streamClosedResult and
+    // recoverStaleSession exist to catch no longer happens on turn one.
     let releaseInput!: () => void;
     const inputOpen = new Promise<void>((r) => { releaseInput = r; });
     async function* onePrompt(): AsyncGenerator<SDKUserMessage> {
@@ -1451,7 +1333,7 @@ export const tick = async (
     for await (const m of q) {
       // Record to the company's own audit store first, before any of the
       // control logic that may `break` out of the loop — so a turn the ceiling
-      // or a blind cuts off is still on the record. session is set by the SDK's
+      // or a stale session cuts off is still on the record. session is set by the SDK's
       // system message before any content arrives; skip until it is known.
       if (d.transcript && session) recordShiftMessage(d.transcript, session, agent.id, m);
       if (m.type === 'assistant') {
@@ -1461,19 +1343,10 @@ export const tick = async (
         if (m.message.content.some((b) => b.type === 'tool_use') && ++toolTurns >= maxTurns) {
           atCeiling = true;
         }
-        const wantsGated = m.message.content.some(
-          (b) => b.type === 'tool_use' && reachesGate(b.name));
         if (tracing) {
           const toolNames: string[] = [];
           for (const b of m.message.content) if (b.type === 'tool_use') toolNames.push(b.name);
-          if (toolNames.length) trace(`assistant wants [${toolNames.join(',')}] gated=${wantsGated}`);
-        }
-        if (watch.turn(gateCalls, wantsGated)) {
-          wentBlind = true;
-          ledger.emit(agent.id, 'shift.blind', null,
-            { turns, gateCalls, after: BLIND_TURNS, ...auditTail() });
-          stop.abort();
-          break;
+          if (toolNames.length) trace(`assistant calls [${toolNames.join(',')}]`);
         }
         if (!handover) {
           const u = m.message.usage as unknown as Record<string, number | undefined>;
@@ -1494,35 +1367,20 @@ export const tick = async (
           }
         }
       }
-      // The dead control stream, caught at its source. A resumed session can
-      // bring the stream up dead: canUseTool is never reached (gateCalls stays
-      // 0) and every tool comes back `Stream closed` on the first turn.
-      // blindWatch below would catch this after three blind turns; reading the
-      // error drops the leg on turn one and retakes it cold through the same
-      // recovery. Only while the gate has never answered (a live channel that
+      // A resumed session whose control stream came up dead, caught at its
+      // source. canUseTool is never reached (gateCalls stays 0) and every tool
+      // comes back `Stream closed` on the first result. Drop the stale session
+      // and retake the leg cold rather than resuming into the same dead stream
+      // every tick. Only while the gate has never answered (a live channel that
       // closes mid-leg is a different fault, and clobbering it would throw away
-      // real work) and only with a resume to drop — a cold leg falls through to
-      // blindWatch, which fails it loudly rather than looping.
+      // real work) and only with a resume to drop — a cold leg with no session
+      // to reset falls through, and a shift that hangs any other way is caught by
+      // the shift timeout, not guessed at from silence.
       if (m.type === 'user' && session && gateCalls === 0 && streamClosedResult(m)) {
-        wentBlind = true;
-        trace('user stream-closed (gate never answered)');
-        ledger.emit(agent.id, 'shift.blind', null,
-          { turns, gateCalls, after: 0, via: 'stream-error', ...auditTail() });
+        staleSession = true;
+        trace('resume stream-closed (gate never answered)');
         stop.abort();
         break;
-      }
-      // A successful tool result is proof of life: the Bash sandbox runs a
-      // contained command without asking the gate, so a leg that opens on
-      // read-only shell returns output with gateCalls still 0 — which the
-      // counter alone could not tell from a dead stream, and 44 healthy shifts
-      // were killed for it. Success, not any result, is the tell: a dead stream
-      // returns is_error aborts and nothing else, so requiring is_error !== true
-      // keeps the backstop firing whatever the SDK rewords its abort to. The
-      // !streamClosedResult guard is belt-and-braces — a message mixing a real
-      // result with a Stream closed block does not count. See blindWatch.
-      if (m.type === 'user' && !streamClosedResult(m) && hasSuccessfulResult(m)) {
-        watch.result();
-        if (tracing) trace('user tool-result (stream live)');
       }
       if (m.type === 'system' && 'session_id' in m && typeof m.session_id === 'string') {
         session = m.session_id;
@@ -1530,11 +1388,11 @@ export const tick = async (
       }
       // Whether the company's own tools actually came up.
       //
-      // Three shifts in one night were killed by the blind watch after the
-      // CLI logged `tools/list failed (Stream closed)` at wake — the company
-      // server never connected, so every write path was refused and the
-      // permission stream was gone with it. Nothing in the ledger said so;
-      // the failure was only visible in a CLI debug log inside the container.
+      // Three shifts in one night were lost after the CLI logged `tools/list
+      // failed (Stream closed)` at wake — the company server never connected,
+      // so every write path was refused and the permission stream was gone with
+      // it. Nothing in the ledger said so; the failure was only visible in a CLI
+      // debug log inside the container.
       // A shift that starts without its tools cannot do its job, so say it
       // out loud and stop instead of spending a turn ceiling finding out.
       if (m.type === 'system' && m.subtype === 'init') {
@@ -1615,7 +1473,7 @@ export const tick = async (
         releaseInput();
       }
     }
-    // Break paths (blind, tools_missing, stream-error, abort) leave the loop
+    // Break paths (stale-session, tools_missing, abort) leave the loop
     // before any result; abort tears the stream down, and this releases the
     // parked generator so it cannot outlive the leg. Idempotent.
     releaseInput();
@@ -1626,30 +1484,24 @@ export const tick = async (
   let failure = '';
 
   /**
-   * One cold retry when the permission channel never woke up.
+   * One cold retry when a resumed session's control stream came up dead.
    *
-   * shift.blind fires only when the gate was asked zero times for a whole
-   * leg while tools were being called — the control stream the CLI uses to
-   * reach canUseTool was dead from the first turn, every tool came back
-   * `Stream closed`, and the model kept asking into the void. Every observed
-   * case was a RESUMED session, which is the same shape as the tools/list
-   * that comes back `Stream closed` at wake, and the same cure: drop the
-   * resume and take the leg again cold. A fresh session brings up a fresh
-   * control stream, so the gate is wired again.
+   * The SDK returns `Stream closed` for every tool because canUseTool is never
+   * reached (streamClosedResult catches it). Every observed case was a RESUMED
+   * session, the same shape as the tools/list that comes back `Stream closed`
+   * at wake, and the same cure: drop the resume and take the leg again cold. A
+   * fresh session brings up a fresh control stream, so the gate is wired again.
    *
-   * Guarded on `session`: a leg that went blind with no resume to drop is a
-   * real fault in the channel, not resume flakiness, and must fail loudly
-   * rather than loop. Once, then stop — a second blind leg is a real fault
-   * too. Resetting the watch is the point: it latches at the limit, so the
-   * retry needs a fresh one or it trips on turn one.
+   * Guarded on `session`: a leg with no resume to drop is a real fault in the
+   * channel, not resume flakiness, and must fail loudly rather than loop. Once,
+   * then stop — a second dead stream is a real fault too.
    */
-  const recoverBlind = (): boolean => {
-    if (!(session && blindRetries++ < 1)) return false;
+  const recoverStaleSession = (): boolean => {
+    if (!(session && staleRetries++ < 1)) return false;
     ledger.setMeta(`session:${agent.id}`, '');
-    ledger.emit(agent.id, 'session.reset', null, { was: session, why: 'permission channel went blind' });
+    ledger.emit(agent.id, 'session.reset', null, { was: session, why: 'stream closed on resume' });
     session = null;
-    wentBlind = false;
-    watch = blindWatch();
+    staleSession = false;
     return true;
   };
 
@@ -1682,7 +1534,7 @@ export const tick = async (
       // Leaving the message loop is a normal return, so this never reaches
       // the catch below on its own.
       if (overran) { failure = overranBy(d.shiftTimeoutMs ?? 0); break; }
-      if (wentBlind) { if (recoverBlind()) continue; failure = WENT_BLIND; break; }
+      if (staleSession) { if (recoverStaleSession()) continue; failure = STALE_SESSION; break; }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
 
@@ -1718,7 +1570,7 @@ export const tick = async (
       // made a busy company look broken and buried the errors that matter.
       if (OUT_OF_TURNS.test(error) || atCeiling) { truncated = true; break; }
 
-      if (wentBlind) { if (recoverBlind()) continue; failure = WENT_BLIND; break; }
+      if (staleSession) { if (recoverStaleSession()) continue; failure = STALE_SESSION; break; }
 
       failure = error;
       break;

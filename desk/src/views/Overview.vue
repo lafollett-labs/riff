@@ -97,7 +97,7 @@ const DIALS = [
     min: 0, max: 720, step: 0.5 },
 ] as const;
 
-// The editable dials are all numeric; blindTrace is a diagnostic flag set
+// The editable dials are all numeric; shiftTrace is a diagnostic flag set
 // elsewhere. Keep it out of the number map the dials bind to — the save merges
 // server-side, so leaving it out here never resets it.
 const numericDials = (p: Record<string, unknown>): Record<string, number> =>

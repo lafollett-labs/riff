@@ -68,7 +68,7 @@ test('shapeEvents parses dataJson and filters by kind', () => {
   assert.deepEqual(all.events[0]?.data, { resumed: true });
   assert.equal(all.events[2]?.data, 'not json', 'bad json is passed through, not thrown');
 
-  const failed = shapeEvents(raw, 'agent.failed,shift.blind');
+  const failed = shapeEvents(raw, 'agent.failed,shift.overran');
   assert.equal(failed.count, 1);
   assert.equal(failed.events[0]?.kind, 'agent.failed');
   assert.deepEqual(failed.events[0]?.data, { error: 'boom' });

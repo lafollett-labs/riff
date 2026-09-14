@@ -79,7 +79,7 @@ const findings = computed<Array<{ severity: 'warn' | 'note'; text: string }>>(()
 
   if (d.shifts.troubleRate > 0.2) {
     out.push({ severity: 'warn', text:
-      `${pct(d.shifts.troubleRate)} of shifts failed or went blind. That is the loop, not the work.` });
+      `${pct(d.shifts.troubleRate)} of shifts failed or overran. That is the loop, not the work.` });
   }
   if (d.shifts.barren) {
     out.push({ severity: d.shifts.barren > d.shifts.slept / 3 ? 'warn' : 'note', text:
@@ -399,8 +399,8 @@ const tiles = computed(() => {
             <dt>rotated · compacted</dt>
             <dd>{{ v.shifts.rotated }} · {{ v.shifts.compacted }}</dd>
             <dt>cut at the ceiling</dt><dd>{{ v.shifts.truncated }}</dd>
-            <dt>failed · blind</dt>
-            <dd :class="{ hot: v.shifts.blind > 0 }">{{ v.shifts.failed }} · {{ v.shifts.blind }}</dd>
+            <dt>failed · overran</dt>
+            <dd :class="{ hot: v.shifts.overran > 0 }">{{ v.shifts.failed }} · {{ v.shifts.overran }}</dd>
           </dl>
         </section>
       </div>

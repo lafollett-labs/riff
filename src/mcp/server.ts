@@ -66,7 +66,7 @@ server.registerTool('riff_state', {
 
 server.registerTool('riff_events', {
   title: 'Riff: recent events',
-  description: 'Recent ledger events, newest last. `kinds` keeps only the named kinds (comma-separated, e.g. "agent.failed,shift.blind,agent.slept"); `dataJson` is parsed for you.',
+  description: 'Recent ledger events, newest last. `kinds` keeps only the named kinds (comma-separated, e.g. "agent.failed,shift.overran,agent.slept"); `dataJson` is parsed for you.',
   inputSchema: {
     company,
     limit: z.number().int().min(1).max(500).optional().describe('how many recent events to scan (default 60)'),

@@ -30,8 +30,6 @@ export type ShiftVitals = {
   woke: number;
   slept: number;
   failed: number;
-  /** Shifts stopped for making tool calls the gate never heard about. */
-  blind: number;
   /** Shifts stopped on the wall clock: stuck rather than slow. See
    *  CompanyPolicy.shiftTimeoutMinutes. */
   overran: number;
@@ -44,7 +42,7 @@ export type ShiftVitals = {
   costUsd: number;
   costPerShift: number;
   turnsPerShift: number;
-  /** Failed and blind over woke. The number that says whether the loop works
+  /** Failed and overran over woke. The number that says whether the loop works
    *  at all, before any question of whether the work is good. */
   troubleRate: number;
   /** Shifts that woke, spent money and left nothing behind — no document, no
@@ -297,7 +295,7 @@ export type PersonVitals = {
 export type Trend = {
   shifts: number; costUsd: number; tokens: number; commits: number; messages: number;
   posted: number; removed: number; filed: number; released: number;
-  done: number; dropped: number; blind: number; overran: number; failed: number;
+  done: number; dropped: number; overran: number; failed: number;
   hired: number; retired: number; barren: number;
 };
 

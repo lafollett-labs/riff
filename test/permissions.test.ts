@@ -9,7 +9,6 @@ import { Gate, type CommonsView } from '../src/policy/gate.ts';
 import { constitutionFor } from '../src/policy/rules.ts';
 import { fixedClock } from '../src/core/clock.ts';
 import { makeCanUseTool, shellIsContained } from '../src/runtime/permissions.ts';
-import { blindWatch } from '../src/runtime/staff.ts';
 import { createTools, TOOL_NAMESPACE, TOOL_PREFIX } from '../src/runtime/tools.ts';
 import type { Agent, Tier } from '../src/core/types.ts';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
@@ -186,13 +185,16 @@ describe('the gate is actually wired to the session', () => {
       'and what it is handed has to be the real gate, not a stand-in');
   });
 
-  test('the shift can tell whether the gate is still answering', () => {
-    // Three shifts ran with the permission channel dead: every tool came back
-    // `AbortError: Stream closed`, the model kept asking, and 28 turns and
-    // five dollars went by untouched. It failed safe and nobody heard.
-    assert.match(staff, /gateCalls\+\+/, 'nothing counts how often the gate was asked');
-    assert.match(staff, /'shift\.blind'/, 'a blind shift has to be recorded, not just stopped');
-    assert.match(staff, /stop\.abort\(\)/, 'and it has to actually be stopped');
+  test('a dead resumed stream is caught by its own error, not inferred from silence', () => {
+    // A resumed session can bring the control stream up dead: canUseTool is
+    // never reached (gateCalls stays 0) and every tool comes back
+    // `AbortError: Stream closed`. The shift reads that error, resets the stale
+    // session and retakes the leg cold — rather than counting silent turns and
+    // guessing, which killed 44 healthy shifts that opened on read-only shell.
+    assert.match(staff, /gateCalls\+\+/, 'the gate-answered guard still needs the count');
+    assert.match(staff, /streamClosedResult\(m\)/, 'the dead stream is read from its own error');
+    assert.match(staff, /staleSession = true/, 'and marked for a cold retake');
+    assert.match(staff, /stop\.abort\(\)/, 'and the leg actually stopped');
   });
 });
 
@@ -214,107 +216,6 @@ describe('a waking agent sees both halves of the approval loop', () => {
     const block = staff.slice(staff.indexOf('Your drafts still waiting'));
     assert.match(block.slice(0, 900), /withdraw_draft/,
       'the prompt must name the tool, or the reminder changes nothing');
-  });
-});
-
-/**
- * The watchdog that decides the permission channel has died.
- *
- * It exists because a dead channel is silent: tools keep being called and
- * nothing refuses them. But the runtime auto-approves read-only tools, so
- * they never reach the gate either — and a brand-new company's first CEO has
- * nothing to write yet and opens by looking around. That read as a dead
- * channel and killed the first shift of a company founded to explore.
- */
-describe('going blind is about the gate, not about being busy', () => {
-  test('a shift spent reading is not a dead permission channel', () => {
-    const w = blindWatch(3);
-    // Glob, Read, portfolio — every one auto-approved and invisible to the
-    // gate. Ten turns of it must not trip the watchdog.
-    for (let i = 0; i < 10; i++) assert.equal(w.turn(0, false), false);
-  });
-
-  test('a shift calling gated tools that the gate never sees does trip it', () => {
-    const w = blindWatch(3);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), true);
-  });
-
-  test('one answered call resets it, because the channel is demonstrably alive', () => {
-    const w = blindWatch(3);
-    w.turn(0, true); w.turn(0, true);
-    assert.equal(w.turn(1, true), false, 'the gate answered');
-    assert.equal(w.turn(1, true), false);
-  });
-
-  test('reading between gated calls does not accumulate blindness', () => {
-    // The real shape of a working shift: look, write, look, write.
-    const w = blindWatch(3);
-    for (const [calls, gated] of [[0, false], [1, true], [1, false], [2, true], [2, false]] as const) {
-      assert.equal(w.turn(calls, gated), false);
-    }
-  });
-});
-
-describe('one answer from the gate proves the channel is alive', () => {
-  test('a shift that has been answered once is never called blind again', () => {
-    // Nine turns in, four gate.allow events on the record, then three Edits
-    // the runtime auto-approved because it had already approved the Writes.
-    // That killed a shift with $1.22 of real work in it.
-    const w = blindWatch(3);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(4, true), false, 'the gate answered');
-    for (let i = 0; i < 20; i++) {
-      assert.equal(w.turn(4, true), false, 'silence after an answer is auto-approval, not death');
-    }
-  });
-
-  test('a channel that never answers at all is still caught', () => {
-    const w = blindWatch(3);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), true);
-  });
-});
-
-describe('a real tool result is proof of life, even when the gate never sees it', () => {
-  /**
-   * The Bash sandbox runs a contained command without asking canUseTool — the
-   * sandbox is the authorization — so `ls && git log` returns real output with
-   * gateCalls still 0. To the gate counter alone that is identical to a dead
-   * control stream, and 44 healthy shifts were killed for opening on read-only
-   * shell to orient, their Bash results sitting in the transcript isError:false.
-   */
-  test('sandboxed shell output the gate never saw does not read as blind', () => {
-    const w = blindWatch(3);
-    assert.equal(w.turn(0, true), false); // wants Bash
-    w.result();                           // real `ls` output came back
-    assert.equal(w.turn(0, true), false); // wants Bash again, gate still silent
-    w.result();
-    for (let i = 0; i < 20; i++) assert.equal(w.turn(0, true), false, 'output is proof of life');
-  });
-
-  test('a result disarms it before the third silent turn', () => {
-    const w = blindWatch(3);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), false);
-    w.result();                           // proof arrives on turn two
-    assert.equal(w.turn(0, true), false, 'never reaches three');
-    assert.equal(w.turn(0, true), false);
-  });
-
-  test('no result and no answer is still caught — the fix keeps the backstop', () => {
-    // A truly dead stream returns Stream closed (never a result) or hangs with
-    // no result at all: no result() calls, the gate never answers, three gated
-    // turns still trips it.
-    const w = blindWatch(3);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), false);
-    assert.equal(w.turn(0, true), true);
   });
 });
 

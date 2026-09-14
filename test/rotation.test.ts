@@ -1,6 +1,6 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
-import { shouldRotate, cacheEnv, blindWatch, sessionStore,
+import { shouldRotate, cacheEnv, sessionStore,
          transcriptExists } from '../src/runtime/staff.ts';
 import { readPolicy, DEFAULT_POLICY } from '../src/core/config.ts';
 import { mkdirSync, mkdtempSync, writeFileSync, readFileSync } from 'node:fs';
@@ -112,49 +112,6 @@ describe('where a toolchain is told to put its cache', () => {
   test('caches are per company, like everything else a company touches', () => {
     assert.notEqual(cacheEnv('/a/scratch/cache')['npm_config_cache'],
                     cacheEnv('/b/scratch/cache')['npm_config_cache']);
-  });
-});
-
-describe('noticing that the gate has gone', () => {
-  /** One assistant turn: how many tools it asked for, and whether the gate heard. */
-  const run = (turns: Array<[wantsTools: boolean, gateHeard: boolean]>): number => {
-    const w = blindWatch(3);
-    let gate = 0;
-    for (let i = 0; i < turns.length; i++) {
-      if (turns[i]![1]) gate++;
-      if (w.turn(gate, turns[i]![0])) return i;
-    }
-    return -1;
-  };
-
-  test('a healthy shift is never called blind, however long it runs', () => {
-    assert.equal(run(Array.from({ length: 60 }, () => [true, true] as [boolean, boolean])), -1);
-  });
-
-  test('a shift whose tools all fail is stopped instead of running to the ceiling', () => {
-    // 28 turns, $4.85, nothing touched — this is the one that got away.
-    assert.notEqual(run(Array.from({ length: 28 }, () => [true, false] as [boolean, boolean])), -1);
-  });
-
-  /**
-   * Parallel tool calls are counted as their message arrives and gated a
-   * moment later. Measured within the turn, every one of them reads as a miss.
-   */
-  test('a turn is judged against the one before it, not against itself', () => {
-    assert.equal(run([[true, false], [true, true], [true, true]]), -1);
-  });
-
-  test('thinking without reaching for a tool is not blindness', () => {
-    assert.equal(run([[false, false], [false, false], [false, false], [false, false]]), -1);
-  });
-
-  test('a gate that answers again clears the count', () => {
-    assert.equal(run([[true, false], [true, false], [true, true],
-                      [true, false], [true, false]]), -1);
-  });
-
-  test('it takes more than one silent turn, because one is a race', () => {
-    assert.equal(run([[true, false], [true, false]]), -1);
   });
 });
 

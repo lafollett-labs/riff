@@ -31,6 +31,7 @@ let ledger: Ledger;
 let world: World;
 let gate: Gate;
 let capabilities: Record<string, string>;
+let toolNames: string[];
 
 const can = (opts: { actor?: string; contained?: boolean } = {}) =>
   makeCanUseTool({
@@ -62,7 +63,9 @@ beforeEach(() => {
   world = new World(join(dir, 'world'), clock);
   const commons: CommonsView = { count: () => world.commonsCount(), exists: (p) => world.exists(p) };
   gate = new Gate(ledger, constitutionFor({ ceo: 'ceo', board: ['chair'] }), commons);
-  capabilities = createTools({ ledger, world, gate, clock, actor: 'rae' } as never).capabilities;
+  const built = createTools({ ledger, world, gate, clock, actor: 'rae' } as never);
+  capabilities = built.capabilities;
+  toolNames = built.toolNames;
 });
 
 afterEach(() => { ledger.close(); rmSync(dir, { recursive: true, force: true }); });
@@ -77,6 +80,17 @@ describe('the chokepoint', () => {
     for (const bare of Object.keys(capabilities)) {
       allowed(await call(`${TOOL_PREFIX}${bare}`), bare);
     }
+  });
+
+  test('every REGISTERED company tool is recognised by the gate, not just the mapped ones', async () => {
+    // The test above iterates the capability MAP, so a tool that is registered
+    // on the server but missing from the map slips past it — which is exactly
+    // how portfolio and retire_project shipped dead, denied as "Unknown company
+    // tool" the moment a staff member reached for them. Iterate what the model
+    // is actually offered.
+    for (const name of toolNames) allowed(await call(`${TOOL_PREFIX}${name}`), name);
+    assert.ok(toolNames.includes('portfolio'), 'portfolio must be a registered, gated tool');
+    assert.ok(toolNames.includes('retire_project'), 'retire_project must be a registered, gated tool');
   });
 
   test('an unrecognised tool is refused, so a new SDK tool is not a new power', async () => {

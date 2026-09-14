@@ -379,7 +379,7 @@ export const createTools = (ctx: Ctx) => {
     who_is_here: 'world.read', read_colleague: 'world.read_other',
     propose_role: 'hire', retire_role: 'hire',
     post_to_commons: 'world.write', remove_from_commons: 'world.write',
-    commons_index: 'world.read',
+    commons_index: 'world.read', portfolio: 'world.read', retire_project: 'world.write',
     send_message: 'message', note_about: 'note.write', remember: 'world.write',
     set_activity: 'world.write',
     open_task: 'task.create', claim_task: 'task.assign', finish_task: 'task.assign',
@@ -389,19 +389,31 @@ export const createTools = (ctx: Ctx) => {
     withdraw_draft: 'world.read', my_drafts: 'world.read',
   };
 
+  const registered = [
+    whoIsHere, readColleague, proposeRole, retireRole,
+    postToCommons, removeFromCommons, commonsIndex,
+    portfolio, retireProject,
+    sendMessage, noteAbout, remember, setActivity,
+    openTask, claimTask, finishTask, spend, draftOutward,
+    myDrafts, withdrawDraft,
+  ];
+
+  // canUseTool denies any company tool absent from `capabilities` as an
+  // "Unknown company tool" — a silent death the model reads as the tool not
+  // existing. portfolio and retire_project both shipped registered-but-unmapped
+  // and were dead at the agent's hand. Fail at construction, not at theirs.
+  for (const t of registered) {
+    if (!(t.name in capabilities)) {
+      throw new Error(`company tool '${t.name}' has no capability in tools.ts — canUseTool would deny it`);
+    }
+  }
+
   const server = createSdkMcpServer({
     name: TOOL_NAMESPACE,
     version: '0.1.0',
     instructions: 'Working life at this company.',
-    tools: [
-      whoIsHere, readColleague, proposeRole, retireRole,
-      postToCommons, removeFromCommons, commonsIndex,
-      portfolio, retireProject,
-      sendMessage, noteAbout, remember, setActivity,
-      openTask, claimTask, finishTask, spend, draftOutward,
-      myDrafts, withdrawDraft,
-    ],
+    tools: registered,
   });
 
-  return { server, capabilities };
+  return { server, capabilities, toolNames: registered.map((t) => t.name) };
 };

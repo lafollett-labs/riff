@@ -139,10 +139,14 @@ const readPref = (k: string, d: boolean): boolean => {
 };
 const showThinking = ref(readPref('riff.shift.thinking', true));
 const showTools = ref(readPref('riff.shift.tools', true));
-watch([showThinking, showTools], ([th, to]) => {
+// Errors-only: the reason to open a recorded shift is often "what went wrong" —
+// a denied tool call, a failed result — so let the operator strip everything else.
+const errorsOnly = ref(readPref('riff.shift.errors', false));
+watch([showThinking, showTools, errorsOnly], ([th, to, er]) => {
   try {
     localStorage.setItem('riff.shift.thinking', th ? '1' : '0');
     localStorage.setItem('riff.shift.tools', to ? '1' : '0');
+    localStorage.setItem('riff.shift.errors', er ? '1' : '0');
   } catch { /* no storage — the filter still works for this session */ }
 });
 
@@ -186,6 +190,17 @@ const resultLine = (t: Turn) => {
   return parts.join(' · ');
 };
 const isError = (t: Turn) => asObj(t.meta)['isError'] === true;
+// What counts as an error worth surfacing: a tool result the engine flagged
+// (a denied/failed call — the "Unknown company tool" refusals live here), or a
+// shift that ended on anything other than success.
+const isErrorTurn = (t: Turn) => isError(t)
+  || (t.kind === 'result' && !!asObj(t.meta)['subtype'] && asObj(t.meta)['subtype'] !== 'success');
+const errorCount = computed(() => turns.value.filter(isErrorTurn).length);
+// The call ids behind an errored result, so the errors-only view can keep the
+// tool_use that caused each error beside it — the error text alone is thin.
+const erroredCallIds = computed(() => new Set(
+  turns.value.filter((t) => t.kind === 'tool_result' && isError(t))
+    .map((t) => t.name).filter((n): n is string => !!n)));
 const prettyInput = (text: string) => {
   try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
 };
@@ -206,11 +221,18 @@ const rows = computed(() => turns.value.map((t, i) => {
     gapMs: prev ? durationMs(prev.at, t.at) : 0,
   };
 }));
-const shown = computed(() => rows.value.filter((r) => {
-  if (r.t.kind === 'thinking') return showThinking.value;
-  if (r.t.kind === 'tool_use' || r.t.kind === 'tool_result') return showTools.value;
-  return true;
-}));
+const shown = computed(() => {
+  if (errorsOnly.value) {
+    // Errors, and the tool call that produced each — nothing else.
+    return rows.value.filter((r) => isErrorTurn(r.t)
+      || (r.t.kind === 'tool_use' && erroredCallIds.value.has(String(asObj(r.t.meta)['id']))));
+  }
+  return rows.value.filter((r) => {
+    if (r.t.kind === 'thinking') return showThinking.value;
+    if (r.t.kind === 'tool_use' || r.t.kind === 'tool_result') return showTools.value;
+    return true;
+  });
+});
 </script>
 
 <template>
@@ -245,9 +267,13 @@ const shown = computed(() => rows.value.filter((r) => {
       <div class="facet" role="group" aria-label="Show">
         <span class="faint lbl">Show</span>
         <button class="ghost sm" :class="{ on: showThinking }" :aria-pressed="showThinking"
-                @click="showThinking = !showThinking">Thinking</button>
+                :disabled="errorsOnly" @click="showThinking = !showThinking">Thinking</button>
         <button class="ghost sm" :class="{ on: showTools }" :aria-pressed="showTools"
-                @click="showTools = !showTools">Tools</button>
+                :disabled="errorsOnly" @click="showTools = !showTools">Tools</button>
+        <button class="ghost sm errbtn" :class="{ on: errorsOnly }" :aria-pressed="errorsOnly"
+                @click="errorsOnly = !errorsOnly">
+          Errors<span v-if="errorCount" class="cnt">{{ errorCount }}</span>
+        </button>
       </div>
     </div>
 
@@ -264,6 +290,9 @@ const shown = computed(() => rows.value.filter((r) => {
         </div>
         <div><dt>{{ following ? 'Elapsed' : 'Duration' }}</dt><dd>{{ fmtDur(spanMs) }}</dd></div>
         <div><dt>Blocks</dt><dd class="tnum">{{ current.turns }}</dd></div>
+        <div v-if="errorCount"><dt>Errors</dt>
+          <dd class="tnum errfact"><button class="linkbtn" @click="errorsOnly = true">{{ errorCount }}</button></dd>
+        </div>
         <div v-if="modelOf"><dt>Model</dt><dd class="mono">{{ modelOf }}</dd></div>
         <div><dt>Session</dt><dd class="mono">{{ short(current.sessionId) }}</dd></div>
       </dl>
@@ -312,18 +341,22 @@ const shown = computed(() => rows.value.filter((r) => {
             </template>
 
             <template v-else-if="r.t.kind === 'tool_result'">
-              <details class="tool" :class="{ err: isError(r.t) }">
+              <details class="tool" :class="{ err: isError(r.t) }" :open="errorsOnly && isError(r.t)">
                 <summary><span class="chip mono result" :class="{ err: isError(r.t) }">{{ isError(r.t) ? 'error' : 'result' }}</span></summary>
                 <pre class="mono io">{{ r.display }}</pre>
               </details>
             </template>
 
             <template v-else-if="r.t.kind === 'result'">
-              <div class="tally faint mono">— shift ended · {{ resultLine(r.t) }} —</div>
+              <div class="tally faint mono" :class="{ err: isErrorTurn(r.t) }">— shift ended · {{ resultLine(r.t) }} —</div>
             </template>
           </div>
         </li>
       </ol>
+
+      <p v-if="!loading && turns.length && errorsOnly && !shown.length" class="muted err-empty">
+        No errors recorded in this shift. 🎯
+      </p>
     </div>
   </div>
 </template>
@@ -349,6 +382,12 @@ h1 { font-size: 30px; }
 .facet .lbl { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
 .ghost.sm { font-size: 12px; padding: 4px 10px; }
 .ghost.on { border-color: var(--accent); color: var(--accent); }
+.ghost.sm:disabled { opacity: 0.4; cursor: not-allowed; }
+.errbtn { display: inline-flex; align-items: center; gap: 6px; }
+.errbtn.on { border-color: var(--alert); color: var(--alert); }
+.errbtn .cnt { font-variant-numeric: tabular-nums; font-weight: 600; background: var(--alert);
+  color: #fff; border-radius: 999px; min-width: 16px; height: 16px; padding: 0 5px;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 10.5px; }
 
 .summary { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
   padding: 14px 18px; margin-bottom: 18px; }
@@ -359,6 +398,9 @@ h1 { font-size: 30px; }
 .facts dt { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--faint); }
 .facts dd { margin: 0; font-size: 14px; overflow-wrap: anywhere; }
 .tnum { font-variant-numeric: tabular-nums; }
+.errfact .linkbtn { font: inherit; color: var(--alert); background: none; border: none; padding: 0;
+  cursor: pointer; font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+.err-empty { text-align: center; padding: 24px 0; font-size: 14px; }
 
 .feed-status { margin: 0 0 10px; font-size: 13px; color: var(--muted); min-height: 1em; }
 .feed-status.err { color: var(--alert); }
@@ -386,4 +428,5 @@ h1 { font-size: 30px; }
   max-height: 340px; overflow: auto; }
 .tool.err .io { border-color: var(--alert); }
 .tally { text-align: center; padding: 8px 0; font-size: 12px; }
+.tally.err { color: var(--alert); }
 </style>

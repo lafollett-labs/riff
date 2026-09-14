@@ -137,7 +137,7 @@ test('a recorded shift reads as a timeline, with when it ran and what it ran on'
   const summary = page.locator('.summary');
   await expect(summary).toBeVisible();
   await expect(summary.locator('.facts')).toContainText('Started');
-  await expect(summary.locator('.tnum')).toHaveText('6');
+  await expect(summary.locator('.tnum:not(.errfact)')).toHaveText('8');
   await expect(summary.locator('.facts')).toContainText('claude-opus-4-8');
   await expect(summary).not.toContainText('$');
 
@@ -145,7 +145,7 @@ test('a recorded shift reads as a timeline, with when it ran and what it ran on'
   // ran — each block stamped with a time.
   await expect(page.locator('.turn.text .prompt')).toContainText('Score the run');
   await expect(page.locator('.turn.text .say')).toContainText('Scoring the run');
-  await expect(page.locator('.turn.tool_use .chip')).toContainText('Bash');
+  await expect(page.locator('.turn.tool_use .chip').first()).toContainText('Bash');
   await expect(page.locator('.turn .stamp').first()).toBeVisible();
 
   // The closing tally reports the shift's shape, never its cost.
@@ -157,7 +157,7 @@ test('the reasoning and the tool traffic can be filtered down to the narrative',
   await go(page, 'Shift', 'Review a Shift');
   await page.selectOption('#shift-agent', 'fen');
   await expect(page.locator('.turn.thinking')).toHaveCount(1);
-  await expect(page.locator('.turn.tool_use')).toHaveCount(1);
+  await expect(page.locator('.turn.tool_use')).toHaveCount(2);
 
   // Turning a facet off drops that kind of block; the spoken narrative stays.
   await page.getByRole('button', { name: 'Thinking' }).click();
@@ -166,6 +166,22 @@ test('the reasoning and the tool traffic can be filtered down to the narrative',
   await expect(page.locator('.turn.tool_use')).toHaveCount(0);
   await expect(page.locator('.turn.tool_result')).toHaveCount(0);
   await expect(page.locator('.turn.text .say')).toContainText('Scoring the run');
+});
+
+test('the errors filter surfaces just what went wrong, and its count', async ({ page }) => {
+  await go(page, 'Shift', 'Review a Shift');
+  await page.selectOption('#shift-agent', 'fen');
+  // The summary flags the count; the timeline shows the whole shift by default.
+  await expect(page.locator('.summary .errfact')).toHaveText('1');
+  await expect(page.locator('.turn')).toHaveCount(8);
+
+  // Turn Errors on → only the refused call and its error result remain, and the
+  // narrative/thinking is gone.
+  await page.getByRole('button', { name: /^Errors/ }).click();
+  await expect(page.locator('.turn')).toHaveCount(2);
+  await expect(page.locator('.turn.tool_result')).toHaveCount(1);
+  await expect(page.locator('.turn.text')).toHaveCount(0);
+  await expect(page.locator('.turn.tool_result')).toContainText('requires board review');
 });
 
 test('a shift longer than a page loads in full, with no button to hunt for', async ({ page }) => {
@@ -183,10 +199,10 @@ test('switching staff mid-drain never mixes one shift into another', async ({ pa
   // Start Wick's long shift draining, then switch to Fen before it can finish.
   await page.selectOption('#shift-agent', 'wick');
   await page.selectOption('#shift-agent', 'fen');
-  // Fen's shift is small and complete: exactly its six blocks, no Wick turns
+  // Fen's shift is small and complete: exactly its own blocks, no Wick turns
   // stapled on, and not left truncated with the progress line stuck.
-  await expect(page.locator('.summary .tnum')).toHaveText('6');
-  await expect(page.locator('.turn')).toHaveCount(6);
+  await expect(page.locator('.summary .tnum:not(.errfact)')).toHaveText('8');
+  await expect(page.locator('.turn')).toHaveCount(8);
   await expect(page.locator('.turn.text .say')).toContainText('Scoring the run');
   await expect(page.locator('.log')).not.toContainText('Reconciling ledger row');
   await expect(page.locator('.feed-status')).not.toContainText('Reading the rest');

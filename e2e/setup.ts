@@ -154,6 +154,11 @@ export default async function globalSetup(): Promise<void> {
     name: 'Bash', text: JSON.stringify({ command: 'ls artifacts/' }), meta: { model: 'claude-opus-4-8', id: 'tu_1' } });
   transcript.append({ sessionId: sid, agentId: 'fen', role: 'user', kind: 'tool_result',
     name: 'tu_1', text: 'run-01.json\nrun-02.json', meta: { isError: false } });
+  // A call the gate refused, so the Errors filter has something real to surface.
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'assistant', kind: 'tool_use',
+    name: 'Bash', text: JSON.stringify({ command: 'git push origin main' }), meta: { model: 'claude-opus-4-8', id: 'tu_2' } });
+  transcript.append({ sessionId: sid, agentId: 'fen', role: 'user', kind: 'tool_result',
+    name: 'tu_2', text: 'refused: pushing to main requires board review', meta: { isError: true } });
   transcript.append({ sessionId: sid, agentId: 'fen', role: 'result', kind: 'result',
     text: 'done', meta: { subtype: 'success', turns: 4, costUsd: 0.42 } });
 

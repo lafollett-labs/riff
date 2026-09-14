@@ -185,6 +185,41 @@ agents can also reach is not a backup, it is a second thing to lose.
 which is the failure that once wrote a whole company to a layer that vanished on
 restart.
 
+### A shift's transcript lives on the volume, inside its own company
+
+Until 2026-09-13 the CLI's transcripts lived on the container's tmpfs `$HOME`
+and died on every restart — the price of keeping `.credentials.json` off disk, a
+file that no longer exists (the factory authenticates from
+`CLAUDE_CODE_OAUTH_TOKEN` in the environment). So transcripts now persist under
+the company's own home on the durable volume: the CLI's store at
+`companies/<slug>/.claude` (via `CLAUDE_CONFIG_DIR`), so a shift resumes instead
+of starting cold, and the company's own audit — every turn, tool call and result
+recorded from the SDK stream — at `companies/<slug>/transcript.db`. This is
+`config.json`'s neighbour, never inside `world/`, or the end-of-turn commit would
+stage the transcript into the company's own repo.
+
+`sandboxFilesystem` (`src/runtime/staff.ts`) keeps two boundaries across this:
+
+- **Between companies.** A shift's Bash is denied the whole installation root —
+  `installRoot()`, i.e. all of `/data`, which holds `secrets/`, `master.key` and
+  every other company — and re-admitted only its own home (`allowRead` is
+  `dirname(worldRoot)`). One company cannot read another's transcript any more
+  than it can read another's ledger or secrets.
+- **Around the CLI's private store.** The `.claude` subtree (its resume JSONL and
+  `.claude.json`) and `.credentials.json` are denied *even inside* the company's
+  own home, so a shift cannot read the CLI's conversation store — or a credential
+  file, were one ever present — through Bash.
+
+What this does NOT do, and was never meant to: hide a company's own record from
+its own staff. Its home is inside its own boundary, so its Bash can read its own
+`transcript.db` and `ledger.db` as it always could — the wall is between
+companies and around the credentials, not between a company and its own history.
+The stores hold agent-authored text (prompts, reasoning, tool input and output),
+never a secret: the runtime token is an environment variable and the product
+keys live in the proxy one container away (below). Backups follow the same rule
+as everything else on the volume — `docker/backup.sh` carries the transcripts to
+a destination no container mounts.
+
 ### The token is kept off your disk, and that is all that buys
 
 `docker/.env` holds a command that prints the token rather than the token, and

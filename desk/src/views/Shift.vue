@@ -139,14 +139,15 @@ const readPref = (k: string, d: boolean): boolean => {
 };
 const showThinking = ref(readPref('riff.shift.thinking', true));
 const showTools = ref(readPref('riff.shift.tools', true));
-// Errors-only: the reason to open a recorded shift is often "what went wrong" —
-// a denied tool call, a failed result — so let the operator strip everything else.
-const errorsOnly = ref(readPref('riff.shift.errors', false));
-watch([showThinking, showTools, errorsOnly], ([th, to, er]) => {
+// Errors-only strips a recorded shift to what went wrong. It is an aggressive
+// filter — it can blank a whole no-error shift — so it is a per-visit action,
+// not a remembered preference: default off each time the view opens, or an
+// operator returns to a filtered-empty screen with no memory of setting it.
+const errorsOnly = ref(false);
+watch([showThinking, showTools], ([th, to]) => {
   try {
     localStorage.setItem('riff.shift.thinking', th ? '1' : '0');
     localStorage.setItem('riff.shift.tools', to ? '1' : '0');
-    localStorage.setItem('riff.shift.errors', er ? '1' : '0');
   } catch { /* no storage — the filter still works for this session */ }
 });
 
@@ -291,7 +292,9 @@ const shown = computed(() => {
         <div><dt>{{ following ? 'Elapsed' : 'Duration' }}</dt><dd>{{ fmtDur(spanMs) }}</dd></div>
         <div><dt>Blocks</dt><dd class="tnum">{{ current.turns }}</dd></div>
         <div v-if="errorCount"><dt>Errors</dt>
-          <dd class="tnum errfact"><button class="linkbtn" @click="errorsOnly = true">{{ errorCount }}</button></dd>
+          <dd class="tnum errfact"><button class="linkbtn"
+            :aria-label="`Show ${errorCount} error${errorCount === 1 ? '' : 's'}`"
+            @click="errorsOnly = true">{{ errorCount }}</button></dd>
         </div>
         <div v-if="modelOf"><dt>Model</dt><dd class="mono">{{ modelOf }}</dd></div>
         <div><dt>Session</dt><dd class="mono">{{ short(current.sessionId) }}</dd></div>
@@ -354,7 +357,7 @@ const shown = computed(() => {
         </li>
       </ol>
 
-      <p v-if="!loading && turns.length && errorsOnly && !shown.length" class="muted err-empty">
+      <p v-if="!loading && !more && !error && turns.length && errorsOnly && !shown.length" class="muted err-empty">
         No errors recorded in this shift. 🎯
       </p>
     </div>
@@ -385,7 +388,9 @@ h1 { font-size: 30px; }
 .ghost.sm:disabled { opacity: 0.4; cursor: not-allowed; }
 .errbtn { display: inline-flex; align-items: center; gap: 6px; }
 .errbtn.on { border-color: var(--alert); color: var(--alert); }
-.errbtn .cnt { font-variant-numeric: tabular-nums; font-weight: 600; background: var(--alert);
+.errbtn .cnt { font-variant-numeric: tabular-nums; font-weight: 600;
+  /* darkened alert so white clears AA (4.5:1) at this small size */
+  background: color-mix(in srgb, var(--alert) 80%, #000);
   color: #fff; border-radius: 999px; min-width: 16px; height: 16px; padding: 0 5px;
   display: inline-flex; align-items: center; justify-content: center; font-size: 10.5px; }
 

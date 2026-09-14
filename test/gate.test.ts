@@ -134,6 +134,27 @@ describe('R2 — the CEO signs', () => {
     assert.equal(d.kind, 'allow');
     assert.equal(d.rule, 'R2.ceo_self');
   });
+
+  test('retiring a project escalates to the CEO, the way closing a seat does', () => {
+    // It used to gate on world.write and any active agent could delete a
+    // project tree unsigned — a sharper edge than retire_role, which always
+    // signed. Now it signs the same way.
+    const d = gate.request({
+      actor: 'rae', capability: 'project.retire',
+      target: 'projects/atlas', summary: 'retire atlas: the market moved',
+    });
+    assert.equal(d.kind, 'escalate');
+    assert.equal(d.kind === 'escalate' && d.tier, 'executive');
+  });
+
+  test('the CEO can retire a project without a second signature', () => {
+    const d = gate.request({
+      actor: 'ceo', capability: 'project.retire',
+      target: 'projects/atlas', summary: 'retire atlas',
+    });
+    assert.equal(d.kind, 'allow');
+    assert.equal(d.rule, 'R2.ceo_self');
+  });
 });
 
 describe('standing', () => {

@@ -201,7 +201,11 @@ export const createTools = (ctx: Ctx) => {
       if (!world.listProjects().includes(name)) {
         return say(`There is no project called "${name}". portfolio lists what there is.`);
       }
-      return say(gated(ctx, 'world.write', `retire ${name}: ${why}`, `projects/${name}`, () => {
+      // Signs like retire_role (R2 → the CEO): deleting a project tree is as
+      // consequential as closing a seat, and until now any active agent could
+      // do it unsigned. The payload lets the executor replay it after the CEO
+      // says yes — a non-CEO's request escalates and never runs `perform` here.
+      return say(gated(ctx, 'project.retire', `retire ${name}: ${why}`, `projects/${name}`, () => {
         // The record outlives the tree. What was tried and why it ended is the
         // part worth keeping; the code is in the world's git history either way.
         world.removeProject(name);
@@ -209,7 +213,7 @@ export const createTools = (ctx: Ctx) => {
         const left = world.projectCount();
         const ceiling = ctx.gate.constitution.portfolioCeiling;
         return `Retired ${name}. ${left}${ceiling > 0 ? ` of ${ceiling}` : ''} projects remain.`;
-      }));
+      }, { payload: { project: name, why } }));
     },
   );
 
@@ -379,7 +383,7 @@ export const createTools = (ctx: Ctx) => {
     who_is_here: 'world.read', read_colleague: 'world.read_other',
     propose_role: 'hire', retire_role: 'hire',
     post_to_commons: 'world.write', remove_from_commons: 'world.write',
-    commons_index: 'world.read', portfolio: 'world.read', retire_project: 'world.write',
+    commons_index: 'world.read', portfolio: 'world.read', retire_project: 'project.retire',
     send_message: 'message', note_about: 'note.write', remember: 'world.write',
     set_activity: 'world.write',
     open_task: 'task.create', claim_task: 'task.assign', finish_task: 'task.assign',

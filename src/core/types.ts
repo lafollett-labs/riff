@@ -63,6 +63,7 @@ export const CAPABILITIES = [
   'task.assign',
   'message',
   'hire',           // grow or reshape the company
+  'project.retire', // delete a project tree — reshaping, so it signs like hire
   'spend',
   'external.read',
   'external.write', // reaches beyond the company — always a draft

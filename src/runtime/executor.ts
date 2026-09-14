@@ -47,6 +47,33 @@ export const applyApproved = (
           break;
         }
 
+        case 'project.retire': {
+          // A retirement the CEO signed. Without this case the approval would
+          // hit the default noop below — marked applied, tree never removed —
+          // so the project would survive its own sign-off, silently.
+          //
+          // Name-addressed, like retire_role is id-addressed: we delete whatever
+          // occupies projects/<name> now, not a snapshot from sign-off time. If
+          // that name were retired and a new project reused it inside the
+          // approval window, this would retire the new one. Accepted as a known
+          // trade-off — the window is short, the collision needs deliberate name
+          // reuse, and matching retire_role keeps the two paths one shape.
+          const p = JSON.parse(ap.payloadJson ?? '{}') as { project?: string; why?: string };
+          const name = p.project ?? '';
+          if (name && world.removeProject(name)) {
+            ledger.emit('company', 'project.retired', `projects/${name}`, {
+              why: p.why, requestedBy: ap.requestedBy,
+            });
+            applied++;
+          } else {
+            // Retired twice, or renamed away before the CEO answered.
+            ledger.emit('company', 'approval.apply_failed', ap.id, {
+              reason: name ? `no project "${name}" to retire` : 'approval carried no project name',
+            });
+          }
+          break;
+        }
+
         case 'external.write': {
           // Rule 3's landing point. Approval marks the draft RELEASABLE. The
           // connector that would actually send it reads from here — and when

@@ -69,7 +69,10 @@ export const constitutionFor = (opts: {
   treasurers: opts.treasurers ?? [opts.ceo],
   dailyCapCents: opts.dailyCapCents ?? 500,
   overCap: 'escalate',
-  executiveApproves: ['hire', 'world.write_other'],
+  // Retiring a project deletes its whole tree and frees an R7 slot. It is as
+  // consequential as retiring a seat, so it signs the same way — retire_role
+  // already routes through 'hire'; retire_project routes through this.
+  executiveApproves: ['hire', 'project.retire', 'world.write_other'],
   // R3 has exactly one member and no configuration to loosen it. The moment
   // there is a bypass, something will eventually find a reason to use it.
   boardApproves: ['external.write'],

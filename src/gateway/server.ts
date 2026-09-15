@@ -7,6 +7,7 @@ import { Registry, type Company } from '../company/registry.ts';
 import { startCredentialHealth } from '../runtime/credential.ts';
 import { windowsFromUsage } from '../runtime/limits.ts';
 import { renameAgent } from '../company/rename.ts';
+import { redefineAgent } from '../company/redefine.ts';
 import { vitals } from '../analytics/vitals.ts';
 import { exportCompany, exportName, importCompany } from '../company/transfer.ts';
 import { isOperatorError, installRoot } from '../core/config.ts';
@@ -461,6 +462,37 @@ const server = createServer(async (req, res) => {
       co.ledger.upsertAgent({ ...a, status: 'departed' });
       co.ledger.emit('board', 'role.retired', who, { why, by: 'board', ...(working ? { finishing: true } : {}) });
       return json(res, { retired: who, name: a.name, finishing: working });
+    }
+
+    // Redefining an agent post-founding. `mandate` was set once at genesis and
+    // `role` at hire, with no way to change either afterwards — so altering what
+    // an agent *is* meant hand-editing persona.md under a stopped company. This
+    // is that edit as an operation: role and the persona body are the levers the
+    // system prompt actually reads, mandate is recorded for the board, and the
+    // persona write is committed in the world so a shift's `git add -A` cannot
+    // sign an operator's edit with the agent's name. Takes effect next shift.
+    if (p === '/api/agents/redefine' && method === 'POST') {
+      const b = await readBody(req);
+      const slug = String(b['company'] ?? '') || (resolveSlug() ?? '');
+      const co = slug ? registry.get(slug) : null;
+      if (!co) return json(res, { error: `no company '${slug}'` }, 404);
+
+      const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(b, k);
+      const r = redefineAgent(co.ledger, co.world, co.cfg.company.name,
+        String(b['who'] ?? ''),
+        {
+          ...(has('role') ? { role: String(b['role'] ?? '') } : {}),
+          ...(has('mandate') ? { mandate: String(b['mandate'] ?? '') } : {}),
+          ...(has('persona') ? { persona: String(b['persona'] ?? '') } : {}),
+        },
+        String(b['why'] ?? ''));
+      if (r.ok) return json(res, r);
+      // 404 no such agent; 409 a rule refuses (the board) or there is nothing to
+      // reconcile; 400 for the rest, which are bad input (no reason, over a cap).
+      const code = r.reason.startsWith('no agent') ? 404
+        : (r.reason.includes('charter') || r.reason.startsWith('no change')) ? 409
+          : 400;
+      return json(res, { error: r.reason }, code);
     }
 
     if (p.startsWith('/api/companies/') && (method === 'PATCH' || method === 'DELETE')) {

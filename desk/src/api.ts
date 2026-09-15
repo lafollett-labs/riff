@@ -190,6 +190,10 @@ export const api = {
   retireAgent: (company: string, who: string, why: string) =>
     send<{ retired: string; name: string; finishing: boolean }>('/api/agents/retire', 'POST',
       { company, who, why }),
+  redefineAgent: (company: string, who: string, why: string,
+                  changes: { role?: string; mandate?: string; persona?: string }) =>
+    send<{ who: string; name: string; changed: string[] }>('/api/agents/redefine', 'POST',
+      { company, who, why, ...changes }),
   renameCompany: (slug: string,
                   patch: { name?: string; business?: string; slug?: string;
                            policy?: Partial<CompanyPolicy>; release?: 'none' | 'bundle' }) =>

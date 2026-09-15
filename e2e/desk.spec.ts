@@ -1336,6 +1336,59 @@ test('a seat can be closed from the console, and never a board seat', async ({ p
   expect(JSON.parse(gone.dataJson).by).toBe('board');
 });
 
+test('a seat can be redefined from the console, sending only the fields that changed', async ({ page }) => {
+  // Role and persona were set at founding with no way to change them after; the
+  // only levers were rename and retire. The panel diffs each field against what
+  // it held when it opened, so an untouched persona is never sent — the bug that
+  // would otherwise overwrite the brief (worst case, wipe it) on a role-only edit.
+  await page.goto('/');
+  await go(page, 'Staff');
+
+  // The board is defined by the charter, not a persona — no Redefine here.
+  const chair = page.locator('.card', { hasText: 'Chairman' }).first();
+  if (await chair.count()) {
+    await chair.click();
+    await expect(page.locator('.detail').getByRole('button', { name: 'Redefine…' })).toHaveCount(0);
+    await chair.click();
+  }
+
+  await page.locator('.card', { hasText: 'Fen' }).first().click();
+  await page.getByRole('button', { name: 'Redefine…' }).click();
+
+  // A reason is required, like retire — a change nobody wrote a reason for is
+  // one nobody can review afterwards.
+  await page.getByRole('button', { name: 'Save definition' }).click();
+  await expect(page.locator('.redefining .err')).toHaveText('say why');
+
+  // Change only the role; leave the persona textarea untouched.
+  await page.getByLabel('Role').fill('Head of Assurance');
+  await page.getByLabel('Why this change').fill('assurance is the wider remit');
+  await page.getByRole('button', { name: 'Save definition' }).click();
+
+  await expect(page.locator('.renaming .hint')).toContainText('redefined Fen: role');
+
+  // The server applied role alone — the untouched persona was not sent.
+  const log = await (await page.request.get('/api/events?c=testwright-co&limit=500')).json();
+  const ev = log.events.find((e: { kind: string }) => e.kind === 'agent.redefined');
+  expect(ev).toBeTruthy();
+  const data = JSON.parse(ev.dataJson);
+  expect(data.changed).toEqual(['role']);
+  expect(data.by).toBe('board');
+
+  const state = await (await page.request.get('/api/state?c=testwright-co')).json();
+  expect(state.agents.find((a: { id: string }) => a.id === 'fen').role).toBe('Head of Assurance');
+
+  // The brief is intact — a role-only edit did not touch the body.
+  const persona = await (await page.request.get('/api/doc?c=testwright-co&path=staff%2Ffen%2Fpersona.md')).json();
+  expect(persona.body).toContain('whether the thing we say happened actually happened');
+
+  // Put Fen's role back so the rest of the suite finds her as it left her.
+  await page.request.post('/api/agents/redefine', {
+    data: { company: 'testwright-co', who: 'fen', why: 'restore fixture', role: 'Head of Proof' },
+  });
+  await page.goto('/');
+});
+
 test('the board speaks with more than one voice', async ({ page }) => {
   // /api/say sent as board[0] whatever it was handed, so a second board seat
   // existed on the roster and nowhere the company could hear it.

@@ -8,6 +8,7 @@ const props = defineProps<{ state: State; events: Event[] }>();
 const emit = defineEmits<{ changed: [] }>();
 const open = ref<string | null>(null);
 const persona = ref('');
+const loading = ref(false);
 const draft = ref('');
 const sending = ref(false);
 
@@ -29,14 +30,19 @@ const tree = computed(() => {
 const select = async (a: Agent) => {
   open.value = open.value === a.id ? null : a.id;
   persona.value = '';
+  redefining.value = null; // never carry an open editor across a seat switch
   if (!open.value) return;
+  loading.value = true;
   try { persona.value = (await api.doc(`staff/${a.id}/persona.md`)).body; }
   catch { persona.value = a.mandate; }
+  finally { loading.value = false; }
 };
 
 onEvents(() => props.events, /^(agent\.slept|remember)/, async () => {
   const id = open.value;
-  if (!id) return;
+  // Not while an editor is open: moving persona.value under it would desync the
+  // preview from the textarea. The redefine diff is frozen at open regardless.
+  if (!id || redefining.value === id) return;
   const a = props.state.agents.find((x) => x.id === id);
   if (a) { try { persona.value = (await api.doc(`staff/${id}/persona.md`)).body; } catch { /* keep */ } }
 });
@@ -101,6 +107,55 @@ const doRetire = async (a: Agent) => {
   } catch (e) { retireErr.value = e instanceof Error ? e.message : String(e); }
 };
 
+// Redefining what an agent *is* — the role line and the persona brief the
+// system prompt reads each shift, plus the mandate on record. Set once at
+// founding with no way to change them since, so this is the seat's editor:
+// change a few fields, say why, and it lands as a world commit the next shift
+// reads. Only fields that actually changed are sent.
+const redefining = ref<string | null>(null);
+const rRole = ref('');
+const rMandate = ref('');
+const rPersona = ref('');
+// The persona body as it was when the editor opened — the diff baseline. The
+// live persona.value moves under the editor (a fetch resolving, or the agent's
+// own shift rewriting its brief), so diffing an untouched field against it
+// would send it as a change and overwrite the file — worst case the empty
+// string captured before the fetch resolved. Frozen here, an untouched field
+// never sends.
+const rPersonaBase = ref('');
+const rWhy = ref('');
+const redefineErr = ref('');
+
+const openRedefine = (a: Agent) => {
+  redefining.value = redefining.value === a.id ? null : a.id;
+  rRole.value = a.role;
+  rMandate.value = a.mandate;
+  rPersona.value = persona.value; // the body already loaded when the seat opened
+  rPersonaBase.value = persona.value;
+  rWhy.value = '';
+  redefineErr.value = '';
+};
+
+const doRedefine = async (a: Agent) => {
+  const why = rWhy.value.trim();
+  if (!why) { redefineErr.value = 'say why'; return; }
+  const changes: { role?: string; mandate?: string; persona?: string } = {};
+  // Role and mandate are trimmed to match the server's own change check; persona
+  // is not — its leading and trailing whitespace is meaningful body content.
+  if (rRole.value.trim() !== a.role) changes.role = rRole.value.trim();
+  if (rMandate.value.trim() !== a.mandate) changes.mandate = rMandate.value.trim();
+  if (rPersona.value !== rPersonaBase.value) changes.persona = rPersona.value;
+  if (Object.keys(changes).length === 0) { redefining.value = null; return; }
+  redefineErr.value = '';
+  try {
+    const r = await api.redefineAgent(props.state.slug, a.id, why, changes);
+    redefining.value = null;
+    persona.value = rPersona.value;
+    renamed.value = `redefined ${r.name}: ${r.changed.join(', ')}`;
+    emit('changed');
+  } catch (e) { redefineErr.value = e instanceof Error ? e.message : String(e); }
+};
+
 const send = async (a: Agent) => {
   if (!draft.value.trim()) return;
   sending.value = true;
@@ -150,12 +205,49 @@ const send = async (a: Agent) => {
             </span>
           </template>
           <button v-else class="ghost" @click="openRename(a)">Rename…</button>
-          <button v-if="a.tier !== 'board' && renaming !== a.id" class="ghost danger"
+          <button v-if="a.tier !== 'board' && renaming !== a.id && retiring !== a.id" class="ghost"
+                  :disabled="loading" @click="openRedefine(a)">
+            {{ redefining === a.id ? 'Cancel' : 'Redefine…' }}
+          </button>
+          <button v-if="a.tier !== 'board' && renaming !== a.id && redefining !== a.id" class="ghost danger"
                   @click="openRetire(a)">
             {{ retiring === a.id ? 'Keep them' : 'Retire…' }}
           </button>
           <span v-if="renameErr" class="err">{{ renameErr }}</span>
           <span v-else-if="renamed" class="faint mono hint">{{ renamed }}</span>
+        </div>
+        <div v-if="redefining === a.id" class="redefining">
+          <label class="fld">
+            <span class="lbl faint mono">Role</span>
+            <input v-model="rRole" class="rn grow" aria-label="Role"
+                   placeholder="The role line — e.g. Founder and Principal Engineer"
+                   @keyup.esc="redefining = null" />
+          </label>
+          <label class="fld">
+            <span class="lbl faint mono">Mandate</span>
+            <textarea v-model="rMandate" rows="2" aria-label="Mandate"
+                      placeholder="Why this seat exists (on record; not in the shift prompt)" />
+          </label>
+          <label class="fld">
+            <span class="lbl faint mono">Persona</span>
+            <textarea v-model="rPersona" rows="10" aria-label="Persona brief"
+                      placeholder="The brief the shift reads each time it wakes" />
+          </label>
+          <label class="fld">
+            <span class="lbl faint mono">Why</span>
+            <input v-model="rWhy" class="rn grow" aria-label="Why this change"
+                   placeholder="Why — this goes in the record, and outlives the decision"
+                   @keyup.enter="doRedefine(a)" @keyup.esc="redefining = null" />
+          </label>
+          <div class="acts">
+            <button class="go" @click="doRedefine(a)">Save definition</button>
+            <button class="ghost" @click="redefining = null">Cancel</button>
+            <span class="faint hint">
+              Role and persona are what the next shift reads; the change lands as
+              a world commit. Takes effect when they next wake.
+            </span>
+          </div>
+          <span v-if="redefineErr" class="err">{{ redefineErr }}</span>
         </div>
         <div v-if="retiring === a.id" class="retiring">
           <input v-model="why" class="rn grow" aria-label="Why they are leaving"
@@ -184,6 +276,16 @@ const send = async (a: Agent) => {
 .retiring .hint { font-size: 11.5px; flex-basis: 100%; }
 .retiring .err { color: var(--alert); font-size: 12px; }
 .retiring .grow { flex: 1; min-width: 260px; }
+.redefining { display: flex; flex-direction: column; gap: 10px; margin-top: 10px;
+  border-top: 1px solid var(--line); padding-top: 12px; }
+.fld { display: flex; flex-direction: column; gap: 4px; }
+.fld .lbl { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+.redefining textarea { font: inherit; font-size: 13px; background: #15100d; color: var(--ink);
+  border: 1px solid var(--line-2); border-radius: 5px; padding: 8px; resize: vertical; }
+.redefining .rn { width: 100%; box-sizing: border-box; }
+.acts { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.acts .hint { font-size: 11.5px; }
+.redefining .err { color: var(--alert); font-size: 12px; }
 .danger { color: var(--alert); }
 .go.danger { border-color: color-mix(in srgb, var(--alert) 45%, transparent); }
 h1 { font-size: 30px; }

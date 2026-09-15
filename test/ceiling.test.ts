@@ -1,7 +1,7 @@
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { withoutSecrets, streamClosedResult } from '../src/runtime/staff.ts';
+import { withoutSecrets, streamClosedResult, toolsConnected, awaitToolsConnected } from '../src/runtime/staff.ts';
 import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import { DEFAULT_POLICY, readPolicy } from '../src/core/config.ts';
 
@@ -271,6 +271,77 @@ describe('the dead control stream is read at its source, not inferred from silen
     const branch = src.slice(src.indexOf("if (m.type === 'user' && session"));
     assert.match(branch.slice(0, 260), /staleSession = true;/,
       'routes through the staleSession -> recoverStaleSession path, not a new one');
+  });
+});
+
+/**
+ * The startup race that made a healthy resume look like dead tools.
+ *
+ * The init snapshot is one reading, and on a resumed session it can arrive
+ * before the in-process company server finishes connecting — so the server
+ * reads `pending` or absent, and the shift was aborted for tools_missing when
+ * the very next reading would have said `connected`. The grace poll waits that
+ * race out; only a server that never connects runs the budget out.
+ */
+describe('a still-connecting company server is waited out, not called dead', () => {
+  const status = (s: string) => [{ name: 'company', status: s }];
+  // A fake query whose server status walks a scripted sequence, one entry per read.
+  const scripted = (seq: Array<Array<{ name: string; status: string }>> | Error) => {
+    let i = 0;
+    return {
+      reads: () => i,
+      mcpServerStatus: async () => {
+        if (seq instanceof Error) throw seq;
+        return seq[Math.min(i++, seq.length - 1)] ?? [];
+      },
+    };
+  };
+  const noSleep = async () => {};
+
+  test('toolsConnected reads only the company server, and only `connected` counts', () => {
+    assert.equal(toolsConnected(status('connected')), true);
+    assert.equal(toolsConnected(status('pending')), false);
+    assert.equal(toolsConnected(status('failed')), false);
+    assert.equal(toolsConnected([]), false, 'an absent server is not connected');
+    assert.equal(toolsConnected([{ name: 'other', status: 'connected' }]), false,
+      'another server being up is not the company server being up');
+  });
+
+  test('it returns the instant the company server is connected, without sleeping', async () => {
+    const q = scripted([status('connected')]);
+    assert.equal(await awaitToolsConnected(q, 3000, 150, noSleep), true);
+    assert.equal(q.reads(), 1, 'one status read, no wait');
+  });
+
+  test('it keeps polling a pending server until it connects', async () => {
+    const q = scripted([status('pending'), status('pending'), status('connected')]);
+    assert.equal(await awaitToolsConnected(q, 3000, 150, noSleep), true);
+    assert.equal(q.reads(), 3, 'polled until the race resolved');
+  });
+
+  test('a server that never connects runs the budget out and is called dead', async () => {
+    // now() steps 200ms per read, so a 300ms budget is spent after two reads.
+    let t = 0;
+    const q = scripted([status('pending')]);
+    const now = () => { const v = t; t += 200; return v; };
+    assert.equal(await awaitToolsConnected(q, 300, 150, noSleep, now), false);
+  });
+
+  test('a status call that throws is not trusted either way and falls through', async () => {
+    const q = scripted(new Error('control stream gone'));
+    assert.equal(await awaitToolsConnected(q, 3000, 150, noSleep), false);
+  });
+
+  test('the init handler waits out the grace before it emits tools_missing', () => {
+    const src = staff();
+    const from = src.indexOf("m.subtype === 'init'");
+    const block = src.slice(from, src.indexOf('void readUsage(q);', from));
+    // The grace poll runs on the not-connected path, above the emit.
+    assert.ok(block.indexOf('awaitToolsConnected(q, TOOLS_GRACE_MS, TOOLS_POLL_MS)')
+      < block.indexOf("'shift.tools_missing'"),
+      'the live status is polled before the channel is declared dead');
+    // And the emit records how long it waited, for the audit.
+    assert.match(block, /graceMs: TOOLS_GRACE_MS/);
   });
 });
 

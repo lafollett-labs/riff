@@ -645,6 +645,48 @@ export const streamClosedResult = (m: SDKUserMessage): boolean => {
   });
 };
 
+/** The status of the company's own server in an SDK server-status list. */
+const companyServerStatus = (
+  servers: readonly { name: string; status: string }[],
+): string | undefined => servers.find((s) => s.name === TOOL_NAMESPACE)?.status;
+
+/** Whether the company's own MCP server reports itself connected. */
+export const toolsConnected = (
+  servers: readonly { name: string; status: string }[],
+): boolean => companyServerStatus(servers) === 'connected';
+
+/**
+ * Wait out the startup race before calling the company's tools dead.
+ *
+ * The init snapshot is one point-in-time reading, and on a resumed session it
+ * can land before the in-process ('sdk') company server finishes connecting:
+ * transcript-load jitter fires init early, so its `mcp_servers` shows the server
+ * `pending` or omits it entirely, and a healthy resume was aborted for
+ * shift.tools_missing (Rafe, 2026-09-03). The live status reaches `connected` in
+ * well under a second; only a genuinely dead server runs the budget out, and the
+ * one cold retry then heals that. A status call that throws is not a reading we
+ * can trust either way, so it falls through to the same cold retry.
+ *
+ * `sleep`/`now` are injected so the poll is driven deterministically in a test
+ * without real timers.
+ */
+export const awaitToolsConnected = async (
+  q: { mcpServerStatus: () => Promise<{ name: string; status: string }[]> },
+  budgetMs: number,
+  stepMs: number,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+  now: () => number = Date.now,
+): Promise<boolean> => {
+  const deadline = now() + budgetMs;
+  for (;;) {
+    try {
+      if (toolsConnected(await q.mcpServerStatus())) return true;
+    } catch { return false; }
+    if (now() >= deadline) return false;
+    await sleep(stepMs);
+  }
+};
+
 /**
  * Said plainly, because the SDK calls every abort "aborted by user" and an
  * operator reading that would go looking for the operator who did it.
@@ -657,6 +699,15 @@ const overranBy = (ms: number): string =>
 /** Said plainly for the same reason: the CLI only wrote it to a debug log. */
 const NO_TOOLS = "the company's own tools never connected, twice running — the shift had no "
   + 'way to write anything down, so it was stopped instead of spending its turns finding out.';
+
+/**
+ * How long a not-yet-connected company server is given before it is called dead,
+ * and how often its live status is re-read while waiting. Three seconds is far
+ * past the sub-second connect a resumed in-process server actually takes, so the
+ * budget is only ever spent on a server that is genuinely down.
+ */
+const TOOLS_GRACE_MS = 3000;
+const TOOLS_POLL_MS = 150;
 
 /** Said plainly, because the SDK reports the underlying abort as "aborted by user". */
 const STALE_SESSION = 'a resumed session came up dead — the control stream returned Stream closed '
@@ -1396,17 +1447,25 @@ export const tick = async (
       // A shift that starts without its tools cannot do its job, so say it
       // out loud and stop instead of spending a turn ceiling finding out.
       if (m.type === 'system' && m.subtype === 'init') {
-        const server = m.mcp_servers.find((x) => x.name === TOOL_NAMESPACE);
-        toolsUp = server?.status === 'connected';
-        trace(`init tools=${server?.status ?? 'absent'}`);
+        toolsUp = toolsConnected(m.mcp_servers);
+        trace(`init tools=${companyServerStatus(m.mcp_servers) ?? 'absent'}`);
+        // The init snapshot can precede the in-process ('sdk') company server's
+        // connect on a resumed session, so a still-connecting server reads as
+        // absent here. Poll the live status over a short grace window before
+        // calling the channel dead, rather than aborting a healthy resume.
+        if (!toolsUp) {
+          toolsUp = await awaitToolsConnected(q, TOOLS_GRACE_MS, TOOLS_POLL_MS);
+          trace(`init tools after ${TOOLS_GRACE_MS}ms grace=${toolsUp ? 'connected' : 'absent'}`);
+        }
         if (!toolsUp) {
           ledger.emit(agent.id, 'shift.tools_missing', null, {
-            status: server?.status ?? 'absent',
+            status: companyServerStatus(m.mcp_servers) ?? 'absent',
             servers: m.mcp_servers,
             // legResumed, not `session != null`: this init message may have just
             // set session (line above), which would mislabel a cold start as
             // resumed. legResumed is captured at leg start, before any of that.
             resumed: legResumed,
+            graceMs: TOOLS_GRACE_MS,
             ...auditTail(),
           });
           stop.abort();

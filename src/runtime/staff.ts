@@ -676,12 +676,31 @@ export const awaitToolsConnected = async (
   stepMs: number,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
   now: () => number = Date.now,
+  // One status read, raced against however much of the budget is left, so a
+  // mcpServerStatus() that never settles cannot outlast it. The deadline below is
+  // only checked BETWEEN reads, so a hung read was never bounded: on 2026-09-16 a
+  // resumed leg's status call blocked 382 seconds past a 3-second budget and the
+  // shift hung instead of failing over to its one cold retry. Returns null when
+  // the budget elapsed first; the timer is cleared on settle so nothing dangles.
+  // Injected so the race is driven deterministically in a test.
+  race: (p: Promise<{ name: string; status: string }[]>, ms: number)
+    => Promise<{ name: string; status: string }[] | null> = (p, ms) =>
+    new Promise((resolve, reject) => {
+      const t = setTimeout(() => resolve(null), ms);
+      (t as { unref?: () => void }).unref?.();
+      p.then((v) => { clearTimeout(t); resolve(v); }, (e) => { clearTimeout(t); reject(e); });
+    }),
 ): Promise<boolean> => {
   const deadline = now() + budgetMs;
   for (;;) {
+    const remaining = deadline - now();
+    if (remaining <= 0) return false;
+    let status: { name: string; status: string }[] | null;
     try {
-      if (toolsConnected(await q.mcpServerStatus())) return true;
+      status = await race(q.mcpServerStatus(), remaining);
     } catch { return false; }
+    if (status === null) return false;   // the read outran the budget — call it dead
+    if (toolsConnected(status)) return true;
     if (now() >= deadline) return false;
     await sleep(stepMs);
   }
@@ -1217,6 +1236,11 @@ export const tick = async (
   const runLeg = async (prompt: string, maxTurns: number, handover = false): Promise<void> => {
     atCeiling = false;
     let toolTurns = 0;
+    // A leg is one query answering with one result. Once that result is in, any
+    // further init the SDK emits is a phantom re-init on the way down, not a new
+    // leg — see the init handler, which must not read its (unregistered) tools as
+    // a missing-tools failure.
+    let sawResult = false;
     // Kept per leg, not per shift. A shift that lost its conversation and
     // retook the leg cold reported the FIRST leg's stderr on the second leg's
     // failure — which is how `No conversation found with session ID` came to
@@ -1447,6 +1471,14 @@ export const tick = async (
       // A shift that starts without its tools cannot do its job, so say it
       // out loud and stop instead of spending a turn ceiling finding out.
       if (m.type === 'system' && m.subtype === 'init') {
+        // The tools check belongs only to the init that OPENS the leg. On a
+        // resumed session the SDK can emit a second init AFTER the leg's result —
+        // a phantom re-init as the query winds down — and its in-process company
+        // server is not re-registered, so it reads absent. Treating that as
+        // missing tools aborted a healthy, finished leg and then hung its grace
+        // poll for six minutes (Carver, 2026-09-16, seq 6286). Once the result is
+        // in, ignore any init that follows it.
+        if (sawResult) { trace('init after result — phantom re-init, ignored'); continue; }
         toolsUp = toolsConnected(m.mcp_servers);
         trace(`init tools=${companyServerStatus(m.mcp_servers) ?? 'absent'}`);
         // The init snapshot can precede the in-process ('sdk') company server's
@@ -1490,6 +1522,9 @@ export const tick = async (
         });
       }
       if (m.type === 'result') {
+        // The leg has answered. Any init after this is a phantom re-init the
+        // init handler must ignore (see there).
+        sawResult = true;
         trace(`result ${m.subtype} turns=${m.num_turns}`);
         turns += m.num_turns;
         costUsd += m.total_cost_usd;

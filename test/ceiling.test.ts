@@ -332,6 +332,24 @@ describe('a still-connecting company server is waited out, not called dead', () 
     assert.equal(await awaitToolsConnected(q, 3000, 150, noSleep), false);
   });
 
+  test('a status read that never settles is bounded by the budget, not left to block', async () => {
+    // The bug it fixes: mcpServerStatus() that hangs. The deadline is only checked
+    // between reads, so without the race a hung read blocked 382s past a 3s budget.
+    const q = { mcpServerStatus: () => new Promise<{ name: string; status: string }[]>(() => {}) };
+    // Injected race resolves null (budget elapsed) so the test never waits on a real timer.
+    const budgetElapsed = async () => null;
+    assert.equal(await awaitToolsConnected(q, 3000, 150, noSleep, undefined, budgetElapsed), false);
+  });
+
+  test('end to end, a hung status read returns within the budget without hanging', async () => {
+    // The real default race with a real (tiny) timer: proves the function honours
+    // its own budget when the read never settles.
+    const q = { mcpServerStatus: () => new Promise<{ name: string; status: string }[]>(() => {}) };
+    const start = Date.now();
+    assert.equal(await awaitToolsConnected(q, 40, 10, noSleep), false);
+    assert.ok(Date.now() - start < 500, 'returned near the budget, did not block on the hung read');
+  });
+
   test('the init handler waits out the grace before it emits tools_missing', () => {
     const src = staff();
     const from = src.indexOf("m.subtype === 'init'");
@@ -342,6 +360,20 @@ describe('a still-connecting company server is waited out, not called dead', () 
       'the live status is polled before the channel is declared dead');
     // And the emit records how long it waited, for the audit.
     assert.match(block, /graceMs: TOOLS_GRACE_MS/);
+  });
+
+  test('an init that arrives after the leg result is a phantom re-init, not tools_missing', () => {
+    // A resumed leg can emit a second init AFTER its result, with the in-process
+    // company server unregistered (reads absent). The init handler must bail on
+    // that rather than call a finished leg's tools missing (Carver, seq 6286).
+    const src = staff();
+    const initFrom = src.indexOf("m.subtype === 'init'");
+    const guard = src.slice(initFrom, src.indexOf('toolsUp = toolsConnected(m.mcp_servers)', initFrom));
+    assert.match(guard, /if \(sawResult\)/, 'the tools check bails once the leg has produced its result');
+    // And the result handler is what sets that flag.
+    const resultFrom = src.indexOf("m.type === 'result'");
+    assert.ok(src.indexOf('sawResult = true', resultFrom) > resultFrom,
+      'the result handler marks the leg as answered');
   });
 });
 

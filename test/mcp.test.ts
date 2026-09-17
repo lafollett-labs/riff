@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { RiffClient, normalizeBase, shapeEvents, shapeInbox, shapeTranscript } from '../src/mcp/client.ts';
+import { RiffClient, normalizeBase, shapeEvents, shapeInbox, shapeState, shapeTranscript } from '../src/mcp/client.ts';
 
 interface Recorded { method: string; url: string; body: unknown; }
 
@@ -280,6 +280,74 @@ test('shapeInbox keeps unread-to-me and the most recent N, and passes the count 
   assert.equal(picked.count, 2);
 
   assert.equal(shapeInbox(null).count, 0, 'garbage in, empty out');
+});
+
+test('shapeState lean drops the charter and mandates, keeps the operational surface and unknown fields', () => {
+  const raw = {
+    slug: 'shipit',
+    company: { name: 'ShipIt', business: '# a very long founding charter…' },
+    policy: { concurrency: 2 },
+    agents: [
+      { id: 'jack', role: 'CEO', status: 'active', activity: 'scoping the pipe', mandate: 'long mandate prose…' },
+      { id: 'lynn', role: 'Principal Eng', status: 'active', activity: 'awaiting S-0914', mandate: 'even longer mandate…' },
+    ],
+    headcount: 3,
+    running: true,
+    windows: [{ kind: 'five_hour', utilization: 0.18 }],
+    somethingNew: 42, // a field the endpoint might add later
+  };
+
+  // No filter: the reply is returned untouched, charter and all.
+  assert.deepEqual(shapeState(raw), raw);
+  assert.strictEqual(shapeState(raw, { lean: false }), raw);
+
+  const lean = shapeState(raw, { lean: true }) as Record<string, unknown>;
+  const company = lean['company'] as Record<string, unknown>;
+  assert.equal(company['name'], 'ShipIt');
+  assert.ok(!('business' in company), 'the charter is dropped');
+
+  const agents = lean['agents'] as Array<Record<string, unknown>>;
+  assert.deepEqual(agents.map((a) => a['id']), ['jack', 'lynn']);
+  assert.ok(agents.every((a) => !('mandate' in a)), 'no agent keeps its mandate prose');
+  assert.equal(agents[0]?.['activity'], 'scoping the pipe', 'the live activity line stays');
+
+  // The operational surface — and any field the endpoint adds — survives the trim.
+  assert.deepEqual(lean['policy'], { concurrency: 2 });
+  assert.deepEqual(lean['windows'], [{ kind: 'five_hour', utilization: 0.18 }]);
+  assert.equal(lean['headcount'], 3);
+  assert.equal(lean['running'], true);
+  assert.equal(lean['somethingNew'], 42, 'unknown fields pass through, not silently dropped');
+
+  const empty = shapeState(null, { lean: true }) as Record<string, unknown>;
+  assert.deepEqual(empty['company'], {});
+  assert.deepEqual(empty['agents'], []);
+});
+
+test('state shapes the reply when lean is set and passes it through otherwise', async () => {
+  const s = await stub();
+  try {
+    const client = new RiffClient(s.base);
+    const body = {
+      slug: 'shipit',
+      company: { name: 'ShipIt', business: 'charter' },
+      agents: [{ id: 'jack', mandate: 'prose' }],
+      running: true,
+    };
+
+    s.reply(body);
+    const full = await client.state('shipit');
+    assert.equal(last(s.calls).url, '/api/state?c=shipit');
+    assert.deepEqual(full.data, body, 'no opts: the reply is untouched');
+
+    s.reply(body);
+    const lean = await client.state('shipit', { lean: true });
+    const data = lean.data as { company: Record<string, unknown>; agents: Array<Record<string, unknown>> };
+    assert.ok(!('business' in data.company), 'lean drops the charter over the wire too');
+    assert.ok(!('mandate' in (data.agents[0] ?? {})), 'lean drops the mandate');
+    assert.equal(data.company['name'], 'ShipIt');
+  } finally {
+    await s.close();
+  }
 });
 
 test('inbox shapes the reply and filters unread client-side', async () => {

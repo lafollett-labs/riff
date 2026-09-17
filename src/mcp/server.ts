@@ -60,9 +60,12 @@ server.registerTool('riff_usage', {
 
 server.registerTool('riff_state', {
   title: 'Riff: company state',
-  description: 'Live state of one company: running/awake/draining, headcount, agents, pending approvals, usage windows, next-due times.',
-  inputSchema: { company },
-}, ({ company: c }) => run(() => client.state(c)));
+  description: 'Live state of one company: running/awake/draining, headcount, agents, pending approvals, usage windows, next-due times. `lean` drops the founding charter and each agent\'s mandate prose, leaving the operational surface (run flags, counts, live activity, dueAt, windows) — all a status check or a monitor needs, without a multi-KB charter dump every call.',
+  inputSchema: {
+    company,
+    lean: z.boolean().optional().describe('drop the charter and agent mandates; keep the operational surface'),
+  },
+}, ({ company: c, lean }) => run(() => client.state(c, lean !== undefined ? { lean } : {})));
 
 server.registerTool('riff_events', {
   title: 'Riff: recent events',

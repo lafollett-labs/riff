@@ -169,6 +169,30 @@ export const shapeInbox = (
   };
 };
 
+/**
+ * Company state, trimmed for an operational read. The endpoint carries the full
+ * founding charter (`company.business`) and every agent's `mandate` prose — a
+ * multi-KB block that a status check or a monitor pulls every tick and never
+ * reads, the same dump that made a plain inbox read overrun the token budget.
+ * `lean` drops the charter and the per-agent mandate and keeps the operational
+ * surface: run flags, headcount, counts, the roster's live `activity`, dueAt
+ * and the usage windows. Every other field passes through the spread, so a new
+ * field the endpoint adds survives the trim rather than being silently dropped.
+ * Unfiltered it returns the reply untouched.
+ */
+export const shapeState = (data: unknown, opts?: { lean?: boolean }): unknown => {
+  if (!opts?.lean) return data;
+  const drop = (obj: Record<string, unknown>, key: string): Record<string, unknown> => {
+    const copy = { ...obj };
+    delete copy[key];
+    return copy;
+  };
+  const d = asRecord(data);
+  const agents = (Array.isArray(d['agents']) ? (d['agents'] as unknown[]) : [])
+    .map((a) => drop(asRecord(a), 'mandate'));
+  return { ...d, company: drop(asRecord(d['company']), 'business'), agents };
+};
+
 const q = (slug: string): string => `?c=${encodeURIComponent(slug)}`;
 
 export type Fetcher = typeof fetch;
@@ -212,8 +236,16 @@ export class RiffClient {
     return this.#req('POST', '/api/usage', body);
   }
 
-  state(slug: string): Promise<RiffResponse> {
-    return this.#req('GET', `/api/state${q(slug)}`);
+  /**
+   * Live state of one company. `lean` shapes the reply client-side (see
+   * shapeState), dropping the founding charter and each agent's mandate prose
+   * so a monitor's every-tick read is the operational surface, not a multi-KB
+   * charter dump.
+   */
+  async state(slug: string, opts?: { lean?: boolean }): Promise<RiffResponse> {
+    const r = await this.#req('GET', `/api/state${q(slug)}`);
+    if (r.status >= 400) return r;
+    return { status: r.status, data: shapeState(r.data, opts) };
   }
 
   async events(slug: string, opts?: { limit?: number; kinds?: string }): Promise<RiffResponse> {

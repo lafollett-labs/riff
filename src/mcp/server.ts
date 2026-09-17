@@ -85,15 +85,17 @@ server.registerTool('riff_vitals', {
 
 server.registerTool('riff_inbox', {
   title: 'Riff: board inbox',
-  description: 'Mail addressed to the board chair. scope="all" shows the whole company\'s traffic, not just what reached the board. `unreadOnly` keeps only unread mail addressed to you — the "do I have unread?" answer, and it matches the reported `unread` count; `limit` keeps the most recent N. Filter a busy inbox or its full message bodies dump back through the model.',
+  description: 'Mail addressed to the board chair. scope="all" shows the whole company\'s traffic, not just what reached the board. `ids` reads exactly the named messages (their full bodies) — the "open these" step; `unreadOnly` keeps only unread mail addressed to you — the "do I have unread?" answer, and it matches the reported `unread` count; `limit` keeps the most recent N. Filter a busy inbox or its full message bodies dump back through the model.',
   inputSchema: {
     company,
     scope: z.enum(['mine', 'all']).optional(),
+    ids: z.array(z.string()).optional().describe('read only these message ids (full bodies)'),
     unreadOnly: z.boolean().optional().describe('keep only unread mail addressed to you'),
     limit: z.number().int().min(1).max(500).optional().describe('keep only the most recent N messages'),
   },
-}, ({ company: c, scope, unreadOnly, limit }) => run(() => client.inbox(c, {
+}, ({ company: c, scope, ids, unreadOnly, limit }) => run(() => client.inbox(c, {
   ...(scope !== undefined ? { scope } : {}),
+  ...(ids !== undefined ? { ids } : {}),
   ...(unreadOnly !== undefined ? { unreadOnly } : {}),
   ...(limit !== undefined ? { limit } : {}),
 })));
@@ -226,6 +228,19 @@ server.registerTool('riff_say', {
 }, ({ company: c, text, to, from }) => run(() => client.say(c, text, {
   ...(to !== undefined ? { to } : {}),
   ...(from !== undefined ? { from } : {}),
+})));
+
+server.registerTool('riff_mark_read', {
+  title: 'Riff: mark board mail read',
+  description: 'Mark board mail read, or unread with read=false. `ids` names the messages to mark — omit it to mark the whole inbox at once. Returns how many changed. Typical loop: riff_inbox with unreadOnly=true, then mark exactly the ids you have handled.',
+  inputSchema: {
+    company,
+    ids: z.array(z.string()).optional().describe('message ids to mark; omit to mark the whole inbox'),
+    read: z.boolean().optional().describe('true marks read (default), false marks unread'),
+  },
+}, ({ company: c, ids, read }) => run(() => client.markRead(c, {
+  ...(ids !== undefined ? { ids } : {}),
+  ...(read !== undefined ? { read } : {}),
 })));
 
 server.registerTool('riff_decide', {

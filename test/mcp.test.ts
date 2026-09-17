@@ -274,6 +274,11 @@ test('shapeInbox keeps unread-to-me and the most recent N, and passes the count 
   const recent = shapeInbox(raw, { limit: 2 });
   assert.deepEqual(recent.messages.map((m) => m['id']), ['m4', 'm3']);
 
+  // ids reads exactly the named messages, in the inbox's order (not the ids').
+  const picked = shapeInbox(raw, { ids: ['m1', 'm3'] });
+  assert.deepEqual(picked.messages.map((m) => m['id']), ['m3', 'm1']);
+  assert.equal(picked.count, 2);
+
   assert.equal(shapeInbox(null).count, 0, 'garbage in, empty out');
 });
 
@@ -309,6 +314,31 @@ test('archive DELETEs the company by slug and sends no body', async () => {
     assert.deepEqual([c.method, c.url], ['DELETE', '/api/companies/fathom']);
     assert.equal(c.body, null, 'archive is a DELETE on the path — a stray body could be read as an update');
     assert.deepEqual(r.data, { archived: 'fathom', at: '/data/archive/fathom-2026-09-17T01-45-55-389Z' });
+  } finally {
+    await s.close();
+  }
+});
+
+test('markRead posts the ids and read flag, and marks the whole inbox when ids are omitted', async () => {
+  const s = await stub();
+  try {
+    const client = new RiffClient(s.base);
+    s.reply({ marked: 2, read: true });
+
+    // Specific ids, read defaulting true (the key is omitted, not sent false).
+    const r = await client.markRead('shipit', { ids: ['m1', 'm2'] });
+    let c = last(s.calls);
+    assert.deepEqual([c.method, c.url], ['POST', '/api/inbox/read?c=shipit']);
+    assert.deepEqual(bodyOf(c), { ids: ['m1', 'm2'] });
+    assert.deepEqual(r.data, { marked: 2, read: true });
+
+    // Mark the whole inbox unread — no ids, read explicitly false.
+    await client.markRead('shipit', { read: false });
+    assert.deepEqual(bodyOf(last(s.calls)), { read: false });
+
+    // No opts at all: mark everything read (server defaults read to true).
+    await client.markRead('shipit');
+    assert.deepEqual(bodyOf(last(s.calls)), {}, 'no undefined keys leak onto the wire');
   } finally {
     await s.close();
   }

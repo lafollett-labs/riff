@@ -131,16 +131,18 @@ export const shapeTranscript = (
 /**
  * Board mail, filtered to what a reader asked for. The endpoint returns every
  * message with its full body, and a long inbox is hundreds of KB — enough to
- * blow the token budget on a plain read. `unreadOnly` keeps only unread mail
- * addressed to the viewer (`readAt` null and `yours`), which answers "do I have
- * unread?" in one call and matches the endpoint's own `unread` count; `limit`
- * keeps the most recent N (the endpoint orders newest-first). The `unread`
- * count and `me`/`scope` pass through untouched, so a filtered view still
- * reports the true total.
+ * blow the token budget on a plain read. `ids` reads exactly the named messages
+ * (their full bodies) and is the "open these" half of the loop, symmetric with
+ * markRead's `ids`; `unreadOnly` keeps only unread mail addressed to the viewer
+ * (`readAt` null and `yours`), which answers "do I have unread?" in one call and
+ * matches the endpoint's own `unread` count; `limit` keeps the most recent N
+ * (the endpoint orders newest-first). The filters compose in that order. The
+ * `unread` count and `me`/`scope` pass through untouched, so a filtered view
+ * still reports the true total.
  */
 export const shapeInbox = (
   data: unknown,
-  opts?: { unreadOnly?: boolean; limit?: number },
+  opts?: { ids?: string[]; unreadOnly?: boolean; limit?: number },
 ): {
   me: unknown; scope: unknown; unread: unknown;
   count: number; messages: Array<Record<string, unknown>>;
@@ -148,6 +150,10 @@ export const shapeInbox = (
   const d = asRecord(data);
   const raw = Array.isArray(d['messages']) ? (d['messages'] as unknown[]) : [];
   let rows = raw.map((r) => asRecord(r));
+  if (opts?.ids && opts.ids.length > 0) {
+    const want = new Set(opts.ids);
+    rows = rows.filter((m) => typeof m['id'] === 'string' && want.has(m['id'] as string));
+  }
   if (opts?.unreadOnly) {
     rows = rows.filter((m) => m['readAt'] == null && m['yours'] === true);
   }
@@ -224,12 +230,13 @@ export class RiffClient {
 
   /**
    * Board mail. `scope: 'all'` widens to the whole company's traffic; unfiltered
-   * it is only what reached the chair. `unreadOnly` and `limit` shape the reply
-   * client-side (see shapeInbox) so a long inbox is not dumped through the model.
+   * it is only what reached the chair. `ids`, `unreadOnly` and `limit` shape the
+   * reply client-side (see shapeInbox) so a long inbox is not dumped through the
+   * model — `ids` reads the named messages' full bodies.
    */
   async inbox(
     slug: string,
-    opts?: { scope?: 'mine' | 'all'; unreadOnly?: boolean; limit?: number },
+    opts?: { scope?: 'mine' | 'all'; ids?: string[]; unreadOnly?: boolean; limit?: number },
   ): Promise<RiffResponse> {
     const s = opts?.scope === 'all' ? '&scope=all' : '';
     const r = await this.#req('GET', `/api/inbox${q(slug)}${s}`);
@@ -237,6 +244,7 @@ export class RiffClient {
     return {
       status: r.status,
       data: shapeInbox(r.data, {
+        ...(opts?.ids !== undefined ? { ids: opts.ids } : {}),
         ...(opts?.unreadOnly !== undefined ? { unreadOnly: opts.unreadOnly } : {}),
         ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
       }),
@@ -355,6 +363,19 @@ export class RiffClient {
       text,
       ...(opts?.to !== undefined ? { to: opts.to } : {}),
       ...(opts?.from !== undefined ? { from: opts.from } : {}),
+    });
+  }
+
+  /**
+   * Mark board mail read, or unread with `read: false`. `ids` names the
+   * messages; omit it to mark the whole inbox at once. The endpoint scopes to
+   * the chair and returns how many rows changed. Pairs with `inbox({ unreadOnly:
+   * true })` — read the unread, then clear exactly those ids.
+   */
+  markRead(slug: string, opts?: { ids?: string[]; read?: boolean }): Promise<RiffResponse> {
+    return this.#req('POST', `/api/inbox/read${q(slug)}`, {
+      ...(opts?.ids !== undefined ? { ids: opts.ids } : {}),
+      ...(opts?.read !== undefined ? { read: opts.read } : {}),
     });
   }
 

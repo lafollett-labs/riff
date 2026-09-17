@@ -87,4 +87,17 @@ describe('the Tune panel edits the whole policy schema', () => {
     const stray = [...editable].filter((k) => !schema.includes(k));
     assert.deepEqual(stray, [], `Tune panel edits keys that are not policy fields: ${stray.join(', ')}`);
   });
+
+  // The panel groups the dials for layout, and a dial rendered by a group it was
+  // left out of renders nowhere — a real field with no editor, the exact bug the
+  // guard above exists to catch, but invisible to it because it reads only DIALS.
+  // The DialKey type stops a stray group key; only this stops a missing one.
+  test('every dial sits in exactly one group', () => {
+    const src = readFileSync(new URL('../desk/src/views/Overview.vue', import.meta.url), 'utf8');
+    const dialKeys = [...src.matchAll(/key: '([a-zA-Z]+)', label:/g)].map((m) => m[1]!);
+    const groupKeys = [...src.matchAll(/keys: \[([^\]]+)\]/g)]
+      .flatMap((m) => [...m[1]!.matchAll(/'([a-zA-Z]+)'/g)].map((x) => x[1]!));
+    assert.deepEqual([...groupKeys].sort(), [...dialKeys].sort(),
+      'DIAL_GROUPS keys must be a permutation of DIALS keys — no dial missing from a group, none duplicated');
+  });
 })

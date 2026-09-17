@@ -100,6 +100,37 @@ const DIALS = [
     min: 0, max: 720, step: 0.5 },
 ] as const;
 
+/**
+ * The dials, grouped so a growing list reads as four short sections rather than
+ * one long column. The flat DIALS above stays the single source the dirty-check
+ * and the save map iterate — a group only picks which dials sit together — so a
+ * dial cannot be shown and then not saved. `extras` marks the one group that
+ * also carries the three hand-rendered fields (utilization %, dollars) whose
+ * value is transformed in the field.
+ */
+// Constrained to the DIALS keys so tsgo rejects a stray or renamed key, which
+// makes the `!` in groupDials provably safe. The other direction — a dial
+// missing from every group, which types cannot catch — is guarded in policy.test.ts.
+type DialKey = (typeof DIALS)[number]['key'];
+
+const DIAL_GROUPS: {
+  title: string; caption: string; keys: readonly DialKey[]; extras?: boolean;
+}[] = [
+  { title: 'Cadence', caption: 'How much work each shift, and how often.',
+    keys: ['maxTurns', 'concurrency', 'baseIntervalMinutes'] },
+  { title: 'Conversations',
+    caption: 'When an agent hands its work over and carries on in a fresh conversation mid-shift.',
+    keys: ['rotateAtContextPct', 'rotateAtSessionTurns'] },
+  { title: 'Rationing', caption: 'What the company may hold at once.',
+    keys: ['commonsCeiling', 'portfolioCeiling'] },
+  { title: 'Safety limits',
+    caption: 'The bounds that keep an unattended run from spending the plan.',
+    keys: ['shiftTimeoutMinutes', 'maxSessionHours'], extras: true },
+];
+
+const groupDials = (keys: readonly DialKey[]) =>
+  keys.map((k) => DIALS.find((d) => d.key === k)!);
+
 // The editable dials are all numeric; shiftTrace is a diagnostic flag set
 // elsewhere. Keep it out of the number map the dials bind to — the save merges
 // server-side, so leaving it out here never resets it.
@@ -337,39 +368,49 @@ const working = computed(() => props.state.awake.length);
       </p>
 
       <template v-else>
-        <label v-for="d in DIALS" :key="d.key" class="dial">
-          <span class="k">{{ d.label }}</span>
-          <input v-model.number="policy[d.key]" type="number"
-                 :min="d.min" :max="d.max" :step="d.step" />
-          <span class="why faint">{{ d.hint }}</span>
-        </label>
+        <div v-for="g in DIAL_GROUPS" :key="g.title" class="group">
+          <h3 class="group-title">{{ g.title }}</h3>
+          <p class="group-caption faint">{{ g.caption }}</p>
 
-        <label class="dial">
-          <span class="k">Slow down at</span>
-          <span class="pct"><input v-model.number="throttlePct" type="number" min="0" max="100" />%</span>
-          <span class="why faint">
-            Of the rate-limit window. Past this the gaps between shifts stretch, rather than the
-            company coasting into the wall and losing the rest of the window to retries.
-          </span>
-        </label>
-        <label class="dial">
-          <span class="k">Stop at</span>
-          <span class="pct"><input v-model.number="pausePct" type="number" min="5" max="100" />%</span>
-          <span class="why faint">
-            Your headroom. Slowing down still spends the window, only later — a company that
-            never stops takes all of it, and you find it gone when you sit down to work.
-            100 means never stop.
-          </span>
-        </label>
-        <label class="dial">
-          <span class="k">Daily spend cap</span>
-          <span class="pct">$<input v-model.number="capUsd" type="number" min="0" max="100000" step="1" /></span>
-          <span class="why faint">
-            Rule 4. A per-treasurer, per-day ceiling on spend. 0 is no cap. On a subscription
-            the figure is imputed list price, not money billed — set it as a daily work ceiling,
-            or leave 0 and pace by the window instead.
-          </span>
-        </label>
+          <div v-for="d in groupDials(g.keys)" :key="d.key" class="dial">
+            <label class="k" :for="`dial-${d.key}`">{{ d.label }}</label>
+            <input :id="`dial-${d.key}`" v-model.number="policy[d.key]" type="number"
+                   :min="d.min" :max="d.max" :step="d.step" :aria-describedby="`why-${d.key}`" />
+            <span class="why faint" :id="`why-${d.key}`">{{ d.hint }}</span>
+          </div>
+
+          <template v-if="g.extras">
+            <div class="dial">
+              <label class="k" for="dial-throttle">Slow down at</label>
+              <span class="pct"><input id="dial-throttle" v-model.number="throttlePct" type="number"
+                    min="0" max="100" aria-describedby="why-throttle" />%</span>
+              <span class="why faint" id="why-throttle">
+                Of the rate-limit window. Past this the gaps between shifts stretch, rather than the
+                company coasting into the wall and losing the rest of the window to retries.
+              </span>
+            </div>
+            <div class="dial">
+              <label class="k" for="dial-pause">Stop at</label>
+              <span class="pct"><input id="dial-pause" v-model.number="pausePct" type="number"
+                    min="5" max="100" aria-describedby="why-pause" />%</span>
+              <span class="why faint" id="why-pause">
+                Your headroom. Slowing down still spends the window, only later — a company that
+                never stops takes all of it, and you find it gone when you sit down to work.
+                100 means never stop.
+              </span>
+            </div>
+            <div class="dial">
+              <label class="k" for="dial-cap">Daily spend cap</label>
+              <span class="pct">$<input id="dial-cap" v-model.number="capUsd" type="number"
+                    min="0" max="100000" step="1" aria-describedby="why-cap" /></span>
+              <span class="why faint" id="why-cap">
+                Rule 4. A per-treasurer, per-day ceiling on spend. 0 is no cap. On a subscription
+                the figure is imputed list price, not money billed — set it as a daily work ceiling,
+                or leave 0 and pace by the window instead.
+              </span>
+            </div>
+          </template>
+        </div>
 
         <p class="muted note">
           Saving lets the company go and builds it again, because the scheduler reads these once.
@@ -461,14 +502,21 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .summary { font-size: 13px; line-height: 1.6; }
 .summary strong { color: var(--gold); font-weight: normal; }
 .note { font-size: 12px; line-height: 1.55; margin-top: 12px; }
+.group-title { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--faint);
+  margin: 0; padding-top: 13px; border-top: 1px solid var(--line); }
+.group:first-of-type .group-title { border-top: 0; padding-top: 2px; }
+.group-caption { font-size: 11.5px; line-height: 1.5; margin: 2px 0 6px; }
 .dial { display: grid; grid-template-columns: 190px 96px 1fr; align-items: baseline;
-  gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--line); }
-.dial:last-of-type { border-bottom: 0; }
+  gap: 12px; padding: 6px 0; }
 .dial .k { font-size: 13px; color: var(--ink); }
 .dial .why { font-size: 11.5px; line-height: 1.5; }
 .dial input { width: 74px; font: inherit; font-size: 13px; background: #15100d; color: var(--ink);
   border: 1px solid var(--line-2); border-radius: 5px; padding: 5px 8px; }
 .dial .pct { white-space: nowrap; color: var(--faint); font-size: 12px; }
+@media (max-width: 560px) {
+  .dial { grid-template-columns: 1fr; gap: 3px; padding: 8px 0; }
+  .dial input { width: 100%; max-width: 160px; }
+}
 
 .seat { font-size: 14px; margin-top: 7px; }
 .seat .nm { color: var(--ink); }

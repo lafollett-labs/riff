@@ -261,6 +261,7 @@ export class Registry {
       options: {
         maxTurns: p.maxTurns,
         rotateAtContextPct: p.rotateAtContextPct,
+        rotateAtSessionTurns: p.rotateAtSessionTurns,
         // Beside the world, never inside it: the end-of-turn commit stages the
         // whole tree, and a build cache is not part of anybody's work.
         cacheDir,

@@ -13,6 +13,7 @@ const AT_HALF = {
   contextWindow: 1_000_000,
   rotateAtPct: 50,
   sessionTurns: 0,
+  maxSessionTurns: 600,
   turnsLeft: 40,
   rotations: 0,
 };
@@ -75,11 +76,15 @@ describe('deciding to replace a conversation mid-shift', () => {
    * stream dies. Turn count catches it with no denominator at all.
    */
   test('a long conversation is retired on turn count with the context nearly empty', () => {
-    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 0, sessionTurns: 500 }), true);
+    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 0, sessionTurns: 600 }), true);
   });
 
   test('a conversation short of the turn count and the percentage is left alone', () => {
-    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 1_000, sessionTurns: 299 }), false);
+    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 1_000, sessionTurns: 599 }), false);
+  });
+
+  test('a turn cap of zero leaves rotation to context percentage alone', () => {
+    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 0, sessionTurns: 999_999, maxSessionTurns: 0 }), false);
   });
 
   test('the turn trigger still respects the room to hand over', () => {
@@ -99,6 +104,18 @@ describe('configuring the threshold', () => {
 
   test('zero is honoured — it is the way to turn rotation off', () => {
     assert.equal(readPolicy({ rotateAtContextPct: 0 }).rotateAtContextPct, 0);
+  });
+
+  test('the session-turn cap defaults to 600, and zero turns it off', () => {
+    assert.equal(readPolicy({}).rotateAtSessionTurns, DEFAULT_POLICY.rotateAtSessionTurns);
+    assert.equal(DEFAULT_POLICY.rotateAtSessionTurns, 600);
+    assert.equal(readPolicy({ rotateAtSessionTurns: 0 }).rotateAtSessionTurns, 0);
+  });
+
+  test('the session-turn cap is a whole number clamped to range', () => {
+    assert.equal(readPolicy({ rotateAtSessionTurns: 850.7 }).rotateAtSessionTurns, 851);
+    assert.equal(readPolicy({ rotateAtSessionTurns: -5 }).rotateAtSessionTurns, 0);
+    assert.equal(readPolicy({ rotateAtSessionTurns: 1e9 }).rotateAtSessionTurns, 100_000);
   });
 
   /**
@@ -207,8 +224,9 @@ describe('the turn count reaches the rotation decision and survives a resume', (
   const src = (): string =>
     readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
 
-  test('the running session-turn count is passed to shouldRotate', () => {
-    assert.match(src(), /sessionTurns: sessionTurns\(\)/);
+  test('the running count and the configured cap both reach shouldRotate', () => {
+    assert.match(src(), /sessionTurns: sessionTurns\(\), maxSessionTurns/);
+    assert.match(src(), /const maxSessionTurns = d\.rotateAtSessionTurns \?\? DEFAULT_POLICY\.rotateAtSessionTurns/);
   });
 
   test('the count is loaded on resume and written back at shift end', () => {

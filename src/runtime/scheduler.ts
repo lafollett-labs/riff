@@ -49,6 +49,11 @@ export type SchedulerOptions = {
    */
   rotateAtContextPct: number;
   /**
+   * Replace an agent's conversation once it has run this many turns, across
+   * every resume. 0 leaves it to context %. See CompanyPolicy.rotateAtSessionTurns.
+   */
+  rotateAtSessionTurns: number;
+  /**
    * Somewhere with real disk for toolchain caches. Empty leaves every one of
    * them on its default, which is under $HOME — a tmpfs that is also the
    * session store. See cacheEnv in staff.ts.
@@ -105,6 +110,7 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
   // before anything works. At 24 every shift of a coding company was cut.
   maxTurns: 60,
   rotateAtContextPct: 50,
+  rotateAtSessionTurns: 600,
   cacheDir: '',
   configDir: '',
   // 1.6x the longest shift ever recorded here. See CompanyPolicy.
@@ -626,6 +632,7 @@ export class Scheduler {
         ...(this.#opts.perTickBudgetUsd != null ? { maxBudgetUsd: this.#opts.perTickBudgetUsd } : {}),
         maxTurns: this.#opts.maxTurns,
         rotateAtContextPct: this.#opts.rotateAtContextPct,
+        rotateAtSessionTurns: this.#opts.rotateAtSessionTurns,
         ...(this.#opts.shiftTimeoutMs > 0 ? { shiftTimeoutMs: this.#opts.shiftTimeoutMs } : {}),
         ...(this.#opts.shiftTrace ? { shiftTrace: true } : {}),
         // The engine's own state, so the shift can wind down before the cap and

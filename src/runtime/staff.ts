@@ -114,6 +114,9 @@ export type TickDeps = {
   /** Replace the conversation mid-shift at this much of the window. See
    *  CompanyPolicy.rotateAtContextPct. */
   rotateAtContextPct?: number;
+  /** Replace the conversation once it has run this many turns. See
+   *  CompanyPolicy.rotateAtSessionTurns. */
+  rotateAtSessionTurns?: number;
   /** Somewhere with real disk for toolchain caches. See cacheEnv. */
   cacheDir?: string;
   /** The CLI's config + transcript store (CLAUDE_CONFIG_DIR), on the volume
@@ -854,29 +857,17 @@ export const recordShiftMessage = (
 };
 
 /**
- * A conversation is retired on turn count as well as on context percentage.
- *
- * The percentage cannot catch a long session on a large window: the runtime
- * compacts context back down, so on a 1M-token window real usage peaked near
- * 42% and the 50% gate never fired — one conversation ran to 4367 turns over
- * ~29 hours without a single rotation, its canUseTool control stream aged out,
- * and WebFetch/WebSearch began returning "Stream closed" mid-shift while Bash,
- * which needs no permission round-trip, kept working. Turn count is the
- * denominator-free proxy for "further down a transcript" — which is what the
- * per-turn cost climb behind rotateAtContextPct was already measuring.
- */
-const ROTATE_AT_SESSION_TURNS = 300;
-
-/**
  * Whether to hand this conversation over and carry on in a fresh one.
  *
  * Two independent triggers. The conversation has run too many turns to keep
- * resuming (ROTATE_AT_SESSION_TURNS), or its context is genuinely filling
+ * resuming (maxSessionTurns, 0 = off), or its context is genuinely filling
  * (rotateAtPct). Unknown is not "yes" for the second: with no window reported
  * there is no denominator, and rotating on a guess would throw away a
  * conversation that might be nearly empty — that is why that threshold is a
  * percentage, the denominator belonging to whatever model the company gave this
- * agent. The turn trigger needs no denominator, so it stands on its own.
+ * agent. The turn trigger needs no denominator, so it stands on its own; see
+ * CompanyPolicy.rotateAtSessionTurns for why it exists and why it is a ceiling
+ * rather than an aggressive trigger.
  */
 export const shouldRotate = (s: {
   contextTokens: number;
@@ -884,6 +875,8 @@ export const shouldRotate = (s: {
   rotateAtPct: number;
   /** Turns already spent on this conversation, across every resume of it. */
   sessionTurns: number;
+  /** The turn count at which to retire it, or 0 to leave it to context %. */
+  maxSessionTurns: number;
   /** Turns still inside the shift's ceiling. */
   turnsLeft: number;
   rotations: number;
@@ -893,7 +886,7 @@ export const shouldRotate = (s: {
   // left spends them all on note-taking for a shift that then ends.
   if (s.turnsLeft < HANDOVER_TURNS * 2) return false;
   // Too far down its transcript to keep resuming, whatever its context reads.
-  if (s.sessionTurns >= ROTATE_AT_SESSION_TURNS) return true;
+  if (s.maxSessionTurns > 0 && s.sessionTurns >= s.maxSessionTurns) return true;
   // Context is genuinely filling. Needs a real window and a real reading.
   if (s.rotateAtPct <= 0 || !s.contextWindow || !s.contextTokens) return false;
   return s.contextTokens * 100 >= s.rotateAtPct * s.contextWindow;
@@ -1260,6 +1253,7 @@ export const tick = async (
     } catch { /* a reading we could not take is not a shift that failed */ }
   };
   const rotateAt = d.rotateAtContextPct ?? DEFAULT_POLICY.rotateAtContextPct;
+  const maxSessionTurns = d.rotateAtSessionTurns ?? DEFAULT_POLICY.rotateAtSessionTurns;
   let rotations = 0;
 
   /**
@@ -1271,11 +1265,11 @@ export const tick = async (
    */
   const runLeg = async (prompt: string, maxTurns: number, handover = false): Promise<void> => {
     atCeiling = false;
+    let toolTurns = 0;
     // Per leg: a mid-leg stream death belongs to the leg that saw it. A leg that
     // set it and then threw would otherwise carry the flag into the next leg and
     // retire a healthy conversation.
     permissionStreamDead = false;
-    let toolTurns = 0;
     // A leg is one query answering with one result. Once that result is in, any
     // further init the SDK emits is a phantom re-init on the way down, not a new
     // leg — see the init handler, which must not read its (unregistered) tools as
@@ -1735,7 +1729,7 @@ export const tick = async (
 
     if (!shouldRotate({
       contextTokens, contextWindow, rotateAtPct: rotateAt,
-      sessionTurns: sessionTurns(),
+      sessionTurns: sessionTurns(), maxSessionTurns,
       turnsLeft: ceiling - turns, rotations,
     })) break;
 

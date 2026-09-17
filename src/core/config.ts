@@ -79,6 +79,19 @@ export type CompanyPolicy = {
    * which would not fail, it would silently never rotate.
    */
   rotateAtContextPct: number;
+  /**
+   * A conversation is also retired once it has run this many turns, across every
+   * resume of it, whatever its context reads. 0 turns it off.
+   *
+   * rotateAtContextPct cannot catch a long conversation on a large window: the
+   * runtime compacts context back below any percentage, so one ran to 4367 turns
+   * without ever tripping 50% of a 1M window and its canUseTool control stream
+   * died mid-shift. Turn count is the denominator-free bound. Mid-leg
+   * stream-death recovery handles the acute failure, so this is a hygiene
+   * ceiling rather than an aggressive trigger — keep it well above a normal work
+   * span.
+   */
+  rotateAtSessionTurns: number;
   /** R6: how many documents the commons may hold. */
   commonsCeiling: number;
   /**
@@ -156,6 +169,9 @@ export const DEFAULT_POLICY: CompanyPolicy = {
   // being further down a transcript. Past roughly half, accuracy starts
   // paying for it too.
   rotateAtContextPct: 50,
+  // Well above a normal work span, well below where a control stream was seen to
+  // die (4367). A hygiene ceiling; mid-leg recovery catches the acute failure.
+  rotateAtSessionTurns: 600,
   commonsCeiling: 40,
   // Small on purpose. The rule does nothing until it bites, and a ceiling a
   // company never reaches is a ceiling that never made it choose.
@@ -199,6 +215,9 @@ export const readPolicy = (raw: unknown): CompanyPolicy => {
     // that fires after compaction has already run is rotation that never
     // fires, because compaction is what it exists to pre-empt.
     rotateAtContextPct: Math.round(num('rotateAtContextPct', 0, 90)),
+    // 0 is a real setting: turn-count rotation off, leaving context % and the
+    // mid-leg stream-death recovery.
+    rotateAtSessionTurns: Math.round(num('rotateAtSessionTurns', 0, 100_000)),
     commonsCeiling: Math.round(num('commonsCeiling', 1, 500)),
     // 0 is a real setting here, unlike the commons: it means "no ceiling".
     portfolioCeiling: Math.round(num('portfolioCeiling', 0, 200)),

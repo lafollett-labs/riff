@@ -85,9 +85,18 @@ server.registerTool('riff_vitals', {
 
 server.registerTool('riff_inbox', {
   title: 'Riff: board inbox',
-  description: 'Mail addressed to the board chair. scope="all" shows the whole company\'s traffic, not just what reached the board.',
-  inputSchema: { company, scope: z.enum(['mine', 'all']).optional() },
-}, ({ company: c, scope }) => run(() => client.inbox(c, scope)));
+  description: 'Mail addressed to the board chair. scope="all" shows the whole company\'s traffic, not just what reached the board. `unreadOnly` keeps only unread mail addressed to you — the "do I have unread?" answer, and it matches the reported `unread` count; `limit` keeps the most recent N. Filter a busy inbox or its full message bodies dump back through the model.',
+  inputSchema: {
+    company,
+    scope: z.enum(['mine', 'all']).optional(),
+    unreadOnly: z.boolean().optional().describe('keep only unread mail addressed to you'),
+    limit: z.number().int().min(1).max(500).optional().describe('keep only the most recent N messages'),
+  },
+}, ({ company: c, scope, unreadOnly, limit }) => run(() => client.inbox(c, {
+  ...(scope !== undefined ? { scope } : {}),
+  ...(unreadOnly !== undefined ? { unreadOnly } : {}),
+  ...(limit !== undefined ? { limit } : {}),
+})));
 
 server.registerTool('riff_approvals', {
   title: 'Riff: approvals',

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { RiffClient, normalizeBase, shapeEvents, shapeTranscript } from '../src/mcp/client.ts';
+import { RiffClient, normalizeBase, shapeEvents, shapeInbox, shapeTranscript } from '../src/mcp/client.ts';
 
 interface Recorded { method: string; url: string; body: unknown; }
 
@@ -126,7 +126,7 @@ test('reads hit the right method and path', async () => {
     await client.vitals('shipit', '24.hours');
     assert.equal(last(s.calls).url, '/api/vitals?c=shipit&window=24.hours');
 
-    await client.inbox('shipit', 'all');
+    await client.inbox('shipit', { scope: 'all' });
     assert.equal(last(s.calls).url, '/api/inbox?c=shipit&scope=all');
 
     await client.approvals('shipit', true);
@@ -243,6 +243,57 @@ test('writes carry their required fields and omit absent optionals', async () =>
     c = last(s.calls);
     assert.equal(c.method, 'PATCH');
     assert.deepEqual(bodyOf(c), { policy: { maxSessionHours: 4 } });
+  } finally {
+    await s.close();
+  }
+});
+
+test('shapeInbox keeps unread-to-me and the most recent N, and passes the count through', () => {
+  const raw = {
+    me: 'cali', scope: 'mine', unread: 2,
+    messages: [
+      { id: 'm4', from: 'jack', sentAt: 't4', readAt: null, yours: true },      // unread to me
+      { id: 'm3', from: 'cali', sentAt: 't3', readAt: null, yours: false },     // my own outgoing — not unread
+      { id: 'm2', from: 'carver', sentAt: 't2', readAt: 't9', yours: true },    // read
+      { id: 'm1', from: 'lynn', sentAt: 't1', readAt: null, yours: true },      // unread to me
+    ],
+  };
+
+  // No filter: every message, and me/scope/unread carry through.
+  const all = shapeInbox(raw);
+  assert.equal(all.count, 4);
+  assert.deepEqual([all.me, all.scope, all.unread], ['cali', 'mine', 2]);
+
+  // unreadOnly keeps only mail addressed to me and still unread — never my own
+  // outgoing, which shows readAt null but yours=false.
+  const unread = shapeInbox(raw, { unreadOnly: true });
+  assert.deepEqual(unread.messages.map((m) => m['id']), ['m4', 'm1']);
+  assert.equal(unread.unread, 2, 'the true unread total survives filtering');
+
+  // limit keeps the most recent N — the endpoint hands them newest-first.
+  const recent = shapeInbox(raw, { limit: 2 });
+  assert.deepEqual(recent.messages.map((m) => m['id']), ['m4', 'm3']);
+
+  assert.equal(shapeInbox(null).count, 0, 'garbage in, empty out');
+});
+
+test('inbox shapes the reply and filters unread client-side', async () => {
+  const s = await stub();
+  try {
+    const client = new RiffClient(s.base);
+    s.reply({
+      me: 'cali', scope: 'mine', unread: 1,
+      messages: [
+        { id: 'b', from: 'jack', sentAt: 't2', readAt: null, yours: true },
+        { id: 'a', from: 'cali', sentAt: 't1', readAt: null, yours: false },
+      ],
+    });
+    const r = await client.inbox('shipit', { unreadOnly: true });
+    assert.equal(last(s.calls).url, '/api/inbox?c=shipit', 'no scope param when scope is mine');
+    const data = r.data as { count: number; unread: number; messages: Array<Record<string, unknown>> };
+    assert.equal(data.count, 1);
+    assert.equal(data.unread, 1);
+    assert.deepEqual(data.messages.map((m) => m['id']), ['b']);
   } finally {
     await s.close();
   }

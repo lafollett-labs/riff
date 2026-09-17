@@ -128,6 +128,41 @@ export const shapeTranscript = (
   };
 };
 
+/**
+ * Board mail, filtered to what a reader asked for. The endpoint returns every
+ * message with its full body, and a long inbox is hundreds of KB — enough to
+ * blow the token budget on a plain read. `unreadOnly` keeps only unread mail
+ * addressed to the viewer (`readAt` null and `yours`), which answers "do I have
+ * unread?" in one call and matches the endpoint's own `unread` count; `limit`
+ * keeps the most recent N (the endpoint orders newest-first). The `unread`
+ * count and `me`/`scope` pass through untouched, so a filtered view still
+ * reports the true total.
+ */
+export const shapeInbox = (
+  data: unknown,
+  opts?: { unreadOnly?: boolean; limit?: number },
+): {
+  me: unknown; scope: unknown; unread: unknown;
+  count: number; messages: Array<Record<string, unknown>>;
+} => {
+  const d = asRecord(data);
+  const raw = Array.isArray(d['messages']) ? (d['messages'] as unknown[]) : [];
+  let rows = raw.map((r) => asRecord(r));
+  if (opts?.unreadOnly) {
+    rows = rows.filter((m) => m['readAt'] == null && m['yours'] === true);
+  }
+  if (opts?.limit !== undefined && opts.limit > 0) {
+    rows = rows.slice(0, Math.round(opts.limit));
+  }
+  return {
+    me: d['me'] ?? null,
+    scope: d['scope'] ?? null,
+    unread: d['unread'] ?? null,
+    count: rows.length,
+    messages: rows,
+  };
+};
+
 const q = (slug: string): string => `?c=${encodeURIComponent(slug)}`;
 
 export type Fetcher = typeof fetch;
@@ -187,9 +222,25 @@ export class RiffClient {
     return this.#req('GET', `/api/vitals${q(slug)}${w}`);
   }
 
-  inbox(slug: string, scope?: 'mine' | 'all'): Promise<RiffResponse> {
-    const s = scope === 'all' ? '&scope=all' : '';
-    return this.#req('GET', `/api/inbox${q(slug)}${s}`);
+  /**
+   * Board mail. `scope: 'all'` widens to the whole company's traffic; unfiltered
+   * it is only what reached the chair. `unreadOnly` and `limit` shape the reply
+   * client-side (see shapeInbox) so a long inbox is not dumped through the model.
+   */
+  async inbox(
+    slug: string,
+    opts?: { scope?: 'mine' | 'all'; unreadOnly?: boolean; limit?: number },
+  ): Promise<RiffResponse> {
+    const s = opts?.scope === 'all' ? '&scope=all' : '';
+    const r = await this.#req('GET', `/api/inbox${q(slug)}${s}`);
+    if (r.status >= 400) return r;
+    return {
+      status: r.status,
+      data: shapeInbox(r.data, {
+        ...(opts?.unreadOnly !== undefined ? { unreadOnly: opts.unreadOnly } : {}),
+        ...(opts?.limit !== undefined ? { limit: opts.limit } : {}),
+      }),
+    };
   }
 
   approvals(slug: string, decided?: boolean): Promise<RiffResponse> {

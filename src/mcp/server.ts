@@ -199,6 +199,12 @@ server.registerTool('riff_update', {
   ...(release !== undefined ? { release } : {}),
 })));
 
+server.registerTool('riff_archive', {
+  title: 'Riff: archive a company',
+  description: 'Archive a company: move its directory to the archive area (git history and all) and drop its vault, taking it off the active list. Not a delete — the directory is kept and can be re-imported, at which point its keys are re-entered. Pause the company first; archiving a running one stops it without draining.',
+  inputSchema: { company },
+}, ({ company: c }) => run(() => client.archive(c)));
+
 server.registerTool('riff_say', {
   title: 'Riff: send board mail',
   description: 'Send mail into a company as a board member (from must be a board seat; defaults to the chair). Absent `to` addresses everyone; a list reaches exactly those recipients and wakes them.',

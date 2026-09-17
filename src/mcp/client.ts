@@ -288,6 +288,16 @@ export class RiffClient {
     });
   }
 
+  /**
+   * Archive a company. The server moves its directory to the archive area, git
+   * history and all, and drops its vault; it does not delete anything. The slug
+   * in the path is the whole request — no body. See registry.archive: a running
+   * company is stopped without draining first.
+   */
+  archive(slug: string): Promise<RiffResponse> {
+    return this.#req('DELETE', `/api/companies/${encodeURIComponent(slug)}`);
+  }
+
   /** Board mail. `from` must be a board seat; it defaults to the chair. */
   say(slug: string, text: string, opts?: { to?: string[]; from?: string }): Promise<RiffResponse> {
     return this.#req('POST', `/api/say${q(slug)}`, {

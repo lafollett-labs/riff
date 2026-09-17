@@ -248,6 +248,21 @@ test('writes carry their required fields and omit absent optionals', async () =>
   }
 });
 
+test('archive DELETEs the company by slug and sends no body', async () => {
+  const s = await stub();
+  try {
+    const client = new RiffClient(s.base);
+    s.reply({ archived: 'fathom', at: '/data/archive/fathom-2026-09-17T01-45-55-389Z' });
+    const r = await client.archive('fathom');
+    const c = last(s.calls);
+    assert.deepEqual([c.method, c.url], ['DELETE', '/api/companies/fathom']);
+    assert.equal(c.body, null, 'archive is a DELETE on the path — a stray body could be read as an update');
+    assert.deepEqual(r.data, { archived: 'fathom', at: '/data/archive/fathom-2026-09-17T01-45-55-389Z' });
+  } finally {
+    await s.close();
+  }
+});
+
 test('an HTTP error status is reported, not swallowed', async () => {
   const s = await stub();
   try {

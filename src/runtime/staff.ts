@@ -854,27 +854,49 @@ export const recordShiftMessage = (
 };
 
 /**
+ * A conversation is retired on turn count as well as on context percentage.
+ *
+ * The percentage cannot catch a long session on a large window: the runtime
+ * compacts context back down, so on a 1M-token window real usage peaked near
+ * 42% and the 50% gate never fired — one conversation ran to 4367 turns over
+ * ~29 hours without a single rotation, its canUseTool control stream aged out,
+ * and WebFetch/WebSearch began returning "Stream closed" mid-shift while Bash,
+ * which needs no permission round-trip, kept working. Turn count is the
+ * denominator-free proxy for "further down a transcript" — which is what the
+ * per-turn cost climb behind rotateAtContextPct was already measuring.
+ */
+const ROTATE_AT_SESSION_TURNS = 300;
+
+/**
  * Whether to hand this conversation over and carry on in a fresh one.
  *
- * Unknown is not "yes": with no window reported there is no denominator, and
- * rotating on a guess would throw away a conversation that might be nearly
- * empty. That is also why the threshold is a percentage — the denominator
- * belongs to whatever model the company gave this agent, not to us.
+ * Two independent triggers. The conversation has run too many turns to keep
+ * resuming (ROTATE_AT_SESSION_TURNS), or its context is genuinely filling
+ * (rotateAtPct). Unknown is not "yes" for the second: with no window reported
+ * there is no denominator, and rotating on a guess would throw away a
+ * conversation that might be nearly empty — that is why that threshold is a
+ * percentage, the denominator belonging to whatever model the company gave this
+ * agent. The turn trigger needs no denominator, so it stands on its own.
  */
 export const shouldRotate = (s: {
   contextTokens: number;
   contextWindow: number;
   rotateAtPct: number;
+  /** Turns already spent on this conversation, across every resume of it. */
+  sessionTurns: number;
   /** Turns still inside the shift's ceiling. */
   turnsLeft: number;
   rotations: number;
 }): boolean => {
-  if (s.rotateAtPct <= 0 || s.rotations >= MAX_ROTATIONS) return false;
-  if (!s.contextWindow || !s.contextTokens) return false;
-  if (s.contextTokens * 100 < s.rotateAtPct * s.contextWindow) return false;
+  if (s.rotations >= MAX_ROTATIONS) return false;
   // Room to hand over AND to do something afterwards. Rotating with four turns
   // left spends them all on note-taking for a shift that then ends.
-  return s.turnsLeft >= HANDOVER_TURNS * 2;
+  if (s.turnsLeft < HANDOVER_TURNS * 2) return false;
+  // Too far down its transcript to keep resuming, whatever its context reads.
+  if (s.sessionTurns >= ROTATE_AT_SESSION_TURNS) return true;
+  // Context is genuinely filling. Needs a real window and a real reading.
+  if (s.rotateAtPct <= 0 || !s.contextWindow || !s.contextTokens) return false;
+  return s.contextTokens * 100 >= s.rotateAtPct * s.contextWindow;
 };
 
 /**
@@ -938,6 +960,15 @@ export const tick = async (
 
   let costUsd = 0;
   let turns = 0;
+  // The turn-count half of rotation. A conversation only ever resumed and never
+  // rotated (context % cannot catch it on a large window) is still retired once
+  // it has run enough turns — see shouldRotate / ROTATE_AT_SESSION_TURNS. Base
+  // is what this conversation ran before this shift (0 cold, loaded on resume);
+  // the marker is where in this shift the current conversation began, so a
+  // session replaced mid-shift is charged only its own turns, not the shift's.
+  let sessionTurnsBase = session ? (Number(ledger.getMeta(`session-turns:${agent.id}`)) || 0) : 0;
+  let shiftTurnsAtSessionStart = 0;
+  const sessionTurns = (): number => sessionTurnsBase + (turns - shiftTurnsAtSessionStart);
   let summary = '';
   /** The last thing the agent said out loud, whether or not it got to finish. */
   let said = '';
@@ -1187,6 +1218,11 @@ export const tick = async (
   let atCeiling = false;
   /** Did the company's own MCP server come up for this leg? */
   let toolsUp = true;
+  // A live control stream that closed part-way through a leg — the gate had
+  // already answered, so this is not the resume-came-up-dead case. The leg keeps
+  // its work; the session is retired after it so the next leg brings up a fresh
+  // stream rather than resuming the dead one.
+  let permissionStreamDead = false;
   let toolRetries = 0;
   let staleRetries = 0;
   /** Null until a usage call answers either way. See limitsReadable. */
@@ -1235,6 +1271,10 @@ export const tick = async (
    */
   const runLeg = async (prompt: string, maxTurns: number, handover = false): Promise<void> => {
     atCeiling = false;
+    // Per leg: a mid-leg stream death belongs to the leg that saw it. A leg that
+    // set it and then threw would otherwise carry the flag into the next leg and
+    // retire a healthy conversation.
+    permissionStreamDead = false;
     let toolTurns = 0;
     // A leg is one query answering with one result. Once that result is in, any
     // further init the SDK emits is a phantom re-init on the way down, not a new
@@ -1457,7 +1497,19 @@ export const tick = async (
         stop.abort();
         break;
       }
+      // The same stream-closed result after the gate has answered at least once:
+      // the control stream died mid-leg rather than coming up dead. Do not abort
+      // — the leg has real work and every allow()-only tool (Bash, Read) still
+      // runs; flag it so the session is retired once the leg ends.
+      if (m.type === 'user' && session && gateCalls > 0 && !permissionStreamDead && streamClosedResult(m)) {
+        permissionStreamDead = true;
+        trace('control stream closed mid-leg (gate had answered)');
+      }
       if (m.type === 'system' && 'session_id' in m && typeof m.session_id === 'string') {
+        // A session_id we have not seen is a fresh conversation — a cold start,
+        // or the leg after a rotation or reset. Its turn count starts here, so a
+        // replaced session is never charged the turns of the one before it.
+        if (m.session_id !== session) { sessionTurnsBase = 0; shiftTurnsAtSessionStart = turns; }
         session = m.session_id;
         ledger.setMeta(`session:${agent.id}`, m.session_id);
       }
@@ -1629,6 +1681,17 @@ export const tick = async (
       // the catch below on its own.
       if (overran) { failure = overranBy(d.shiftTimeoutMs ?? 0); break; }
       if (staleSession) { if (recoverStaleSession()) continue; failure = STALE_SESSION; break; }
+      // The leg kept its work; now drop the session whose control stream died
+      // under it, so the next leg comes up cold with a live gate instead of
+      // resuming into the same dead stream (the fresh leg re-zeroes the turn
+      // base at its session_id below).
+      if (permissionStreamDead) {
+        ledger.setMeta(`session:${agent.id}`, '');
+        ledger.emit(agent.id, 'session.reset', null, { was: session, why: 'stream closed mid-leg' });
+        session = null;
+        permissionStreamDead = false;
+        continue;
+      }
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
 
@@ -1672,6 +1735,7 @@ export const tick = async (
 
     if (!shouldRotate({
       contextTokens, contextWindow, rotateAtPct: rotateAt,
+      sessionTurns: sessionTurns(),
       turnsLeft: ceiling - turns, rotations,
     })) break;
 
@@ -1702,6 +1766,10 @@ export const tick = async (
 
   // Whatever happened, the shift is over and its clock is not.
   if (timeout) clearTimeout(timeout);
+
+  // Carry the conversation's turn count to the next resume, or clear it when the
+  // session did not survive the shift — the turn-count half of rotation.
+  ledger.setMeta(`session-turns:${agent.id}`, session ? String(sessionTurns()) : '0');
 
   if (failure) {
     ledger.emit(agent.id, 'agent.failed', null, {

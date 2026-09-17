@@ -12,6 +12,7 @@ const AT_HALF = {
   contextTokens: 500_000,
   contextWindow: 1_000_000,
   rotateAtPct: 50,
+  sessionTurns: 0,
   turnsLeft: 40,
   rotations: 0,
 };
@@ -65,6 +66,28 @@ describe('deciding to replace a conversation mid-shift', () => {
   test('a shift stops rotating after the second time', () => {
     assert.equal(shouldRotate({ ...AT_HALF, rotations: 1 }), true);
     assert.equal(shouldRotate({ ...AT_HALF, rotations: 2 }), false);
+  });
+
+  /**
+   * The turn trigger, and why it exists. On a 1M-token window the runtime
+   * compacts context back below any percentage, so a conversation resumed shift
+   * after shift never trips the percentage gate — it just ages until its control
+   * stream dies. Turn count catches it with no denominator at all.
+   */
+  test('a long conversation is retired on turn count with the context nearly empty', () => {
+    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 0, sessionTurns: 500 }), true);
+  });
+
+  test('a conversation short of the turn count and the percentage is left alone', () => {
+    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 1_000, sessionTurns: 299 }), false);
+  });
+
+  test('the turn trigger still respects the room to hand over', () => {
+    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 0, sessionTurns: 999, turnsLeft: 11 }), false);
+  });
+
+  test('the turn trigger still stops after the rotation cap', () => {
+    assert.equal(shouldRotate({ ...AT_HALF, contextTokens: 0, sessionTurns: 999, rotations: 2 }), false);
   });
 });
 
@@ -171,5 +194,32 @@ describe('a session id outliving its transcript', () => {
     const src = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
     assert.match(src, /const store = d\.configDir \? sessionStore\(\{ CLAUDE_CONFIG_DIR: d\.configDir \}\) : undefined;/);
     assert.match(src, /transcriptExists\(session, store\)/);
+  });
+});
+
+/**
+ * The turn trigger is only real if tick() feeds it the running count and carries
+ * that count across resumes. A pure shouldRotate unit test cannot see the wiring
+ * that makes it fire on the session that actually grew (the 4367-turn one), so
+ * these lock the two ends the same way the resume check above does.
+ */
+describe('the turn count reaches the rotation decision and survives a resume', () => {
+  const src = (): string =>
+    readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
+
+  test('the running session-turn count is passed to shouldRotate', () => {
+    assert.match(src(), /sessionTurns: sessionTurns\(\)/);
+  });
+
+  test('the count is loaded on resume and written back at shift end', () => {
+    const s = src();
+    assert.match(s, /Number\(ledger\.getMeta\(`session-turns:\$\{agent\.id\}`\)\)/);
+    assert.match(s, /setMeta\(`session-turns:\$\{agent\.id\}`, session \? String\(sessionTurns\(\)\) : '0'\)/);
+  });
+
+  test('a control stream that dies mid-leg retires the session', () => {
+    // gateCalls > 0 is the mid-leg case the resume-death guard deliberately does
+    // not catch; without this the session is resumed dead every following leg.
+    assert.match(src(), /gateCalls > 0 && !permissionStreamDead && streamClosedResult\(m\)/);
   });
 });

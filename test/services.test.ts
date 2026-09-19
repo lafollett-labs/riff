@@ -100,3 +100,69 @@ describe('a service route is validated before it can reach config', () => {
     assert.equal('scheme' in v.route, false);
   });
 });
+
+describe('static route headers are validated and normalised', () => {
+  const base = { upstream: 'https://a.test', secret: 'KEY' };
+
+  test('well-formed static headers are preserved with lower-cased keys (the OAuth-subscription shape)', () => {
+    const v = validateServiceRoute('anthropic', {
+      ...base, header: 'authorization', scheme: 'Bearer',
+      headers: { 'Anthropic-Beta': 'oauth-2025-04-20', 'User-Agent': 'claude-code/1.0' },
+    });
+    assert.ok(v.ok);
+    assert.deepEqual(v.route.headers, { 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': 'claude-code/1.0' });
+  });
+
+  test('absent or empty headers are left unset, so config stays minimal', () => {
+    const absent = validateServiceRoute('svc', { ...base });
+    assert.ok(absent.ok);
+    assert.equal('headers' in absent.route, false);
+    const v = validateServiceRoute('svc', { ...base, headers: {} });
+    assert.ok(v.ok);
+    assert.equal('headers' in v.route, false);
+  });
+
+  test('a static header naming the default credential header is refused', () => {
+    const v = validateServiceRoute('svc', { ...base, headers: { authorization: 'Bearer sneaky' } });
+    assert.equal(v.ok, false);
+    assert.match((v as { reason: string }).reason, /credential header/);
+  });
+
+  test('a static header naming a CUSTOM credential header is refused', () => {
+    // header: x-api-key means the vault secret is injected there — a static
+    // value on the same name would try to shadow it.
+    const v = validateServiceRoute('svc', { ...base, header: 'X-Api-Key', headers: { 'x-api-key': 'nope' } });
+    assert.equal(v.ok, false);
+    assert.match((v as { reason: string }).reason, /credential header/);
+  });
+
+  test('a connection-framing header cannot be set as a static header', () => {
+    for (const bad of ['host', 'content-length', 'connection', 'transfer-encoding', 'Keep-Alive']) {
+      const v = validateServiceRoute('svc', { ...base, headers: { [bad]: 'x' } });
+      assert.equal(v.ok, false, bad);
+    }
+  });
+
+  test('a malformed static header name is refused', () => {
+    assert.equal(validateServiceRoute('svc', { ...base, headers: { 'bad header': 'x' } }).ok, false);
+  });
+
+  test('a non-string value, or a value carrying a control character, is refused', () => {
+    assert.equal(validateServiceRoute('svc', { ...base, headers: { 'x-a': 42 } }).ok, false);
+    for (const bad of ['a\r\nX: y', 'a\tb', 'a\x7f', 'a\x9b']) {
+      assert.equal(validateServiceRoute('svc', { ...base, headers: { 'x-a': bad } }).ok, false, JSON.stringify(bad));
+    }
+  });
+
+  test('headers that is not a plain object is refused', () => {
+    for (const bad of [['a', 'b'], 'x-a: b', 42]) {
+      assert.equal(validateServiceRoute('svc', { ...base, headers: bad }).ok, false, JSON.stringify(bad));
+    }
+  });
+
+  test('more static headers than the cap is refused', () => {
+    const many: Record<string, string> = {};
+    for (let i = 0; i < 60; i++) many[`x-h${i}`] = 'v';
+    assert.equal(validateServiceRoute('svc', { ...base, headers: many }).ok, false);
+  });
+});

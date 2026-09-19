@@ -1753,3 +1753,30 @@ test('a service route is set by name, shows its upstream, and warns when its sec
   await route.getByRole('button', { name: 'Yes' }).click();
   await expect(page.locator('.route').filter({ hasText: 'openrouter' })).toHaveCount(0);
 });
+
+test('a service route carries static headers, and they round-trip through edit', async ({ page }) => {
+  await go(page, 'Services');
+
+  await page.locator('.srv.name').fill('anthropic');
+  await page.locator('.srv.up').fill('https://api.anthropic.com');
+  await page.locator('.srv.secret').fill('ANTHROPIC_AUTH_TOKEN');
+
+  // Static headers live behind the advanced toggle — the OAuth/subscription shape.
+  await page.getByRole('button', { name: /static headers/ }).click();
+  await page.getByRole('button', { name: '+ Add header' }).click();
+  await page.locator('.srv.hk').fill('anthropic-beta');
+  await page.locator('.srv.hv').fill('oauth-2025-04-20');
+  // Exact, so 'Add' does not also match the '+ Add header' button.
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+
+  // The route lists the static header as a chip beside the credential line.
+  const route = page.locator('.route').filter({ hasText: 'anthropic' });
+  await expect(route).toHaveCount(1);
+  await expect(route).toContainText('anthropic-beta: oauth-2025-04-20');
+
+  // Edit prefills the header row, so a saved header round-trips rather than being
+  // silently dropped the next time the route is saved.
+  await route.getByRole('button', { name: 'Edit' }).click();
+  await expect(page.locator('.srv.hk')).toHaveValue('anthropic-beta');
+  await expect(page.locator('.srv.hv')).toHaveValue('oauth-2025-04-20');
+});

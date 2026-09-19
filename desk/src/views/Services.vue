@@ -28,6 +28,12 @@ const secret = ref('');
 const header = ref('');
 const schemeMode = ref<'bearer' | 'raw' | 'custom'>('bearer');
 const customScheme = ref('');
+// Static, non-secret headers as editable rows; empty-key rows are dropped on
+// save. The credential is never here — it is the vault secret above. Each row
+// carries a stable id so the v-for keys on identity, not index: without it,
+// removing a row leaves the focused input rebound to a neighbour's data.
+let hrSeq = 0;
+const headerRows = ref<Array<{ id: number; k: string; v: string }>>([]);
 const advanced = ref(false);
 const saving = ref(false);
 const justSaved = ref('');
@@ -36,6 +42,11 @@ const pendingDelete = ref<string | null>(null);
 
 const nameInput = ref<HTMLInputElement | null>(null);
 const upstreamInput = ref<HTMLInputElement | null>(null);
+// The static-headers group and its add button, so focus can follow a row being
+// added or removed rather than falling to <body> — the focus discipline the rest
+// of this view already keeps (askDelete/remove).
+const hdrsEl = ref<HTMLElement | null>(null);
+const addBtn = ref<HTMLButtonElement | null>(null);
 // A function ref, not a string one: the Cancel button lives in a v-for, where a
 // string ref resolves to an array whose `.focus()` is undefined and throws.
 let cancelBtn: HTMLButtonElement | null = null;
@@ -63,10 +74,42 @@ const load = async (): Promise<void> => {
   finally { loading.value = false; }
 };
 
+// Focus the name input of row `i` (clamped), or the add button when the list is
+// empty, after the DOM settles.
+const focusHeaderRow = async (i: number): Promise<void> => {
+  await nextTick();
+  const inputs = hdrsEl.value?.querySelectorAll<HTMLInputElement>('.srv.hk');
+  if (!inputs || inputs.length === 0) { addBtn.value?.focus(); return; }
+  inputs[Math.max(0, Math.min(i, inputs.length - 1))]?.focus();
+};
+const addHeaderRow = async (): Promise<void> => {
+  headerRows.value.push({ id: hrSeq++, k: '', v: '' });
+  await focusHeaderRow(headerRows.value.length - 1);
+};
+const removeHeaderRow = async (i: number): Promise<void> => {
+  headerRows.value.splice(i, 1);
+  // The row that slid into i (the next one), or the last, or the add button.
+  await focusHeaderRow(i);
+};
+const staticHeaders = (r: ServiceRoute): Array<[string, string]> =>
+  r.headers ? Object.entries(r.headers) : [];
+// Keys are stored lower-cased by the server, so two rows differing only in case
+// collapse to one on save (last wins). Warn rather than silently discard.
+const dupHeader = computed(() => {
+  const seen = new Set<string>();
+  for (const hr of headerRows.value) {
+    const k = hr.k.trim().toLowerCase();
+    if (!k) continue;
+    if (seen.has(k)) return true;
+    seen.add(k);
+  }
+  return false;
+});
+
 const reset = (): void => {
   name.value = ''; upstream.value = ''; secret.value = '';
   header.value = ''; schemeMode.value = 'bearer'; customScheme.value = '';
-  advanced.value = false; editing.value = '';
+  headerRows.value = []; advanced.value = false; editing.value = '';
 };
 
 const save = async (): Promise<void> => {
@@ -83,6 +126,14 @@ const save = async (): Promise<void> => {
     if (header.value.trim()) route.header = header.value.trim();
     if (schemeMode.value === 'raw') route.scheme = '';
     else if (schemeMode.value === 'custom' && customScheme.value.trim()) route.scheme = customScheme.value.trim();
+    // Build the static headers from the rows, dropping any with a blank name; the
+    // server validates the names and refuses a credential/framing header.
+    const built: Record<string, string> = {};
+    for (const hr of headerRows.value) {
+      const k = hr.k.trim();
+      if (k) built[k] = hr.v;
+    }
+    if (Object.keys(built).length) route.headers = built;
     await api.putService(name.value.trim(), route);
     justSaved.value = name.value.trim();
     err.value = '';
@@ -103,7 +154,8 @@ const edit = async (n: string): Promise<void> => {
   if (r.scheme === undefined) schemeMode.value = 'bearer';
   else if (r.scheme === '') schemeMode.value = 'raw';
   else { schemeMode.value = 'custom'; customScheme.value = r.scheme; }
-  advanced.value = !!r.header || r.scheme !== undefined;
+  headerRows.value = r.headers ? Object.entries(r.headers).map(([k, v]) => ({ id: hrSeq++, k, v })) : [];
+  advanced.value = !!r.header || r.scheme !== undefined || !!r.headers;
   editing.value = n; err.value = ''; justSaved.value = '';
   await nextTick();
   upstreamInput.value?.focus();
@@ -187,7 +239,7 @@ onMounted(load);
       </p>
 
       <button class="adv" :aria-expanded="advanced" aria-controls="svc-advanced" @click="advanced = !advanced">
-        {{ advanced ? '▾' : '▸' }} Header &amp; scheme
+        {{ advanced ? '▾' : '▸' }} Header, scheme &amp; static headers
       </button>
       <div v-if="advanced" id="svc-advanced" class="advbody">
         <div class="row">
@@ -205,6 +257,26 @@ onMounted(load);
           <input v-if="schemeMode === 'custom'" class="srv sch-c" v-model="customScheme"
                  aria-label="Custom scheme prefix" placeholder="Token" spellcheck="false"
                  autocomplete="off" />
+        </div>
+        <div ref="hdrsEl" class="hdrs" role="group" aria-label="Static headers">
+          <div class="hdrs-top">
+            <span class="lbl">Static headers</span>
+            <button ref="addBtn" type="button" class="mini" @click="addHeaderRow">+ Add header</button>
+          </div>
+          <p class="hint faint">
+            Non-secret headers sent on every request — e.g. an OAuth/subscription
+            upstream's <code>anthropic-beta</code> and <code>user-agent</code>. The
+            credential is the secret above; a key naming it (or a connection header)
+            is refused. Names are stored lower-cased.
+          </p>
+          <div v-for="(hr, i) in headerRows" :key="hr.id" class="row hdr-row">
+            <input class="srv hk" v-model="hr.k" :aria-label="`Header name ${i + 1}`"
+                   placeholder="header-name" spellcheck="false" autocapitalize="off" autocomplete="off" />
+            <input class="srv hv" v-model="hr.v" :aria-label="`Header value ${i + 1}`"
+                   placeholder="value" spellcheck="false" autocapitalize="off" autocomplete="off" />
+            <button type="button" class="mini" @click="removeHeaderRow(i)" :aria-label="`Remove header ${i + 1}`">✕</button>
+          </div>
+          <p v-if="dupHeader" class="warn">Two headers share a name (case-insensitive) — only the last value is kept.</p>
         </div>
       </div>
 
@@ -225,6 +297,7 @@ onMounted(load);
           </div>
           <div class="rmeta faint">
             <span class="mono">{{ effect(routes[n]!) }}</span>
+            <span v-for="[hk, hv] in staticHeaders(routes[n]!)" :key="hk" class="hchip mono">{{ hk }}: {{ hv }}</span>
             <span v-if="!secretNames.includes(routes[n]!.secret)" class="badge">secret not set</span>
           </div>
           <div class="racts">
@@ -265,6 +338,8 @@ section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line)
 .srv.hdr { flex: 1 1 260px; }
 .srv.sch { flex: 1 1 260px; }
 .srv.sch-c { flex: 1 1 140px; }
+.srv.hk { flex: 1 1 200px; font-family: var(--mono, ui-monospace, monospace); }
+.srv.hv { flex: 2 1 240px; }
 .srv[readonly] { opacity: .6; }
 .srv:focus { outline: none; border-color: var(--accent); }
 .lbl { font-size: 12px; color: var(--faint); flex: 0 0 64px; }
@@ -279,6 +354,12 @@ section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line)
 .adv:hover { color: var(--ink); }
 .advbody { margin-top: 8px; padding: 12px; border: 1px solid var(--line); border-radius: 6px; }
 .advbody .row:last-child { margin-bottom: 0; }
+.hdrs { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--line); }
+.hdrs-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.hdrs .hint { margin-top: 6px; }
+.hdr-row { margin-top: 8px; margin-bottom: 0; }
+.hchip { font-size: 11px; border: 1px solid var(--line-2); border-radius: 4px; padding: 1px 6px;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .warn { color: var(--gold); font-size: 12px; margin-top: 8px; line-height: 1.5; }
 .err { color: var(--alert); font-size: 12px; margin-top: 10px; }
 .ok { color: var(--gold); font-size: 12px; margin-top: 10px; }
@@ -289,7 +370,7 @@ section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line)
 .rmain { display: flex; align-items: baseline; gap: 8px; flex: 1 1 100%; min-width: 0; }
 .rname { font-size: 13px; color: var(--ink); }
 .rup { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.rmeta { display: flex; align-items: center; gap: 10px; font-size: 12px; flex: 1 1 auto; }
+.rmeta { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 12px; flex: 1 1 auto; }
 .badge { font-size: 11px; color: var(--alert); border: 1px solid var(--alert);
   border-radius: 4px; padding: 1px 6px; }
 .confirm { font-size: 12px; }

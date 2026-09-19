@@ -138,6 +138,21 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
     if (HOP_BY_HOP.has(lk) || lk === injectHeader) continue;
     headers[lk] = v; // IncomingMessage keys are already lowercase
   }
+  // Static, non-secret headers the route declares (e.g. the `anthropic-beta`
+  // flag and a `claude-code` user-agent an OAuth upstream requires). Applied
+  // AFTER the caller's headers so a route-declared value wins over one the
+  // product sent — that is what lets a route force `user-agent: claude-code/…`.
+  // Defense in depth for a hand-edited/imported config that bypassed
+  // validateServiceRoute: skip framing headers and the credential header so a
+  // static entry can never clobber what the proxy owns; the credential is
+  // injected last regardless, so it always wins.
+  if (route.headers) {
+    for (const [k, v] of Object.entries(route.headers)) {
+      const lk = k.toLowerCase();
+      if (HOP_BY_HOP.has(lk) || lk === injectHeader) continue;
+      headers[lk] = v;
+    }
+  }
   const scheme = route.scheme ?? 'Bearer';
   headers[injectHeader] = scheme ? `${scheme} ${key}` : key;
 

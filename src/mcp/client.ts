@@ -36,6 +36,21 @@ export interface RunBounds {
   hard?: boolean;
 }
 
+/**
+ * A service route as the API accepts it. Mirrors `ServiceRoute` in core/config,
+ * restated here rather than imported so this client stays a standalone HTTP
+ * client with no dependency on the runtime. `headers` are static, NON-secret
+ * literals (e.g. an OAuth upstream's `anthropic-beta` and `user-agent`); the
+ * credential is named by `secret` and injected by the proxy, never sent here.
+ */
+export interface ServiceRouteInput {
+  upstream: string;
+  secret: string;
+  header?: string;
+  scheme?: string;
+  headers?: Record<string, string>;
+}
+
 /** Trailing slashes off, empty falls back to the loopback default. */
 export const normalizeBase = (raw?: string): string =>
   (raw?.trim() || 'http://localhost:4173').replace(/\/+$/, '');
@@ -423,5 +438,37 @@ export class RiffClient {
       ...(opts?.as !== undefined ? { as: opts.as } : {}),
       ...(opts?.reason !== undefined ? { reason: opts.reason } : {}),
     });
+  }
+
+  // ------------------------------------------------------------- services
+  /**
+   * A company's service routes: which named service the injecting proxy forwards
+   * to which upstream, authenticated by which vault secret. The map holds NO
+   * secret values — a name, a host, headers — so the whole thing reads back.
+   * Secret VALUES are set only through the Desk Secrets tab, never here.
+   */
+  services(slug: string): Promise<RiffResponse> {
+    return this.#req('GET', `/api/services${q(slug)}`);
+  }
+
+  /**
+   * Create or update one service route. The route is flattened beside its `name`
+   * in the body — the shape the server's validateServiceRoute reads — and merged
+   * as a delta, so it composes with concurrent writes instead of clobbering.
+   */
+  setService(slug: string, name: string, route: ServiceRouteInput): Promise<RiffResponse> {
+    return this.#req('PUT', `/api/services${q(slug)}`, {
+      name,
+      upstream: route.upstream,
+      secret: route.secret,
+      ...(route.header !== undefined ? { header: route.header } : {}),
+      ...(route.scheme !== undefined ? { scheme: route.scheme } : {}),
+      ...(route.headers !== undefined ? { headers: route.headers } : {}),
+    });
+  }
+
+  /** Delete a service route by name. The server reports whether it existed. */
+  deleteService(slug: string, name: string): Promise<RiffResponse> {
+    return this.#req('DELETE', `/api/services${q(slug)}&name=${encodeURIComponent(name)}`);
   }
 }

@@ -261,6 +261,42 @@ server.registerTool('riff_decide', {
   ...(reason !== undefined ? { reason } : {}),
 })));
 
+// ---------------------------------------------------------------- services
+// Service routes hold NO secret values — a secret NAME, a host, headers — so the
+// whole map reads back and is safe to set here. Secret VALUES are entered only
+// through the Desk Secrets tab; there is deliberately no tool that takes one.
+server.registerTool('riff_services', {
+  title: 'Riff: list service routes',
+  description: 'A company\'s service routes: which named service the injecting proxy forwards to which upstream, authenticated by which vault secret. Holds no secret values, only names/hosts/headers. A route\'s product calls http://keyproxy:8890/svc/<name>/… with its scoped token; the proxy swaps in the real secret named by `secret`.',
+  inputSchema: { company },
+}, ({ company: c }) => run(() => client.services(c)));
+
+server.registerTool('riff_set_service', {
+  title: 'Riff: set a service route',
+  description: 'Create or update one service route (create and update are the same write). `secret` names a vault secret that must already exist (set its VALUE in the Desk Secrets tab — this tool never takes a value). `scheme` is the credential prefix: "Bearer" (default) or "" for a raw value like x-api-key. `headers` are static, NON-secret headers injected on every request — e.g. an OAuth/subscription upstream\'s {"anthropic-beta":"oauth-2025-04-20","user-agent":"claude-code/1.x"}; a key naming the credential header or a connection header is refused.',
+  inputSchema: {
+    company,
+    name: z.string().describe('service name — a single path segment used in /svc/<name>'),
+    upstream: z.string().describe('https base URL the proxy forwards to, e.g. https://api.anthropic.com'),
+    secret: z.string().describe('vault secret NAME to inject (must exist; value set via the Desk Secrets tab)'),
+    header: z.string().optional().describe('header to inject the credential into (default "authorization")'),
+    scheme: z.string().optional().describe('credential prefix: "Bearer" (default), or "" to inject the raw value'),
+    headers: z.record(z.string(), z.string()).optional().describe('static non-secret headers to add on every request'),
+  },
+}, ({ company: c, name, upstream, secret, header, scheme, headers }) => run(() => client.setService(c, name, {
+  upstream,
+  secret,
+  ...(header !== undefined ? { header } : {}),
+  ...(scheme !== undefined ? { scheme } : {}),
+  ...(headers !== undefined ? { headers } : {}),
+})));
+
+server.registerTool('riff_delete_service', {
+  title: 'Riff: delete a service route',
+  description: 'Delete one service route by name. Reports whether it existed. Does not touch the vault secret it named.',
+  inputSchema: { company, name: z.string().describe('service name to delete') },
+}, ({ company: c, name }) => run(() => client.deleteService(c, name)));
+
 // The window feed. Only an interactive login can read the plan's rate-limit
 // windows (a setup-token cannot), and that login is on the host — where this
 // server runs. So while a session holds this MCP, keep the throttle fed with

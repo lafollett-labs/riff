@@ -24,7 +24,8 @@ let proxy: Server;
 let attacker: Server;
 let blackhole: Server;
 let attackerHits: number;
-let seen: { path: string; auth: string | undefined; token: string | undefined; body: string } | null;
+let seen: { path: string; auth: string | undefined; token: string | undefined; body: string;
+  headers: Record<string, string | string[] | undefined> } | null;
 
 const listen = (s: Server): Promise<number> =>
   new Promise((res) => s.listen(0, '127.0.0.1', () => res((s.address() as AddressInfo).port)));
@@ -57,6 +58,7 @@ beforeEach(async () => {
       auth: req.headers['authorization'] as string | undefined,
       token: req.headers['x-scoped'] as string | undefined,
       body: await readAll(req),
+      headers: req.headers,
     };
     if ((req.url ?? '').includes('redirect')) {
       res.writeHead(302, { location: `http://127.0.0.1:${attackerPort}/stolen` });
@@ -93,12 +95,21 @@ beforeEach(async () => {
     services: {
       openrouter: { upstream: `http://127.0.0.1:${upPort}/api/v1`, secret: 'OPENROUTER_API_KEY' },
       custom: { upstream: `http://127.0.0.1:${upPort}/api`, secret: 'CUSTOM_KEY', header: 'x-api-key', scheme: '' },
+      // The OAuth/subscription shape: a bearer credential PLUS the two static
+      // headers Anthropic requires, one of which (user-agent) the caller also
+      // sends — so it exercises route-header-wins-over-caller.
+      anthropic: {
+        upstream: `http://127.0.0.1:${upPort}/v1`, secret: 'ANTHROPIC_AUTH_TOKEN',
+        header: 'authorization', scheme: 'Bearer',
+        headers: { 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': 'claude-code/test' },
+      },
       stall: { upstream: `http://127.0.0.1:${blackholePort}/`, secret: 'OPENROUTER_API_KEY' },
       plaintext: { upstream: 'http://example.com/', secret: 'OPENROUTER_API_KEY' },
     },
   }));
   secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY');
   secrets.putSecret('shipit', 'CUSTOM_KEY', 'CUSTOM-REAL-KEY');
+  secrets.putSecret('shipit', 'ANTHROPIC_AUTH_TOKEN', 'oauth-REAL-TOKEN');
 
   proxy = createServer((req, res) => keyproxy.handle(req, res).catch(() => {
     if (!res.headersSent) { res.writeHead(500); res.end(); }
@@ -165,6 +176,28 @@ describe('the real key reaches the upstream and the scoped token does not', () =
     await call('/svc/openrouter/models?foo=bar', token);
     assert.equal(seen?.path, '/api/v1/models?foo=bar');
   });
+
+  test('static route headers are injected, and a route header overrides the caller\'s (the OAuth-subscription shape)', async () => {
+    const token = proxytoken.mintScopedToken('shipit', 3600);
+    const r = await fetch(`http://127.0.0.1:${port(proxy)}/svc/anthropic/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        'user-agent': 'product-ua/9', // the caller's own UA, which the route must override
+      },
+      body: '{"model":"claude"}',
+    });
+    assert.equal(r.status, 200);
+    assert.equal(seen?.path, '/v1/messages');
+    // The credential is the real vault token, injected last so it always wins.
+    assert.equal(seen?.auth, 'Bearer oauth-REAL-TOKEN');
+    assert.ok(!(seen?.auth ?? '').includes(token));
+    // The static headers the route declares arrive at the upstream...
+    assert.equal(seen?.headers['anthropic-beta'], 'oauth-2025-04-20');
+    // ...and a route-declared header wins over the caller's own value.
+    assert.equal(seen?.headers['user-agent'], 'claude-code/test');
+  });
 });
 
 describe('nothing gets through without a valid, scoped, declared route', () => {
@@ -182,7 +215,7 @@ describe('nothing gets through without a valid, scoped, declared route', () => {
 
   test('a service the company has not declared is 404', async () => {
     const token = proxytoken.mintScopedToken('shipit', 3600);
-    const r = await call('/svc/anthropic/x', token);
+    const r = await call('/svc/undeclared/x', token);
     assert.equal(r.status, 404);
     assert.equal(seen, null);
   });

@@ -244,6 +244,15 @@ export type ServiceRoute = {
   header?: string;
   /** Scheme prefix on the value. Default 'Bearer'; '' injects the raw secret. */
   scheme?: string;
+  /**
+   * Static, NON-secret headers injected on every forwarded request — e.g. the
+   * `anthropic-beta` flag and a `user-agent` an OAuth/subscription upstream
+   * requires. Values are literals; the credential still travels ONLY on
+   * `header`/`scheme`, never here. Keys are stored lower-cased. A key naming the
+   * credential header or a connection-framing header is refused by the
+   * validator, and the credential is injected last so it always wins.
+   */
+  headers?: Record<string, string>;
 };
 
 /**
@@ -272,6 +281,20 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // are caught for the same reason the header name is held to a strict token set.
 const CONTROL_CHARS_RE = /[ --]/;
 
+// Headers a static route header may NOT set: connection framing (the proxy
+// reframes its own hop) and `authorization` (the default credential header).
+// Mirrors keyproxy's HOP_BY_HOP — the proxy also skips these when applying a
+// route's static headers, so a hand-edited config cannot slip one past either.
+// A route with a CUSTOM credential header (e.g. x-api-key) refuses that name too,
+// dynamically, in the validator.
+const FORBIDDEN_STATIC_HEADERS = new Set([
+  'host', 'authorization', 'connection', 'keep-alive', 'proxy-authorization',
+  'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'content-length',
+]);
+// A blunt cap on operator input that rides every forwarded request. No real
+// upstream needs more than a handful of static headers.
+const MAX_STATIC_HEADERS = 50;
+
 /**
  * Validate and normalise a service route before it is written to a company's
  * config. The credential this route names is decrypted in the proxy and sent to
@@ -281,7 +304,7 @@ const CONTROL_CHARS_RE = /[ --]/;
  */
 export const validateServiceRoute = (
   name: string,
-  route: { upstream?: unknown; secret?: unknown; header?: unknown; scheme?: unknown },
+  route: { upstream?: unknown; secret?: unknown; header?: unknown; scheme?: unknown; headers?: unknown },
 ): { ok: true; route: ServiceRoute } | { ok: false; reason: string } => {
   if (!SERVICE_NAME_RE.test(name)) {
     return { ok: false, reason: `service name ${JSON.stringify(name)} must be a single path segment: letters, digits, dash or underscore` };
@@ -315,9 +338,49 @@ export const validateServiceRoute = (
   if (schemeGiven && CONTROL_CHARS_RE.test(scheme)) {
     return { ok: false, reason: 'scheme must not contain control characters' };
   }
+  // Static, non-secret headers injected alongside the credential (e.g. the
+  // `anthropic-beta` flag and `user-agent` an OAuth upstream requires). Literals
+  // only — the credential still travels solely on `header`/`scheme`. A key that
+  // names the credential header (so it cannot shadow the injected key) or a
+  // connection-framing header (which the proxy owns) is refused; keys are stored
+  // lower-cased, matching how the proxy applies them.
+  let headers: Record<string, string> | undefined;
+  if (route.headers != null) {
+    if (typeof route.headers !== 'object' || Array.isArray(route.headers)) {
+      return { ok: false, reason: 'headers must be an object mapping header names to string values' };
+    }
+    const entries = Object.entries(route.headers as Record<string, unknown>);
+    if (entries.length > MAX_STATIC_HEADERS) {
+      return { ok: false, reason: `at most ${MAX_STATIC_HEADERS} static headers` };
+    }
+    const credHeader = (header || 'authorization').toLowerCase();
+    const built: Record<string, string> = {};
+    for (const [k, v] of entries) {
+      const key = k.trim();
+      if (!HEADER_NAME_RE.test(key)) {
+        return { ok: false, reason: `header ${JSON.stringify(k)} is not a valid HTTP header name` };
+      }
+      const lk = key.toLowerCase();
+      if (lk === credHeader) {
+        return { ok: false, reason: `header ${JSON.stringify(key)} is the credential header; the vault secret is injected there, not a static value` };
+      }
+      if (FORBIDDEN_STATIC_HEADERS.has(lk)) {
+        return { ok: false, reason: `header ${JSON.stringify(key)} is a connection header the proxy manages and cannot be set as a static header` };
+      }
+      if (typeof v !== 'string') {
+        return { ok: false, reason: `header ${JSON.stringify(key)} must have a string value` };
+      }
+      if (CONTROL_CHARS_RE.test(v)) {
+        return { ok: false, reason: `header ${JSON.stringify(key)} value must not contain control characters` };
+      }
+      built[lk] = v;
+    }
+    if (entries.length) headers = built;
+  }
   const out: ServiceRoute = { upstream, secret };
   if (header) out.header = header;
   if (schemeGiven) out.scheme = scheme;
+  if (headers) out.headers = headers;
   return { ok: true, route: out };
 };
 

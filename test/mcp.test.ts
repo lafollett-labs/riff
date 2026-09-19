@@ -387,6 +387,44 @@ test('archive DELETEs the company by slug and sends no body', async () => {
   }
 });
 
+test('service routes: list, set (flattened body, optionals omitted) and delete', async () => {
+  const s = await stub();
+  try {
+    const client = new RiffClient(s.base);
+
+    const route = { upstream: 'https://openrouter.ai/api/v1', secret: 'OPENROUTER_API_KEY' };
+    s.reply({ services: { openrouter: route } });
+    const list = await client.services('shipit');
+    assert.deepEqual([last(s.calls).method, last(s.calls).url], ['GET', '/api/services?c=shipit']);
+    assert.deepEqual((list.data as { services: unknown }).services, { openrouter: route });
+
+    // A minimal route: name flattened beside upstream/secret, no optional keys on the wire.
+    await client.setService('shipit', 'openrouter', route);
+    let c = last(s.calls);
+    assert.deepEqual([c.method, c.url], ['PUT', '/api/services?c=shipit']);
+    assert.deepEqual(bodyOf(c), { name: 'openrouter', ...route }, 'no undefined optional keys leak onto the wire');
+
+    // The OAuth-subscription shape: header, scheme and static headers all carried.
+    await client.setService('shipit', 'anthropic', {
+      upstream: 'https://api.anthropic.com', secret: 'ANTHROPIC_AUTH_TOKEN',
+      header: 'authorization', scheme: 'Bearer',
+      headers: { 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': 'claude-code/1.x' },
+    });
+    assert.deepEqual(bodyOf(last(s.calls)), {
+      name: 'anthropic', upstream: 'https://api.anthropic.com', secret: 'ANTHROPIC_AUTH_TOKEN',
+      header: 'authorization', scheme: 'Bearer',
+      headers: { 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': 'claude-code/1.x' },
+    });
+
+    await client.deleteService('shipit', 'anthropic');
+    c = last(s.calls);
+    assert.deepEqual([c.method, c.url], ['DELETE', '/api/services?c=shipit&name=anthropic']);
+    assert.equal(c.body, null, 'delete carries the name in the query, not a body');
+  } finally {
+    await s.close();
+  }
+});
+
 test('markRead posts the ids and read flag, and marks the whole inbox when ids are omitted', async () => {
   const s = await stub();
   try {

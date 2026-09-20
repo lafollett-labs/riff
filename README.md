@@ -8,20 +8,25 @@ company should have, what its staff should be called, or what it should build.
 One agent starts work, and everything after that is a decision somebody in the
 company made and can be read back.
 
-Needs **Node 26 or newer** — the server runs TypeScript directly by type
-stripping, with no build step.
+Companies run in a container — they need a real shell to build anything and a
+key-injecting proxy to reach Claude, and both live in the box (see *Running it
+in a box*). So running Riff needs **Docker**; **Node 26 or newer** is for working
+on Riff itself.
 
 ```bash
-npm install
-npm run desk:build
-npm run desk             # http://localhost:4173
+docker/up.sh up --build          # builds the stack; console on http://localhost:4173
 ```
 
-Open the console, found your first company from the **Companies** view, and it
-starts working. There are no setup scripts and no command-line founding: every
-operator action is an HTTP endpoint, and the console is a client of it — so is
-the MCP surface below, and so is anything you write. If a thing you can do to a
-company has no endpoint, that is the bug, not a missing script.
+Open the console, found your first company from the **Companies** view, then set
+the runtime credential once under **Riff settings** (in the company switcher at
+the top of the rail): the Claude token the agents run on lives in an encrypted
+vault, never a file or an environment variable, and a company will not run until
+one is set. Then it starts working.
+
+There are no setup scripts and no command-line founding: every operator action
+is an HTTP endpoint, and the console is a client of it — so is the MCP surface
+below, and so is anything you write. If a thing you can do to a company has no
+endpoint, that is the bug, not a missing script.
 
 ---
 
@@ -89,6 +94,10 @@ silent.
     transcript.db                a separate audit of every SDK turn, beside the ledger
     config.json                  who this company is, its connectors and services
   archive/<slug>-<stamp>/        removed companies, moved not deleted
+  settings.json                  installation settings — the default runtime credential's type
+  master.key                     wraps every vault (0600); never leaves this machine
+  install.vault.json             the installation's own secrets, e.g. the default runtime token
+  secrets/<slug>.vault.json      one company's encrypted secrets
 ```
 
 One installation holds many companies. Nothing about one reaches into another —
@@ -146,9 +155,32 @@ you are reading the commons appears without a reload. The status bar carries
 the operational state: whether the company is working, who is mid-shift right
 now, and a control to start or pause it.
 
+Those are the per-company surfaces. One screen is installation-level, reached
+from the company switcher rather than a company: **Riff settings**, where the
+default runtime credential the agents run on is set (see *Secrets and Services*).
+
 The Envelope shows the whole draft inline and asks for a reason. That reason is
 not decoration: it opens the author's next shift. A gate whose rejections never
 reach the person who could act on them terminates one step short of the point.
+
+---
+
+## Screenshots
+
+<!-- TODO(screenshots): capture a demo company and drop images here so the repo
+     reads well at a glance. Docs-now, capture-later — the operator's call. Grab,
+     at phone and desktop width, in light and dark:
+       - Overview      — the cross-company landing
+       - Envelope      — a draft waiting on the board, rendered in full
+       - Vitals        — a week's cost/output and the rules that actually bit
+       - Secrets       — a key set by name, masked
+       - Services      — a route: name -> host, secret by name
+       - Riff settings — the runtime credential's set / not-set badge
+     Use a benign demo company (e.g. "Acme"), never a real one, and never a real
+     token in frame. -->
+
+_Console screenshots are coming; the capture checklist lives in the source of
+this section._
 
 ---
 
@@ -162,9 +194,9 @@ npm run mcp             # stdio; RIFF_API points at the gateway, default loopbac
 ```
 
 `.mcp.json` registers it for this checkout, so a Claude Code session gets
-seventeen typed `riff_*` tools — `riff_state`, `riff_vitals`, `riff_events`,
-`riff_found`, `riff_running`, `riff_decide`, `riff_transcript` and the rest —
-instead of URLs and JSON bodies to assemble by hand.
+twenty-two typed `riff_*` tools — `riff_state`, `riff_vitals`, `riff_events`,
+`riff_found`, `riff_running`, `riff_decide`, `riff_transcript`, `riff_set_service`
+and the rest — instead of URLs and JSON bodies to assemble by hand.
 
 The tool surface is two files: `src/mcp/client.ts` is a typed client and the
 only thing that knows an endpoint's shape; `src/mcp/server.ts` is thin wiring
@@ -212,42 +244,31 @@ the tool allowlist just turns into a blocklist you maintain forever. So the
 boundary is structural:
 
 ```bash
-cp docker/.env.example docker/.env    # point it at your password manager
-docker/up.sh check                    # prove the token wiring, start nothing
-docker/up.sh up --build
+docker/up.sh up --build               # build and start; console on http://localhost:4173
+docker/up.sh check                    # or: validate the compose wiring, start nothing
 ```
 
-Use `docker/up.sh` for everything, never raw `docker compose`: compose
-interpolates the token variable on every subcommand, so plain
-`docker compose logs` fails before it prints a line.
+Use `docker/up.sh` for everything, never raw `docker compose`. `up.sh` drains
+any in-flight shift before it recreates a container — a raw `docker compose up
+--build` sends SIGTERM, waits ten seconds, then kills a shift that runs for
+minutes, and the ledger records `Claude Code process aborted by user` for work
+that was going fine. It also starts the stack detached and threads the env
+files; watching it is `docker/up.sh logs -f`.
 
-`docker/.env` holds a **command that prints the token**, not the token:
-
-```
-RIFF_TOKEN_CMD="<any command that prints your token>"
-```
-
-| your vault | the command |
-| - | - |
-| `pass` | `pass show riff/claude-token` |
-| 1Password | `op read "op://Private/Claude Code/credential"` |
-| KeePassXC | `keepassxc-cli show -s -a Password ~/vault.kdbx 'Claude Code'` |
-| macOS Keychain | `security find-generic-password -s riff -a claude -w` |
-| gnome-keyring | `secret-tool lookup service riff account claude` |
-
-`up.sh` runs it at launch and hands the result to compose through the
-environment, so the credential is never written to a file, never an argument
-(so it stays out of `ps`), and never typed (so it stays out of shell history).
-A literal token in `docker/.env` still works. Only the subcommands that start
-something ask for it, so `up.sh logs`, `ps`, `down` and `config` never make
-your password manager prompt. To keep this checkout free of your configuration
-entirely, put the file anywhere and set `RIFF_ENV` to its path.
+There is no token to wire here. The runtime credential — the Claude token the
+agents run on — is set once in the console under **Riff settings** and lives
+encrypted in the keyproxy's vault, injected on egress. It is never in
+`docker/.env`, a container environment variable, an image layer, or a company's
+world; `docker inspect` on the factory shows none. `docker/.env` holds only
+optional compose settings (`RIFF_DATA`, `PORT`, `UID`/`GID`), and to keep this
+checkout free of your configuration entirely, put the file anywhere and set
+`RIFF_ENV` to its path.
 
 Four containers, and the shape is the point:
 
 | | |
 | - | - |
-| `factory` | the real tools, the shell, your token. On a network with **no route off the machine** |
+| `factory` | the real tools and the shell, but **no token** — it authenticates through the keyproxy on a scoped, per-shift token. On a network with **no route off the machine** |
 | `keyproxy` | holds a company's real API keys and injects them on the way out, so the factory carries a scoped token it cannot trade for the key |
 | `egress` | the only way out, to an anchored-regex allowlist. Logs what it refused |
 | `ingress` | the only way in: a TCP forwarder with no token and no agent code |
@@ -314,14 +335,11 @@ The working tree is mounted rather than copied, the server runs under
 `node --watch`, and the console runs under Vite — so a saved `.vue` hot-reloads
 and a saved `.ts` restarts the server underneath it.
 
-The token is yours to generate and yours alone to see:
-
-```bash
-claude setup-token
-```
-
-Store it in your password manager and point `RIFF_TOKEN_CMD` at it. Nothing
-in this project ever needs the value written down.
+The dev box runs the same keyproxy, so the runtime credential is set the same
+way as in production — once, in the console under **Riff settings** — and lives
+in the vault, not in this checkout. Generate a Claude token with
+`claude setup-token` and paste it there; nothing in this project ever needs the
+value written to a file.
 
 ---
 
@@ -329,14 +347,14 @@ in this project ever needs the value written down.
 
 | | |
 | - | - |
-| `npm run desk` | serve the console |
-| `npm run desk:build` | build it first |
+| `docker/up.sh up --build` | run companies in the box; `check` (validate the compose wiring, start nothing), `logs`, `ps`, `down` alongside |
+| `docker/backup.sh` | a snapshot the agents cannot reach |
+| `npm run desk` | serve the console for development — companies run in the box, not here |
+| `npm run desk:build` | build the console bundle |
 | `npm run mcp` | the MCP surface over the API, on stdio |
 | `npm test` | unit tests |
 | `npm run test:ui` | Playwright, against a throwaway installation |
 | `npm run check` | typecheck all three projects, `.vue` files included |
-| `docker/up.sh up --build` | run it in the box; `check`, `logs`, `ps`, `down` alongside |
-| `docker/backup.sh` | a snapshot the agents cannot reach |
 
 Founding, waking, reviewing, deciding, renaming and reading vitals are not
 commands — they are the console surfaces above, the `riff_*` MCP tools, or the
@@ -387,16 +405,38 @@ Riff knows nothing about any provider. Anything a connector reaches still
 crosses the gate: touching the outside world is `external.write`, which always
 lands as a draft.
 
+### Secrets and Services
+
 A company's own API keys — the ones its **product** calls out with, not the
-connectors above — do not go in `config.json` at all. They live in a per-company
-**encrypted vault** (`src/core/secrets.ts`), written through the **Secrets** desk
-tab, and a **Service** (`services` in config, the **Services** tab) declares the
-one outside host each may reach and which secret authenticates it. The `keyproxy`
-sidecar holds the real key and injects it on egress; the shift's own process only
-ever carries a **scoped, per-shift token** the proxy swaps for the key on the way
-out (`src/core/proxytoken.ts`). So a company can *use* a key it can never *read* —
-the factory is never handed the value, and the key is never written to
-`config.json`, the volume, or a log.
+connectors above — never go in `config.json` and never reach the factory. They
+live in a per-company **encrypted vault** (`src/core/secrets.ts`), and a
+**Service** route says which one outside host each key may reach. The `keyproxy`
+sidecar holds the real key and injects it on the way out; the shift's own process
+carries only a **scoped, per-shift token** the proxy swaps for the key
+(`src/core/proxytoken.ts`). So a company can *use* a key it can never *read*.
+
+Wiring one, end to end — say the product calls the Anthropic API:
+
+1. **Set the secret** in the Desk **Secrets** tab: a name and a value, e.g.
+   `ANTHROPIC_API_KEY`. The value is write-only — stored, masked, never echoed
+   back. Everything downstream refers to it by *name*, never by value.
+2. **Declare the Service** in the **Services** tab (or the `riff_set_service`
+   MCP tool, which takes the secret's *name*, never its value): a route name, the
+   `https` upstream, and the secret name, plus the injection shape. An Anthropic
+   key rides an `x-api-key` header with a raw scheme and a static
+   `anthropic-version` header; the default shape is `Authorization: Bearer`.
+3. **The product calls the proxy**, not the API directly:
+   `http://keyproxy:8890/svc/<name>` with its per-shift token as the bearer. The
+   proxy verifies the token, swaps in the real key on the declared header, and
+   forwards to the fixed upstream. The key is never in `config.json`, the volume,
+   or a log.
+
+The **runtime credential** — the Claude token the *agents themselves* run on —
+uses the very same vault-and-proxy machinery, but it is Riff's own rather than a
+company's: set under **Riff settings** (an installation default, or a per-company
+override), stored under a reserved name, and injected on the reserved `_runtime`
+route no company can declare. So the platform's own inference and a company's
+product keys share one mechanism and stay cleanly separated.
 
 ---
 

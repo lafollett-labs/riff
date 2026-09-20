@@ -189,8 +189,9 @@ restart.
 
 Until 2026-09-13 the CLI's transcripts lived on the container's tmpfs `$HOME`
 and died on every restart — the price of keeping `.credentials.json` off disk, a
-file that no longer exists (the factory authenticates from
-`CLAUDE_CODE_OAUTH_TOKEN` in the environment). So transcripts now persist under
+file that no longer exists (a shift authenticates through the keyproxy's runtime
+route on a scoped token, so there is no credential file, and no token in the
+environment either). So transcripts now persist under
 the company's own home on the durable volume: the CLI's store at
 `companies/<slug>/.claude` (via `CLAUDE_CONFIG_DIR`), so a shift resumes instead
 of starting cold, and the company's own audit — every turn, tool call and result
@@ -215,69 +216,80 @@ its own staff. Its home is inside its own boundary, so its Bash can read its own
 `transcript.db` and `ledger.db` as it always could — the wall is between
 companies and around the credentials, not between a company and its own history.
 The stores hold agent-authored text (prompts, reasoning, tool input and output),
-never a secret: the runtime token is an environment variable and the product
-keys live in the proxy one container away (below). Backups follow the same rule
+never a secret: the runtime token and the product keys alike live in the vault
+the proxy reads one container away (below), never in the factory. Backups follow the same rule
 as everything else on the volume — `docker/backup.sh` carries the transcripts to
 a destination no container mounts.
 
-### The token is kept off your disk, and that is all that buys
+### The runtime token is not in the factory at all
 
-`docker/.env` holds a command that prints the token rather than the token, and
-`docker/up.sh` runs it at launch. So the credential is not sitting in plaintext
-in a source tree where a backup, an editor's crash recovery, a home-directory
-sync or a tarball of the repo will pick it up. It is never passed as an
-argument, so it does not appear in `ps`; never typed, so not in shell history;
-and never written, so not on disk.
+Until the cutover the runtime token was an environment variable on the factory:
+readable by any shell in the box, and visible on the host through `docker inspect`
+to anyone who could reach the Docker socket. It is not there any more. The agents'
+own Claude credential lives encrypted in an install-level vault — set in the
+console under Riff Settings, or overridden per company — and the keyproxy injects
+it on egress exactly as it does a company's product keys (below). A shift is
+pointed at the proxy's reserved `_runtime` route carrying only a scoped, per-shift
+token; the real credential never enters the factory's environment, a tmpfs,
+`config.json`, git, or a `.riff.tar.gz`. `docker inspect` on the factory shows no
+token, and no shell in the box has one to read.
 
-Be clear about the limit, and it is a real one. Once the factory is running,
-the token is in its environment and the staff have a shell — anything in that
-box can read it, and it is visible on the host through `docker inspect` to
-anyone who can reach the Docker socket. **Secrecy is not the control, and since
-2026-09-03 neither is the proxy.**
+Be clear about the limits, because they are real. The scoped token a shift *does*
+carry is not secret — a neighbouring shift under the same uid could read it out of
+`/proc` — but it is short-lived, company-scoped, and useless off the proxy, and
+the real credential it stands in for is a container away. And the egress proxy is
+not a containment wall: **secrecy of a scoped token is not the control, and since
+2026-09-03 neither is the proxy.** Its allowlist was retired — every allowlisted
+host accepted a GET with a query string, so wikipedia and arxiv were exfiltration
+channels of the same shape — and egress is open, so a determined process inside
+the factory can send what it holds.
 
-This used to say that a readable token still could not be sent anywhere. That
-was the allowlist's claim, it is retired, and it was always softer than it
-read: every allowlisted host accepted a GET with a query string, so wikipedia
-and arxiv were exfiltration channels of exactly the same shape. Egress is now
-open, so a process inside the factory that wants to send the token somewhere
-can.
-
-What remains, honestly: the container holds a credential for the model and for
-nothing else, so there is no second account to reach; the gate mediates every
-tool call and R3 sends anything outbound to the board as a draft; and the proxy
-logs every request, so what was fetched is answerable after the fact. Those are
-a workflow control, a scope control and an audit trail. None of them is a wall.
-Run this on hardware you are willing to have a determined process act from.
+What remains, honestly: the real credentials are in the proxy, so what a shift can
+read is a capped, revocable scoped token and never the account behind it; the gate
+mediates every tool call and R3 sends anything outbound to the board as a draft;
+and the proxy logs every request, so what was fetched is answerable after the
+fact. Those are a scope control, a workflow control and an audit trail. None of
+them is a wall. Run this on hardware you are willing to have a determined process
+act from.
 
 ### A company's own keys live one container away, not in the factory
 
-The subscription token above is the platform's, shared by every company. A
-company also has keys of its OWN — a model backend it pays for, its product's
-API — and the rule that "anything in the factory box is readable by a shell that
-has run long enough" applies to those too. So they are not put in the box.
-
-Three parts hold that line, and only the third is new to reason about:
+The runtime token above is Riff's own — an installation default, or a per-company
+override. A company also has keys of its OWN — a model backend it pays for, its
+product's API — and the same rule holds for both: "anything in the factory box is
+readable by a shell that has run long enough", so a real key is never put in the
+box. One mechanism carries them, in three parts, and only the third is new to
+reason about:
 
 - **The vault.** `src/core/secrets.ts` encrypts each company's secrets with a
   per-company data key, itself wrapped under a master key at `~/.riff/master.key`
   (`0600`). The master key and the vault files sit at the installation root,
   **outside every world**, so the shift sandbox — which re-allows a shift to read
   only its own world — never sees the ciphertext, let alone the key that unwraps
-  it. `/api/secrets` writes a value and can list names; there is no endpoint that
-  reads a value back.
+  it. The runtime default lives beside them in an install-level vault
+  (`install.vault.json`) sealed under the same master key; a company's own runtime
+  override and its product keys are in its per-company vault. `/api/secrets` and
+  `/api/settings` write a value and can report that one is set; no endpoint reads a
+  value back.
 
 - **The proxy.** `src/keyproxy/main.ts` runs in its OWN container
   (`docker/compose.yaml`, service `keyproxy`), hardened to the egress bar and
   mounting the data volume read-only. It is the one process that decrypts a real
-  key, and it does so to inject it on a call and forward it upstream. The factory
-  never runs this code and never holds the key.
+  key, and it does so to inject it on a call and forward it upstream: a company's
+  product keys on the `/svc/<name>` routes it declared, and the agents' own runtime
+  credential on the reserved `_runtime` route, synthesized from the stored type —
+  never a service any company can declare (`SERVICE_NAME_RE` bars the leading
+  underscore). The factory never runs this code and never holds a key.
 
-- **The scoped token.** A shift's product calls `http://keyproxy:8890/svc/<name>`
-  with a per-shift token that says only "the bearer is company X, until time T",
-  signed with a secret at the installation root the sandbox cannot read
-  (`src/core/proxytoken.ts`). The agent may read its own token — that is the
-  point, its product uses it — but cannot forge one for another company, and
-  never sees the key the proxy swaps in.
+- **The scoped token.** A shift calls `http://keyproxy:8890/svc/<name>` — its
+  product routes, and the `_runtime` route for the agents' own inference — with a
+  per-shift token that says only "the bearer is company X, until time T", signed
+  with a secret at the installation root the sandbox cannot read
+  (`src/core/proxytoken.ts`). `staff.ts` points the SDK at the runtime route with
+  this token (`ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN`) and strips any
+  inherited raw token from the child env. The agent may read its own scoped token —
+  that is the point, its product and its inference both use it — but cannot forge
+  one for another company, and never sees the key the proxy swaps in.
 
 **What this buys, precisely:** a company's real key is never on the factory's
 disk, in its env, in `config.json`, in git, or in a `.riff.tar.gz` — an exported

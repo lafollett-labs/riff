@@ -237,47 +237,46 @@ describe('the example env file describes this container, not an imagined one', (
   // their own setup.
   const example = readFileSync('docker/.env.example', 'utf8');
   const upsh = readFileSync('docker/up.sh', 'utf8');
-  /** Stands in for a token. Long enough that a length check means something. */
-  const SENTINEL = 'sentinel-not-a-real-token-000000';
 
   test('every variable it names is one compose actually reads', () => {
     const named = [...example.matchAll(/^#?\s*([A-Z][A-Z0-9_]+)=/gm)].map((m) => m[1]!);
     assert.ok(named.length > 3, 'the example should document something');
     for (const v of named) {
-      if (v === 'CLAUDE_CODE_OAUTH_TOKEN') continue;   // required, checked below
       // Read by compose, or by the launcher that runs before it.
       assert.ok(compose.includes(v) || upsh.includes(v),
         `${v} is in docker/.env.example but neither compose nor up.sh reads it`);
     }
   });
 
-  test('the token is present and empty, so a copy of it cannot carry a secret', () => {
-    assert.match(example, /^CLAUDE_CODE_OAUTH_TOKEN=\s*$/m);
-    assert.ok(compose.includes('CLAUDE_CODE_OAUTH_TOKEN'), 'compose must require the token');
+  test('the runtime token is nowhere in the compose env or the example', () => {
+    // It moved to the keyproxy vault, set in the console. The guard is the
+    // inverse of the old "compose must require the token": it must NOT reappear
+    // in either file, or the point of the cutover is quietly undone. The record
+    // path is gone too — no CLAUDE_CODE_OAUTH_TOKEN, no RIFF_WAIT_FOR_CREDENTIALS.
+    assert.ok(!compose.includes('CLAUDE_CODE_OAUTH_TOKEN'),
+      'the runtime token must not be a factory env var');
+    assert.ok(!example.includes('CLAUDE_CODE_OAUTH_TOKEN'),
+      'the example must not resurrect the token variable');
+    assert.ok(!compose.includes('RIFF_WAIT_FOR_CREDENTIALS'),
+      'no credentials-delivery env survives on the factory');
   });
 
   /**
-   * Run the launcher for real, with a sentinel standing in for the token and a
-   * stub standing in for docker.
-   *
-   * Reading the script and grepping it for `echo $token` was the first attempt
-   * and it flagged the line that TRIMS the token, which pipes into `tr` and
-   * prints nothing. Guessing at intent from a regex is the wrong tool: run it,
-   * and look at what actually came out.
+   * Run the launcher for real, with a stub docker and curl. There is no token
+   * to resolve any more — the runtime credential lives in the keyproxy vault, set
+   * in the console — so the stubs only record how compose and the drain were
+   * called, to prove the launcher drains before a rebuild and starts nothing it
+   * should not.
    */
-  const launch = (args: string[] = ['up'], credentialsCmd: string | null = null):
-  { out: string; curl: string; argv: string; env: string; asked: boolean } => {
+  const launch = (args: string[] = ['up']): { out: string; curl: string; argv: string } => {
     const dir = mkdtempSync(join(tmpdir(), 'riff-launch-'));
-    // A stub `docker` that records how it was called, so the test can prove
-    // the token was passed by environment and never as an argument.
     writeFileSync(join(dir, 'docker'),
-      `#!/bin/sh\nprintf '%s\\n' "$*" > ${dir}/argv\nenv > ${dir}/env\n`, { mode: 0o755 });
-    // And a stub `curl`, because the launcher asks a running server to pause
-    // its companies before recreating the container. Unstubbed, this suite
-    // would reach 127.0.0.1:4173 and pause the operator's real work — the same
-    // hole that once delivered a live credential to a running container.
-    // It answers a listing once with one company running, then with none, so
-    // the drain both acts and terminates.
+      `#!/bin/sh\nprintf '%s\\n' "$*" > ${dir}/argv\n`, { mode: 0o755 });
+    // A stub `curl`, because the launcher asks a running server to drain its
+    // companies before recreating the container. Unstubbed, this suite would
+    // reach 127.0.0.1:4173 and pause the operator's real work. It answers a
+    // listing once with one company running, then with none, so the drain both
+    // acts and terminates.
     writeFileSync(join(dir, 'curl'),
       `#!/bin/sh\nprintf '%s\\n' "$*" >> ${dir}/curl.log\n`
       + `case "$*" in\n`
@@ -295,47 +294,17 @@ describe('the example env file describes this container, not an imagined one', (
       + `  : > ${dir}/asked\n`
       + `  printf '%s"running":true,"awake":[]}]}' "$head"\n`
       + `fi\n`, { mode: 0o755 });
-    // The stub vault announces itself, so a test can tell whether the password
-    // manager was asked to open at all.
     const r = spawnSync('sh', ['docker/up.sh', ...args], {
       encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: `${dir}:${process.env['PATH'] ?? ''}`,
-        RIFF_TOKEN_CMD: `sh -c 'echo VAULT-OPENED >&2; printf %s ${SENTINEL}'`,
-        CLAUDE_CODE_OAUTH_TOKEN: '',
-        RIFF_ENV: '',
-        // Explicitly off, or these reach past the fixture into the operator's
-        // own docker/.env and resolve their real credential — which is how
-        // this suite once delivered a live record to a running container.
-        ...(credentialsCmd != null ? { RIFF_CREDENTIALS_CMD: credentialsCmd } : { RIFF_CREDENTIALS_CMD: '' }),
-      },
+      env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}`, RIFF_ENV: '' },
     });
     assert.equal(r.status, 0, `up.sh ${args.join(' ')} failed: ${r.stderr}`);
     return {
       out: r.stdout,
       curl: existsSync(join(dir, 'curl.log')) ? readFileSync(join(dir, 'curl.log'), 'utf8') : '',
       argv: existsSync(join(dir, 'argv')) ? readFileSync(join(dir, 'argv'), 'utf8') : '',
-      env: existsSync(join(dir, 'env')) ? readFileSync(join(dir, 'env'), 'utf8') : '',
-      // The stub vault announces itself on stderr when it is opened.
-      asked: r.stderr.includes('VAULT-OPENED'),
     };
   };
-
-  test('the launcher resolves the token without ever printing it', () => {
-    const { out } = launch();
-    assert.ok(!out.includes(SENTINEL), `the token appeared in the output:\n${out}`);
-    // The length is what makes "the vault gave me something" distinguishable
-    // from "the vault gave me an error message", with nothing on screen.
-    assert.match(out, new RegExp(`\\(${SENTINEL.length} characters\\)`));
-  });
-
-  test('the token reaches docker by environment, never as an argument', () => {
-    // An argument is visible in `ps` to every process on the machine.
-    const { argv, env } = launch();
-    assert.ok(!argv.includes(SENTINEL), `the token was passed on the command line: ${argv}`);
-    assert.match(env, new RegExp(`^CLAUDE_CODE_OAUTH_TOKEN=${SENTINEL}$`, 'm'));
-  });
 
   test('a rebuild drains what is working before it recreates the container', () => {
     // Compose sends SIGTERM and waits ten seconds; a shift runs for minutes,
@@ -371,99 +340,15 @@ describe('the example env file describes this container, not an imagined one', (
       'no hardcoded port in the drain');
   });
 
-  test('only the subcommands that start something open the password manager', () => {
-    // Unlocking a vault to read `logs`, or to `down` a stack already running,
-    // teaches you to approve the prompt without reading it — which is the
-    // habit the vault exists to prevent.
-    for (const quiet of [['logs'], ['down'], ['ps'], ['config'], ['--profile', 'x', 'ps']]) {
-      assert.equal(launch(quiet).asked, false, `${quiet.join(' ')} should not need the token`);
-    }
-    for (const loud of [['up'], ['up', '--build'], ['restart'], ['run', 'x', 'sh']]) {
-      assert.equal(launch(loud).asked, true, `${loud.join(' ')} starts something and needs a real token`);
-    }
-  });
-
-  /**
-   * A bare token can spend the subscription and cannot read what is left of
-   * it — the CLI has no subscription record to ask about, so every rate-limit
-   * window comes back empty and the throttle has nothing to govern on. A
-   * whole night's run was paced off token counts nobody is billed for before
-   * anyone noticed, because "no reading" and "plenty of room" looked the same.
-   */
-  const RECORD = '{"claudeAiOauth":{"accessToken":"sentinel-record-token","subscriptionType":"max"}}';
-  const withRecord = (args: string[] = ['up']) =>
-    launch(args, `sh -c 'echo VAULT-OPENED >&2; printf %s ${RECORD}'`);
-
-  test('a credentials record is preferred, and never printed', () => {
-    const { out } = withRecord();
-    assert.ok(!out.includes('sentinel-record-token'), `the record appeared in the output:\n${out}`);
-    // A length, not the record: enough to tell "the vault gave me something"
-    // from "the vault gave me an error message", with nothing on screen. The
-    // exact count is the shell's business, not this test's.
-    assert.match(out, /credentials record resolved \(\d+ characters\)/);
-  });
-
-  test('the record never reaches docker as an argument', () => {
-    const { argv } = withRecord();
-    assert.ok(!argv.includes('sentinel-record-token'), `the record was passed on the command line: ${argv}`);
-  });
-
-  test('check says plainly which mode you are in', () => {
-    assert.match(withRecord(['check']).out, /credentials record is available/);
-    assert.match(launch(['check']).out, /plan will NOT be readable/);
-  });
-
-  test('something that is not a credentials record is refused, not shipped', () => {
-    // Refused before compose is reached, so no docker stub is needed here.
-    const r = spawnSync('sh', ['docker/up.sh', 'up'], {
-      cwd: new URL('..', import.meta.url).pathname,
-      encoding: 'utf8',
-      env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: '', RIFF_ENV: '',
-             RIFF_CREDENTIALS_CMD: "sh -c 'printf %s not-a-record'" },
-    });
-    assert.equal(r.status, 1, 'a bad record must stop the launch');
-    assert.match(r.stderr, /without a\n?\s*claudeAiOauth record/);
-  });
-
-  /**
-   * The record lives on a tmpfs, so ANY restart loses it — `docker restart`,
-   * a Docker Desktop reboot, a crash and respawn. An entrypoint that gave up
-   * on a deadline turned that into a crash loop which took the API down with
-   * it, so the launcher could not even be asked to deliver a new one.
-   */
-  test('the entrypoint waits for a record instead of giving up on it', () => {
-    const wait = entrypointSrc.slice(entrypointSrc.indexOf('RIFF_WAIT_FOR_CREDENTIALS'));
-    const loop = wait.slice(0, wait.indexOf('exec "$@"'));
-    assert.ok(!/\bexit 1\b/.test(loop),
-      'the credentials wait must not exit — that is a restart loop, not a diagnosis');
-    assert.match(loop, /up\.sh creds/, 'it must say how to recover');
-  });
-
-  test('creds re-delivers to a running factory and starts nothing', () => {
-    const { out, argv } = withRecord(['creds']);
-    assert.match(out, /credentials delivered/);
-    assert.ok(!/\bup\b/.test(argv.split('\n')[0] ?? ''), `creds must not start anything: ${argv}`);
-  });
-
-  test('creds with nothing configured says so rather than starting', () => {
-    const r = spawnSync('sh', ['docker/up.sh', 'creds'], {
-      cwd: new URL('..', import.meta.url).pathname,
-      encoding: 'utf8',
-      env: { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: '', RIFF_ENV: '',
-             RIFF_CREDENTIALS_CMD: '' },
-    });
-    assert.equal(r.status, 1);
-    assert.match(r.stderr, /nothing configured to fetch a credentials record/);
-  });
-
-  test('check proves the wiring and starts nothing', () => {
-    // Worth having before an overnight run: everything a start does, right up
-    // to the point of starting anything.
-    const { out, asked, argv } = launch(['check']);
-    assert.equal(asked, true, 'check must actually resolve the token');
-    assert.match(out, new RegExp(`a bare token is available \\(${SENTINEL.length} characters\\)`));
-    assert.ok(!out.includes(SENTINEL), 'check must not print the token');
-    assert.equal(argv, '', 'check must not invoke docker at all');
+  test('check validates the compose wiring and starts nothing', () => {
+    // `check` used to prove the token wiring; there is no token now, so it
+    // validates the compose configuration — invoking docker for exactly that,
+    // never a start.
+    const { out, argv } = launch(['check']);
+    assert.match(out, /compose configuration is valid/);
+    assert.match(out, /Riff Settings/);
+    assert.match(argv, /\bconfig\b/, 'check runs `docker compose config`');
+    assert.ok(!/\bup\b/.test(argv), `check must not start anything: ${argv}`);
   });
 
   test('the launcher writes nothing to disk', () => {
@@ -595,10 +480,9 @@ describe('the session store is somewhere the factory can actually write', () => 
     // destination`) and took the shell away from a whole shift — that holds. The
     // other objection is now void: CLAUDE_CONFIG_DIR was rejected because it moved
     // the credentials lookup onto the operator's disk (`Not logged in`), but the
-    // factory runs on CLAUDE_CODE_OAUTH_TOKEN from the env — there is no
-    // credentials file to move (verified: none in-container). So the store is set
-    // per company, on the volume, in staff.ts; the entrypoint must still not
-    // symlink it.
+    // shift authenticates through the keyproxy on a scoped token — there is no
+    // on-disk credential to move. So the store is set per company, on the volume,
+    // in staff.ts; the entrypoint must still not symlink it.
     const staff = readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8');
     assert.doesNotMatch(entrypoint, /ln -s .*\.claude\/projects/,
       'bwrap cannot mount on a symlink, and the shell is the point of the box');
@@ -620,55 +504,32 @@ describe('the session store is somewhere the factory can actually write', () => 
   });
 });
 
-describe('a container that never got its credentials', () => {
-  /**
-   * `up.sh up --build` was interrupted on 2026-09-05 after compose had already
-   * recreated the factory but before the script pushed the credentials record
-   * in. The entrypoint then waited for that record for eleven hours, logging
-   * the same two lines 2,695 times, and because it never reached `exec` the
-   * API never came up — so `up.sh creds`, the documented fix, had nothing to
-   * talk to. Two independent faults, and either one alone is survivable.
-   */
+describe('a company with no runtime credential is held, not woken to fail', () => {
   const entrypoint = readFileSync(new URL('../docker/entrypoint.sh', import.meta.url), 'utf8');
   const up = readFileSync(new URL('../docker/up.sh', import.meta.url), 'utf8');
 
-  test('the wait has a deadline, and starts the server rather than exiting at it', () => {
-    // Exiting is the crash loop the comment above the loop warns about: the
-    // container respawns, waits, exits, and takes the API with it every time.
-    assert.match(entrypoint, /deadline=\$\{RIFF_CREDENTIALS_TIMEOUT:-\d+\}/);
-    assert.match(entrypoint, /if \[ "\$waited" -ge "\$deadline" \]; then/);
-    const loop = entrypoint.slice(entrypoint.indexOf('deadline='));
-    assert.doesNotMatch(loop.slice(0, loop.indexOf('exec "$@"')), /\bexit 1\b/,
-      'giving up must start the server, never exit');
-  });
-
   test('nothing wakes up unable to work', () => {
-    // A company restored without credentials spends a whole shift failing to
-    // authenticate and writing that down.
-    assert.match(entrypoint, /RIFF_HOLD_PAUSED=1/);
+    // A company restored without a resolvable runtime credential would spend a
+    // whole shift failing to authenticate and writing that down. The resume is
+    // per-company now: one whose credential the keyproxy cannot resolve is
+    // skipped rather than woken. RIFF_HOLD_PAUSED stays as a manual global hold.
     const server = readFileSync(new URL('../src/gateway/server.ts', import.meta.url), 'utf8');
     assert.match(server, /const held = process\.env\['RIFF_HOLD_PAUSED'\] === '1';/);
-    // Two reasons to hold, now per-company: the entrypoint's no-record-at-deadline
-    // flag holds everything at once, and a company whose runtime credential does
-    // not resolve is skipped at resume rather than woken to fail authenticating.
     assert.match(server, /registry\.resume\(\(slug\) => runtimeCredentialHealth\(slug\)\.live\)/);
   });
 
-  test('up.sh hands the record over however it leaves, not only when it finishes', () => {
-    // The build is the slow half — minutes — and the delivery used to be the
-    // statement after it. Interrupt the build and the record was never pushed.
-    assert.match(up, /trap on_exit EXIT HUP INT TERM/);
-    assert.match(up, /on_exit\(\) \{/);
-    // The trap is armed before compose runs, or it does not cover the build.
-    assert.ok(up.indexOf('trap on_exit') < up.indexOf('run_compose "$@"'),
-      'the trap must be armed before the build it exists to survive');
+  test('the entrypoint no longer waits for a credential it will never be handed', () => {
+    // The runtime credential is not delivered to the container any more, so the
+    // old tmpfs-record wait is gone — its absence is the point. A wait
+    // reintroduced here would block boot on a file that never arrives.
+    assert.doesNotMatch(entrypoint, /RIFF_WAIT_FOR_CREDENTIALS/);
+    assert.doesNotMatch(entrypoint, /credentials record/);
+    assert.match(entrypoint, /exec "\$@"/);
   });
 
-  test('up starts the stack detached, so the delivery after it is reachable', () => {
-    // Attached, `docker compose up` streams logs and never returns. The
-    // delivery is the next statement, so it never ran: on 2026-09-05 the stack
-    // came up on its 300s credentials deadline, held paused, and needed
-    // `up.sh creds` by hand. Watching the stack is `up.sh logs -f`.
+  test('up starts the stack detached', () => {
+    // Attached, `docker compose up` streams logs and never returns; the stack is
+    // more useful detached. Watching it is `up.sh logs -f`.
     assert.match(up, /if \[ "\$subcommand" = up \]; then/);
     assert.match(up, /\[ "\$detached" = no \] && set -- "\$@" --detach/);
     // And an operator who asked for attached gets it.
@@ -677,11 +538,11 @@ describe('a container that never got its credentials', () => {
       'the flag must be added before compose runs');
   });
 
-  test('delivering twice is not delivering twice', () => {
-    // The happy path calls deliver() and so does the trap that follows it.
-    assert.match(up, /delivered=no/);
-    assert.match(up, /\[ "\$delivered" = yes \] && return 0/);
-    assert.match(up, /delivered=yes/);
+  test('the launcher resolves or delivers no credential', () => {
+    // The whole token/record/creds machinery is retired; a stray reintroduction
+    // would put a raw credential back on the factory or its tmpfs.
+    assert.doesNotMatch(up, /RIFF_TOKEN_CMD|RIFF_CREDENTIALS_CMD|CLAUDE_CODE_OAUTH_TOKEN/);
+    assert.doesNotMatch(up, /on_exit|deliver\(\)/);
   });
 });
 

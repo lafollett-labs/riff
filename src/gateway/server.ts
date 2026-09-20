@@ -92,11 +92,11 @@ const json = (res: ServerResponse, body: unknown, status = 200): void => {
 };
 
 /**
- * Refuse a start the delivered credential cannot back, rather than letting the
- * company wake and fail every shift until someone reads the ledger — which is
- * exactly how a run limped on through the night on 2026-09-11. Answers 503,
- * because the fix is a delivery away, not a malformed request, and names it.
- * A no-op outside the container: see startCredentialHealth.
+ * Refuse a start no runtime credential can back, rather than letting the company
+ * wake and fail every shift until someone reads the ledger — which is exactly how
+ * a run limped on through the night on 2026-09-11. Answers 503, because the fix is
+ * setting a credential, not a malformed request, and names it. A no-op outside the
+ * container: see runtimeCredentialHealth.
  */
 const refuseIfNoCredential = (res: ServerResponse, slug: string): boolean => {
   const cred = runtimeCredentialHealth(slug);

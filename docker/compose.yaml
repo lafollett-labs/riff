@@ -33,21 +33,13 @@ services:
     # ingress as well as no egress — and Docker publishes nothing, silently.
     # The `ingress` service below carries the console out instead.
     environment:
-      # Two ways in, and they are not equivalent.
-      #
-      # RIFF_CREDENTIALS_CMD (preferred) prints your login's credentials
-      # RECORD, which up.sh pushes onto this container's tmpfs after start.
-      # The record carries the subscription alongside the token, so the
-      # runtime can read what is left of the plan and pace on it.
-      #
-      # CLAUDE_CODE_OAUTH_TOKEN is a bare `claude setup-token` string. It
-      # still works, and the plan stays invisible: rate limits come back
-      # empty, the throttle has nothing to govern on, and every shift is
-      # recorded with `planVisible: no`.
-      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
-      # Set by up.sh when it has a record to push. Makes the entrypoint wait
-      # for it rather than starting companies with no credentials at all.
-      RIFF_WAIT_FOR_CREDENTIALS: ${RIFF_WAIT_FOR_CREDENTIALS:-}
+      # The agents' Claude runtime credential is deliberately NOT here. It lives
+      # encrypted in an install-level vault the keyproxy reads on egress; each
+      # shift carries only a scoped, per-shift token pointed at the keyproxy
+      # (staff.ts sets ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN, and strips any
+      # inherited subscription token from the child env). Set it once in the
+      # console — Riff Settings — never in this env or a dotfile, so no raw token
+      # is readable by a shell in the box or by `docker inspect`. See SECURITY.md.
       # The installation root. Must stay under the mount, or companies are
       # written to the container's own filesystem and lost on restart.
       RIFF_ROOT: /data
@@ -116,9 +108,9 @@ services:
     # company, and survives a restart; resume works across one and the ledger's
     # session ids still resolve. The 2026-09-08 objection to CLAUDE_CONFIG_DIR —
     # that it drags the credentials lookup onto the operator's disk (`Not logged
-    # in`) — is void: the factory runs on CLAUDE_CODE_OAUTH_TOKEN from the env,
-    # there is no credentials file to move (verified in-container, no
-    # .credentials.json). A symlink out of $HOME is still forbidden — bubblewrap
+    # in`) — is void: the shift authenticates through the keyproxy on a scoped
+    # token (ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN), so there is no on-disk
+    # credential to move. A symlink out of $HOME is still forbidden — bubblewrap
     # dies `Can't mount on symlink destination`, which took the shell away from a
     # whole shift. This tmpfs now only backs ephemeral HOME scratch that ignores
     # CLAUDE_CONFIG_DIR (e.g. .claude/bridge-spawn); losing it on restart is

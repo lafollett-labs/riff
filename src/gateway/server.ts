@@ -15,9 +15,9 @@ import { isOperatorError, installRoot } from '../core/config.ts';
 import { takeInstallationLock, type Lock } from '../core/lock.ts';
 import {
   putSecret, listSecretNames, deleteSecret, hasSecret,
-  putInstallSecret, hasInstallSecret,
+  putInstallSecret, hasInstallSecret, deleteInstallSecret,
 } from '../core/secrets.ts';
-import { readSettings, setDefaultRuntimeCredentialType } from '../core/settings.ts';
+import { readSettings, setDefaultRuntimeCredentialType, clearDefaultRuntimeCredential } from '../core/settings.ts';
 import { readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -332,6 +332,15 @@ const server = createServer(async (req, res) => {
         runtimeCredential: readSettings().runtimeCredential ?? null,
         runtimeCredentialSet: hasInstallSecret(RUNTIME_SECRET_NAME),
       });
+    }
+    // Clear the installation default: drop both the type and the vault value, so a
+    // company that was inheriting it now resolves nothing and cannot run until a
+    // default (or its own override) is set. A company with its OWN credential is
+    // unaffected. The two deletes mirror the per-company revert below.
+    if (p === '/api/settings' && method === 'DELETE') {
+      clearDefaultRuntimeCredential();
+      deleteInstallSecret(RUNTIME_SECRET_NAME);
+      return json(res, { ok: true, runtimeCredential: null, runtimeCredentialSet: false });
     }
 
     if (p === '/api/companies' && method === 'POST') {

@@ -76,6 +76,17 @@ describe('the installation default runtime-credential type persists', () => {
     assert.deepEqual(settings.readSettings().runtimeCredential, { type: 'apiKey' });
   });
 
+  test('clearing drops the default type back to empty', () => {
+    settings.setDefaultRuntimeCredentialType('subscription');
+    settings.clearDefaultRuntimeCredential();
+    assert.deepEqual(settings.readSettings(), {});
+  });
+
+  test('clearing when nothing is set is a no-op, not a throw', () => {
+    settings.clearDefaultRuntimeCredential();
+    assert.deepEqual(settings.readSettings(), {});
+  });
+
   test('a malformed settings file reads as empty rather than throwing', () => {
     mkdirSync(process.env['RIFF_ROOT']!, { recursive: true });
     writeFileSync(join(process.env['RIFF_ROOT']!, 'settings.json'), '{ not json');

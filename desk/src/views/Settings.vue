@@ -20,6 +20,8 @@ const type = ref<RuntimeCredentialType>('subscription');
 const value = ref('');
 const saving = ref(false);
 const justSaved = ref(false);
+const confirmRemove = ref(false);
+const removing = ref(false);
 
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
@@ -31,8 +33,9 @@ const loadedType = computed<RuntimeCredentialType | null>(() => loaded.value?.ty
 // token is entered, so a stray click can never store a type with no value.
 const dirty = computed(() => !!value.value);
 const canSave = computed(() => dirty.value && !saving.value);
-// A fresh keystroke means the last "Saved." no longer describes the field.
-watch(value, (v) => { if (v) justSaved.value = false; });
+// A fresh keystroke means the last "Saved." no longer describes the field, and
+// starting to type a replacement is not the moment to be mid-way through a remove.
+watch(value, (v) => { if (v) { justSaved.value = false; confirmRemove.value = false; } });
 
 const label = (t: RuntimeCredentialType): string =>
   t === 'subscription' ? 'Subscription token' : 'API key';
@@ -65,6 +68,23 @@ const save = async (): Promise<void> => {
     err.value = '';
   } catch (e) { err.value = msg(e); }
   finally { saving.value = false; }
+};
+
+// Clearing the default drops both the type and the vault value. It is behind a
+// confirm because every company inheriting it stops until a new default (or its
+// own override) is set — a company with its own credential is unaffected.
+const remove = async (): Promise<void> => {
+  removing.value = true;
+  try {
+    const r = await api.deleteSettings();
+    loaded.value = r.runtimeCredential;
+    valueSet.value = r.runtimeCredentialSet;
+    value.value = '';
+    justSaved.value = false;
+    confirmRemove.value = false;
+    err.value = '';
+  } catch (e) { err.value = msg(e); }
+  finally { removing.value = false; }
 };
 
 onMounted(load);
@@ -122,6 +142,22 @@ onMounted(load);
           <button class="save" :disabled="!canSave" @click="save">
             {{ saving ? 'Saving…' : 'Save' }}
           </button>
+          <button v-if="valueSet && !confirmRemove" class="danger" @click="confirmRemove = true">
+            Remove default
+          </button>
+        </div>
+
+        <div v-if="confirmRemove" class="confirm" role="alertdialog" aria-label="Confirm removing the default">
+          <p>
+            Remove the installation default? Every company inheriting it stops
+            until a new default — or its own credential — is set.
+          </p>
+          <div class="row">
+            <button class="danger" :disabled="removing" @click="remove">
+              {{ removing ? 'Removing…' : 'Remove' }}
+            </button>
+            <button class="ghost" :disabled="removing" @click="confirmRemove = false">Cancel</button>
+          </div>
         </div>
 
         <p v-if="err" class="err" role="alert">{{ err }}</p>
@@ -163,6 +199,17 @@ section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line)
   cursor: pointer; white-space: nowrap; }
 .save:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
 .save:disabled { opacity: .5; cursor: default; }
+.danger, .ghost { font: inherit; font-size: 13px; padding: 8px 16px; border-radius: 5px;
+  border: 1px solid var(--line-2); background: var(--panel); cursor: pointer; white-space: nowrap; }
+.danger { color: var(--alert); }
+.danger:hover:not(:disabled) { border-color: var(--alert); }
+.ghost { color: var(--muted); }
+.ghost:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.danger:disabled, .ghost:disabled { opacity: .5; cursor: default; }
+.confirm { margin-top: 14px; padding: 12px 14px; border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--alert) 40%, transparent);
+  background: color-mix(in srgb, var(--alert) 8%, transparent); max-width: 62ch; }
+.confirm p { font-size: 13px; line-height: 1.55; margin: 0 0 12px; }
 .err { color: var(--alert); font-size: 12px; margin-top: 10px; }
 .ok { color: var(--gold); font-size: 12px; margin-top: 10px; }
 </style>

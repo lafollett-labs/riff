@@ -51,3 +51,13 @@ export const writeSettings = (next: InstallSettings): void => {
 export const setDefaultRuntimeCredentialType = (type: RuntimeCredentialType): void => {
   writeSettings({ ...readSettings(), runtimeCredential: { type } });
 };
+
+/** Drop the default runtime-credential type, preserving any other settings. The
+ *  token VALUE in the install vault is a separate concern the caller deletes; the
+ *  keyproxy then resolves neither a type nor a value and falls closed (502), which
+ *  the gateway preflight turns into "set a runtime credential" before any wake. */
+export const clearDefaultRuntimeCredential = (): void => {
+  const next = { ...readSettings() };
+  delete next.runtimeCredential;
+  writeSettings(next);
+};

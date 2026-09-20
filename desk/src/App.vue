@@ -99,7 +99,13 @@ const loadCompanies = async () => {
  * the old one open would mix one company's events into another's feed.
  */
 const select = (slug: string) => {
-  if (slug === active.value) return;
+  if (slug === active.value) {
+    // Re-picking the company you are already on, from an install view, means
+    // "take me back to it" — the section nav that used to be the way back is
+    // hidden there, so the switcher is the only gesture, and it must not no-op.
+    if (installView.value && slug) view.value = 'envelope';
+    return;
+  }
   active.value = slug;
   setCompany(slug);
   remember(slug);

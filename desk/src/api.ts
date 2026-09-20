@@ -254,6 +254,14 @@ export const api = {
     if (!r.ok) throw new Error(data.error ?? `/api/settings → ${r.status}`);
     return data;
   },
+  /** Clear the installation default — drops both the type and the vault value. */
+  deleteSettings: async (): Promise<{ ok: boolean } & RuntimeCredentialState> => {
+    const r = await fetch('/api/settings', { method: 'DELETE' });
+    const data = await r.json().catch(() => ({})) as
+      { ok: boolean } & RuntimeCredentialState & { error?: string };
+    if (!r.ok) throw new Error(data.error ?? `/api/settings → ${r.status}`);
+    return data;
+  },
 
   state: () => get<State>('/api/state'),
   approvals: () => get<Approval[]>('/api/approvals'),

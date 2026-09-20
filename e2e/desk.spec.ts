@@ -1716,7 +1716,7 @@ test('a secret is set by name, shown by name, and never shown by value', async (
   await expect(page.locator('.item').filter({ hasText: 'OPENROUTER_API_KEY' })).toHaveCount(0);
 });
 
-test('the installation default runtime credential is write-only and needs a token to save', async ({ page }) => {
+test('the installation default runtime credential is write-only, and can be set and removed', async ({ page }) => {
   await page.locator('.switcher').click();
   await page.getByRole('button', { name: /Riff settings/ }).click();
   await expect(page.locator('main h1').first()).toContainText(/Riff Settings/i);
@@ -1748,6 +1748,29 @@ test('the installation default runtime credential is write-only and needs a toke
   // apart on reload, which is why this became a badge).
   await expect(set.locator('.badge.is-set')).toContainText(/Set/);
   await expect(set.locator('.badge.is-set')).toContainText(/API key/);
+
+  // Remove clears both the type and the vault value, behind a confirm — the
+  // badge flips back to not-set. (Left clear so the next test starts unset.)
+  await set.getByRole('button', { name: 'Remove default' }).click();
+  await set.getByRole('button', { name: 'Remove', exact: true }).click();
+  await expect(set.locator('.badge.not-set')).toBeVisible();
+  await expect(set.locator('.badge.is-set')).toHaveCount(0);
+});
+
+test('the switcher returns from an install view to the active company', async ({ page }) => {
+  // Hiding the section nav on install views (so Riff settings does not read as
+  // "inside a company") removed the in-view way back. The switcher is the only
+  // gesture left, so re-picking the company you are already on must leave the
+  // install view — not silently no-op, which stranded a single-company install.
+  await page.locator('.switcher').click();
+  await page.getByRole('button', { name: /Riff settings/ }).click();
+  await expect(page.locator('.navitem')).toHaveCount(0);
+  await expect(page.locator('footer.status')).toHaveCount(0);
+
+  await page.locator('.switcher').click();
+  await page.locator('.menuitem.on').click();
+  await expect(page.locator('.navitem').first()).toBeVisible();
+  await expect(page.locator('footer.status')).toBeVisible();
 });
 
 test('a company runtime-credential override is write-only, and revertible to the default', async ({ page }) => {

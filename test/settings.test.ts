@@ -29,6 +29,10 @@ describe('the synthesized runtime route has the shape each credential type needs
     const h = runtimeRouteHeaders('subscription');
     assert.equal(h['anthropic-beta'], 'oauth-2025-04-20');
     assert.match(h['user-agent']!, /^claude-code\//);
+    // anthropic-version is required on every /v1/messages call; the route injects
+    // it so a subscription shift never depends on the SDK sending it (a missing
+    // version header 400s silently — the deploy-verify curl hit exactly that).
+    assert.ok(h['anthropic-version']);
   });
 
   test('an API key is x-api-key raw with the version header', () => {

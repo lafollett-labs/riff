@@ -279,7 +279,7 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // rejecting them here fails the route at the 400 gate rather than as a 500 when
 // undici refuses the header downstream. CR/LF are the injection bytes; the rest
 // are caught for the same reason the header name is held to a strict token set.
-const CONTROL_CHARS_RE = /[ --]/;
+const CONTROL_CHARS_RE = /[\x00-\x1f\x7f-\x9f]/;
 
 // Headers a static route header may NOT set: connection framing (the proxy
 // reframes its own hop) and `authorization` (the default credential header).
@@ -422,11 +422,15 @@ export const readRuntimeCredential = (raw: unknown): RuntimeCredential | undefin
  * differs by type. A subscription (OAuth) token authenticates as a Bearer and the
  * upstream requires the beta flag + a claude-code user-agent (the pair the Agent
  * SDK adds, and what the usage poller already sends successfully); an API key
- * authenticates as `x-api-key` and wants the version header. Kept here so the
- * keyproxy and its tests build the exact same route.
+ * authenticates as `x-api-key`. Both carry `anthropic-version`, which every
+ * `/v1/messages` request requires: injecting it here rather than trusting the
+ * caller means a subscription shift is not one dropped SDK header from a silent
+ * 400 (a hand-rolled verify curl hit exactly that). Kept here so the keyproxy and
+ * its tests build the exact same route.
  */
 export const RUNTIME_UPSTREAM = 'https://api.anthropic.com';
 export const CLAUDE_CODE_UA = 'claude-code/2.1.270';
+export const ANTHROPIC_VERSION = '2023-06-01';
 /**
  * Where a shift's Agent SDK is pointed (`ANTHROPIC_BASE_URL`): the keyproxy's
  * reserved runtime route. The SDK appends `/v1/messages`; the keyproxy forwards
@@ -436,8 +440,8 @@ export const CLAUDE_CODE_UA = 'claude-code/2.1.270';
 export const RUNTIME_BASE_URL = 'http://keyproxy:8890/svc/_runtime';
 export const runtimeRouteHeaders = (type: RuntimeCredentialType): Record<string, string> =>
   type === 'apiKey'
-    ? { 'anthropic-version': '2023-06-01' }
-    : { 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': CLAUDE_CODE_UA };
+    ? { 'anthropic-version': ANTHROPIC_VERSION }
+    : { 'anthropic-version': ANTHROPIC_VERSION, 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': CLAUDE_CODE_UA };
 export const runtimeRouteShape = (type: RuntimeCredentialType): { header: string; scheme: string } =>
   type === 'apiKey' ? { header: 'x-api-key', scheme: '' } : { header: 'authorization', scheme: 'Bearer' };
 

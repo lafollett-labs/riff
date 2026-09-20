@@ -9,6 +9,7 @@ import Feed from './views/Feed.vue';
 import Commons from './views/Commons.vue';
 import Work from './views/Work.vue';
 import Companies from './views/Companies.vue';
+import Settings from './views/Settings.vue';
 import Inbox from './views/Inbox.vue';
 import Overview from './views/Overview.vue';
 import Secrets from './views/Secrets.vue';
@@ -100,7 +101,7 @@ const select = (slug: string) => {
     // tell us would be lost. Refresh the list here instead of relying on an
     // emit from a component that is about to disappear.
     void fetchList();
-    if (view.value === 'companies') view.value = 'envelope';
+    if (view.value === 'companies' || view.value === 'settings') view.value = 'envelope';
   }
 };
 
@@ -216,6 +217,9 @@ const util = computed(() => {
           <button class="menuitem manage" @click="view = 'companies'; picking = false">
             Manage companies…
           </button>
+          <button class="menuitem manage" @click="view = 'settings'; picking = false">
+            Riff settings…
+          </button>
         </div>
       </div>
       <button v-for="v in VIEWS" :key="v.id" class="navitem"
@@ -241,6 +245,7 @@ const util = computed(() => {
     <main class="main">
       <Companies v-if="view === 'companies'" :list="companies" :active="active"
                  @switch="select" @changed="loadCompanies" />
+      <Settings v-else-if="view === 'settings'" />
       <div v-else-if="err" class="err">Can't reach the company — {{ err }}</div>
       <component v-else-if="state" :is="current" :state="state" :events="events" @changed="refresh" />
         <!-- A second machine's first act is usually importing, not founding.

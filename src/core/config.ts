@@ -384,6 +384,38 @@ export const validateServiceRoute = (
   return { ok: true, route: out };
 };
 
+/**
+ * How a company (or the installation, as a default) authenticates the agents'
+ * OWN Claude inference. `subscription` is a long-lived setup-token injected as
+ * `Authorization: Bearer`; `apiKey` is an Anthropic API key injected as
+ * `x-api-key`. The keyproxy synthesises the upstream shape from this; the token
+ * VALUE never lives here — it is in the vault under `RUNTIME_SECRET_NAME`.
+ */
+export type RuntimeCredentialType = 'subscription' | 'apiKey';
+export type RuntimeCredential = { type: RuntimeCredentialType };
+
+/**
+ * The vault name the runtime token is stored under — per company and, as the
+ * fallback, at the install level. It is Riff's, not a normal secret: the generic
+ * `/api/secrets` endpoints refuse it and never list it, so it cannot be read,
+ * shadowed or deleted as an ordinary product secret.
+ */
+export const RUNTIME_SECRET_NAME = 'RIFF_RUNTIME_TOKEN';
+/**
+ * The keyproxy route the agents' SDK reaches (`/svc/_runtime`). The leading
+ * underscore is the whole collision defence: `SERVICE_NAME_RE` requires a
+ * leading alphanumeric, so no company can ever declare a service of this name.
+ */
+export const RUNTIME_SERVICE_NAME = '_runtime';
+
+/** Read a stored runtime-credential setting, or undefined if unset/malformed —
+ *  which means "fall back to the install-level default". */
+export const readRuntimeCredential = (raw: unknown): RuntimeCredential | undefined => {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const type = (raw as { type?: unknown }).type;
+  return type === 'apiKey' || type === 'subscription' ? { type } : undefined;
+};
+
 export type RiffConfig = {
   version: 1;
   /**
@@ -449,6 +481,12 @@ export type RiffConfig = {
    * company that was running, with the console cheerfully reporting idle.
    */
   running?: boolean;
+  /**
+   * This company's OWN Claude runtime credential, overriding the install-level
+   * default. Absent means "use the installation default". The TYPE is here; the
+   * token value is in the vault under RUNTIME_SECRET_NAME, never in config.
+   */
+  runtimeCredential?: RuntimeCredential;
 };
 
 /** Best guess at who is running this, for the first-run prompt to confirm. */
@@ -707,6 +745,11 @@ export const resolveConfig = (cwd = process.cwd(), slug?: string): RiffConfig =>
     ? merged.board
     : [{ id: slugId(chairName), name: chairName, role: 'Chairman' }];
 
+  // Absent when unset, so "is this company on its own credential?" stays
+  // answerable — the keyproxy reads this to decide whether to fall back to the
+  // install-level default.
+  const runtimeCredential = readRuntimeCredential(stored.runtimeCredential);
+
   return {
     version: 1,
     home: base,
@@ -727,6 +770,7 @@ export const resolveConfig = (cwd = process.cwd(), slug?: string): RiffConfig =>
     // Companies founded before policy existed have none written down, and
     // read back at the defaults rather than at zero.
     policy: readPolicy(stored.policy),
+    ...(runtimeCredential ? { runtimeCredential } : {}),
   };
 };
 

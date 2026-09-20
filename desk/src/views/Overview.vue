@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
-import { api, type Event, type State } from '../api';
+import { ref, computed, watch, nextTick } from 'vue';
+import { api, type Event, type State, type RuntimeCredentialType } from '../api';
 import { render } from '../markdown';
 
 const props = defineProps<{ state: State; events: Event[] }>();
@@ -251,6 +251,84 @@ const facts = computed(() => [
 ]);
 
 const working = computed(() => props.state.awake.length);
+
+// ------------------------------------------------------ runtime credential
+/**
+ * Which credential this company's OWN Claude inference runs on. `runtimeCredential`
+ * is its override (null means it inherits the installation default set in Riff
+ * Settings); `runtimeCredentialSet` is whether a token value is stored for it. The
+ * value is write-only — the panel only ever knows that one is set, never what it is.
+ */
+const rcType = ref<RuntimeCredentialType>(props.state.runtimeCredential?.type ?? 'subscription');
+const rcValue = ref('');
+const rcSaving = ref(false);
+const rcJustSaved = ref(false);
+const reverting = ref(false);
+const rcErr = ref('');
+
+const rcOwn = computed(() =>
+  props.state.runtimeCredential !== null || props.state.runtimeCredentialSet);
+const rcLoadedType = computed<RuntimeCredentialType | null>(() =>
+  props.state.runtimeCredential?.type ?? null);
+// A save always carries a token: the stored value is provider-specific, so the
+// type is picked alongside the value it applies to, never on its own. Client half
+// of the server's type+value atomicity — Save stays inert until a token is
+// entered, so a stray click can't flip an inheriting company onto a valueless
+// override, nor re-type an existing one to a shape its stored token doesn't match.
+const rcDirty = computed(() => !!rcValue.value);
+const rcCanSave = computed(() => rcDirty.value && !rcSaving.value);
+const rcLabel = (t: RuntimeCredentialType): string =>
+  t === 'subscription' ? 'Subscription token' : 'API key';
+
+// The 20s poll replaces the whole state; sync the picker from it unless the
+// operator is mid-edit, the same protection the dials keep. Switching company
+// resets the fields so an unsaved value never retargets the new company.
+watch(() => props.state.runtimeCredential, () => {
+  if (!rcDirty.value) rcType.value = props.state.runtimeCredential?.type ?? 'subscription';
+}, { deep: true });
+// A fresh keystroke means the last "Saved." no longer describes the field.
+watch(rcValue, (v) => { if (v) rcJustSaved.value = false; });
+watch(() => props.state.slug, () => {
+  rcType.value = props.state.runtimeCredential?.type ?? 'subscription';
+  rcValue.value = ''; rcErr.value = ''; rcJustSaved.value = false;
+});
+
+const saveRc = async () => {
+  if (!rcCanSave.value) return;
+  rcSaving.value = true;
+  rcJustSaved.value = false;
+  try {
+    // rcDirty guarantees a value; type and value are sent together.
+    await api.putRuntimeCredential({ type: rcType.value, value: rcValue.value });
+    rcValue.value = '';
+    rcJustSaved.value = true;
+    rcErr.value = '';
+    emit('changed');
+  } catch (e) {
+    rcErr.value = e instanceof Error ? e.message : 'Could not save.';
+  } finally {
+    rcSaving.value = false;
+  }
+};
+
+const useDefault = async () => {
+  reverting.value = true;
+  try {
+    await api.deleteRuntimeCredential();
+    rcValue.value = '';
+    rcJustSaved.value = false;
+    rcErr.value = '';
+    emit('changed');
+    // The revert button removes itself (v-if="rcOwn" goes false), so move focus to
+    // a control that survives rather than dropping it to <body>.
+    await nextTick();
+    document.getElementById('co-rc-type')?.focus();
+  } catch (e) {
+    rcErr.value = e instanceof Error ? e.message : 'Could not revert.';
+  } finally {
+    reverting.value = false;
+  }
+};
 </script>
 
 <template>
@@ -426,6 +504,51 @@ const working = computed(() => props.state.awake.length);
       </template>
     </section>
 
+    <section class="rc">
+      <h2>Runtime credential</h2>
+      <p class="muted rc-note">
+        Which credential this company's own Claude inference runs on. Leave it on
+        the installation default, or override it here. The token value is
+        write-only — set once, never shown again.
+      </p>
+
+      <p class="rc-status faint">
+        <template v-if="rcOwn">
+          Using its own credential<template v-if="state.runtimeCredential"> —
+          <span class="mono">{{ rcLabel(state.runtimeCredential.type) }}</span></template><template
+            v-if="!state.runtimeCredentialSet"> (type set, but no token value stored yet)</template>.
+        </template>
+        <template v-else>
+          Inheriting the installation default.
+        </template>
+      </p>
+
+      <label class="rc-l" for="co-rc-type">Credential type</label>
+      <select id="co-rc-type" class="rc-fld type" v-model="rcType">
+        <option value="subscription">Subscription token</option>
+        <option value="apiKey">API key</option>
+      </select>
+
+      <label class="rc-l" for="co-rc-value">Token value</label>
+      <input id="co-rc-value" class="rc-fld val" v-model="rcValue" type="password"
+             placeholder="Paste the token — write-only, never shown again"
+             spellcheck="false" autocapitalize="off" autocomplete="new-password"
+             data-1p-ignore data-lpignore="true" @keydown.enter="saveRc" />
+      <p class="hint faint">Pick the type, then paste its token — saved together. Use the installation default to clear an override.</p>
+
+      <div class="row">
+        <button class="go" :disabled="!rcCanSave" @click="saveRc">
+          {{ rcSaving ? 'Saving…' : 'Save' }}
+        </button>
+        <button v-if="rcOwn" class="ghost" :disabled="reverting" @click="useDefault">
+          {{ reverting ? 'Reverting…' : 'Use installation default' }}
+        </button>
+      </div>
+
+      <p v-if="rcErr" class="err" role="alert">{{ rcErr }}</p>
+      <p v-else-if="rcJustSaved" class="ok" role="status">Saved.</p>
+    </section>
+
     <section class="who">
       <h2>Who answers for it</h2>
       <p v-for="b in state.board" :key="b.id" class="seat">
@@ -517,6 +640,21 @@ textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .dial { grid-template-columns: 1fr; gap: 3px; padding: 8px 0; }
   .dial input { width: 100%; max-width: 160px; }
 }
+
+.rc { border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  padding: 16px 18px 18px; margin-bottom: 26px; }
+.rc h2 { margin-bottom: 8px; }
+.rc-note { font-size: 13px; line-height: 1.6; margin-bottom: 12px; max-width: 62ch; }
+.rc-status { font-size: 12.5px; line-height: 1.5; margin-bottom: 16px; }
+.rc-l { display: block; font-size: 12px; color: var(--muted); margin: 0 0 5px; }
+.rc-fld { background: #15100d; color: var(--ink); border: 1px solid var(--line-2);
+  border-radius: 5px; padding: 8px 10px; font: inherit; font-size: 13px; }
+.rc-fld.type { display: block; margin-bottom: 16px; min-width: 220px; }
+.rc-fld.val { display: block; width: 100%; max-width: 460px; margin-bottom: 8px;
+  font-family: var(--mono, ui-monospace, monospace); }
+.rc-fld:focus { outline: none; border-color: var(--accent); }
+.hint { font-size: 11.5px; line-height: 1.5; margin: 0 0 12px; }
+.ok { color: var(--gold); font-size: 13px; margin-top: 6px; }
 
 .seat { font-size: 14px; margin-top: 7px; }
 .seat .nm { color: var(--ink); }

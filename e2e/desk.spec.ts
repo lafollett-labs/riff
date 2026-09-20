@@ -1716,6 +1716,57 @@ test('a secret is set by name, shown by name, and never shown by value', async (
   await expect(page.locator('.item').filter({ hasText: 'OPENROUTER_API_KEY' })).toHaveCount(0);
 });
 
+test('the installation default runtime credential is write-only and needs a token to save', async ({ page }) => {
+  await page.locator('.switcher').click();
+  await page.getByRole('button', { name: /Riff settings/ }).click();
+  await expect(page.locator('main h1').first()).toContainText(/Riff Settings/i);
+
+  const set = page.locator('.set');
+  // A type alone is not a credential: Save stays inert until a token is entered,
+  // so a stray click can never store a valueless default.
+  await expect(set.getByRole('button', { name: 'Save' })).toBeDisabled();
+  await page.locator('#rc-type').selectOption('apiKey');
+  await expect(set.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+  await page.locator('#rc-value').fill('sk-ant-super-secret-default');
+  await set.getByRole('button', { name: 'Save' }).click();
+
+  // Write-only: the value is nowhere on the page and the field is cleared, not
+  // masked — only the type and "a value is set" come back.
+  await expect(page.locator('main')).not.toContainText('sk-ant-super-secret-default');
+  await expect(page.locator('#rc-value')).toHaveValue('');
+  await expect(set.locator('.status')).toContainText(/A default token is set/);
+  await expect(set.locator('.status')).toContainText(/API key/);
+});
+
+test('a company runtime-credential override is write-only, and revertible to the default', async ({ page }) => {
+  // Overview's own h1 is the company name, so reach it by the rail button and its
+  // section heading rather than the generic `go` helper.
+  await page.getByRole('button', { name: /^Overview/ }).click();
+  const rc = page.locator('.rc');
+  await expect(rc.locator('h2')).toHaveText('Runtime credential');
+
+  // A pristine, inheriting company: Save is disabled (no token), status says so.
+  await expect(rc.locator('.rc-status')).toContainText(/Inheriting the installation default/);
+  await expect(rc.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+  // Override it — a type picked alongside its token.
+  await page.locator('#co-rc-type').selectOption('apiKey');
+  await page.locator('#co-rc-value').fill('sk-ant-company-secret-value');
+  await rc.getByRole('button', { name: 'Save' }).click();
+
+  // Write-only: token gone from the page, field cleared; status flips to its own.
+  await expect(page.locator('main')).not.toContainText('sk-ant-company-secret-value');
+  await expect(page.locator('#co-rc-value')).toHaveValue('');
+  await expect(rc.locator('.rc-status')).toContainText(/Using its own credential/);
+  await expect(rc.locator('.rc-status')).toContainText(/API key/);
+
+  // Revert to the installation default, and the panel returns to inheriting.
+  await rc.getByRole('button', { name: 'Use installation default' }).click();
+  await expect(rc.locator('.rc-status')).toContainText(/Inheriting the installation default/);
+  await expect(rc.getByRole('button', { name: 'Save' })).toBeDisabled();
+});
+
 test('a service route is set by name, shows its upstream, and warns when its secret is unset', async ({ page }) => {
   await go(page, 'Services');
 

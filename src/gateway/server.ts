@@ -2,6 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { systemClock } from '../core/clock.ts';
 import {
   guessKeeperName, listCompanies, migrateLegacyLayout, resolveSlug, validateServiceRoute,
+  readRuntimeCredential, RUNTIME_SECRET_NAME,
 } from '../core/config.ts';
 import { Registry, type Company } from '../company/registry.ts';
 import { startCredentialHealth } from '../runtime/credential.ts';
@@ -12,7 +13,11 @@ import { vitals } from '../analytics/vitals.ts';
 import { exportCompany, exportName, importCompany } from '../company/transfer.ts';
 import { isOperatorError, installRoot } from '../core/config.ts';
 import { takeInstallationLock, type Lock } from '../core/lock.ts';
-import { putSecret, listSecretNames, deleteSecret } from '../core/secrets.ts';
+import {
+  putSecret, listSecretNames, deleteSecret, hasSecret,
+  putInstallSecret, hasInstallSecret,
+} from '../core/secrets.ts';
+import { readSettings, setDefaultRuntimeCredentialType } from '../core/settings.ts';
 import { readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -280,6 +285,52 @@ const server = createServer(async (req, res) => {
           utilization: w.utilization ?? null,
           resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null,
         })),
+      });
+    }
+
+    // Installation-level settings — the Riff-level surface, not any one company.
+    // Today just the DEFAULT runtime credential: the type in settings.json, the
+    // token value in the install vault. GET reports the type and whether a value
+    // is set; it never returns the value.
+    if (p === '/api/settings' && method === 'GET') {
+      return json(res, {
+        runtimeCredential: readSettings().runtimeCredential ?? null,
+        runtimeCredentialSet: hasInstallSecret(RUNTIME_SECRET_NAME),
+      });
+    }
+    if (p === '/api/settings' && method === 'PUT') {
+      const b = await readBody(req);
+      const rc = readRuntimeCredential(b['runtimeCredential']);
+      if (b['runtimeCredential'] !== undefined && !rc) {
+        return json(res, { error: 'runtimeCredential.type must be "subscription" or "apiKey"' }, 400);
+      }
+      // Strip ONLY surrounding CR/LF from the token (the paste artifact that 401s
+      // silently), never inner bytes. Stored in the install vault, never echoed.
+      const value = typeof b['value'] === 'string' ? b['value'].replace(/^[\r\n]+|[\r\n]+$/g, '') : '';
+      // A token and its type travel together: the keyproxy injects a subscription
+      // token as Bearer and an API key as x-api-key, so a value stored with no
+      // resolvable type would be sent in the wrong shape and 401 silently.
+      const effectiveType = rc?.type ?? readSettings().runtimeCredential?.type;
+      if (value && !effectiveType) {
+        return json(res, { error: 'set a credential type before or with the token value' }, 400);
+      }
+      // The stored token is provider-specific (a subscription Bearer vs an API
+      // x-api-key), so setting or changing the type without a fresh value would
+      // leave the wrong token under the new shape. Type and value move together;
+      // a value alone (no type) is a rotation that keeps the existing type.
+      if (rc && !value) {
+        return json(res, { error: 'provide the token value along with the credential type' }, 400);
+      }
+      try {
+        if (rc) setDefaultRuntimeCredentialType(rc.type);
+        if (value) putInstallSecret(RUNTIME_SECRET_NAME, value);
+      } catch (e) {
+        return json(res, { error: e instanceof Error ? e.message : String(e) }, 400);
+      }
+      return json(res, {
+        ok: true,
+        runtimeCredential: readSettings().runtimeCredential ?? null,
+        runtimeCredentialSet: hasInstallSecret(RUNTIME_SECRET_NAME),
       });
     }
 
@@ -575,6 +626,10 @@ const server = createServer(async (req, res) => {
           // an operator could turn a company's releases on and have no way to
           // confirm it had happened.
           release: cfg.release,
+          // The company's own runtime credential, if any: the TYPE (null means it
+          // inherits the install default) and whether a token value is stored.
+          runtimeCredential: cfg.runtimeCredential ?? null,
+          runtimeCredentialSet: hasSecret(co.slug, RUNTIME_SECRET_NAME),
           agents,
           headcount: agents.filter((a) => a.tier !== 'board').length,
           pending: ledger.listApprovals('pending').length,
@@ -899,7 +954,10 @@ const server = createServer(async (req, res) => {
       // sibling that reads one back. GET returns names, and only names — the
       // one thing a management surface may say about a secret it holds.
       if (p === '/api/secrets' && method === 'GET') {
-        return json(res, { names: listSecretNames(co.slug) });
+        // The runtime token is Riff's, not a product secret: it never appears in
+        // this list, and PUT/DELETE below refuse it. It is managed only through
+        // /api/runtime-credential (per company) and /api/settings (the default).
+        return json(res, { names: listSecretNames(co.slug).filter((n) => n !== RUNTIME_SECRET_NAME) });
       }
       if (p === '/api/secrets' && method === 'PUT') {
         const b = await readBody(req);
@@ -910,6 +968,9 @@ const server = createServer(async (req, res) => {
         // password, say) may legitimately carry edge spaces we must not corrupt.
         const name = typeof b['name'] === 'string' ? b['name'].trim() : '';
         const value = typeof b['value'] === 'string' ? b['value'].replace(/^[\r\n]+|[\r\n]+$/g, '') : '';
+        if (name === RUNTIME_SECRET_NAME) {
+          return json(res, { error: `${RUNTIME_SECRET_NAME} is reserved — set it under Runtime credential, not as a secret` }, 400);
+        }
         try {
           putSecret(co.slug, name, value);
         } catch (e) {
@@ -921,7 +982,55 @@ const server = createServer(async (req, res) => {
       }
       if (p === '/api/secrets' && method === 'DELETE') {
         const name = url.searchParams.get('name')?.trim() ?? '';
+        if (name === RUNTIME_SECRET_NAME) {
+          return json(res, { error: `${RUNTIME_SECRET_NAME} is reserved — clear it under Runtime credential` }, 400);
+        }
         return json(res, { deleted: deleteSecret(co.slug, name) });
+      }
+
+      // A company's OWN runtime credential, overriding the install default. Sets
+      // the TYPE (config) and, if given, the token VALUE (vault, reserved name) —
+      // the value never crosses the generic secrets endpoints. DELETE reverts to
+      // the install default and drops the value.
+      if (p === '/api/runtime-credential' && method === 'PUT') {
+        const b = await readBody(req);
+        const rc = readRuntimeCredential(b);
+        if (b['type'] !== undefined && !rc) {
+          return json(res, { error: 'type must be "subscription" or "apiKey"' }, 400);
+        }
+        const value = typeof b['value'] === 'string' ? b['value'].replace(/^[\r\n]+|[\r\n]+$/g, '') : '';
+        // Type and token travel together (see /api/settings) — a value stored with
+        // no resolvable type would be injected in the wrong shape.
+        const effectiveType = rc?.type ?? cfg.runtimeCredential?.type;
+        if (value && !effectiveType) {
+          return json(res, { error: 'set a credential type before or with the token value' }, 400);
+        }
+        // Type + value move together (see /api/settings): a type change without a
+        // fresh token would run the company on a mismatched shape. A value alone
+        // rotates the token under the existing type; use DELETE to revert.
+        if (rc && !value) {
+          return json(res, { error: 'provide the token value along with the credential type' }, 400);
+        }
+        try {
+          if (rc) {
+            const r = await registry.update(co.slug, { runtimeCredential: rc });
+            if (!r.ok) return json(res, { error: r.reason }, 409);
+          }
+          if (value) putSecret(co.slug, RUNTIME_SECRET_NAME, value);
+        } catch (e) {
+          return json(res, { error: e instanceof Error ? e.message : String(e) }, 400);
+        }
+        return json(res, {
+          ok: true,
+          runtimeCredential: rc ?? cfg.runtimeCredential ?? null,
+          runtimeCredentialSet: hasSecret(co.slug, RUNTIME_SECRET_NAME),
+        });
+      }
+      if (p === '/api/runtime-credential' && method === 'DELETE') {
+        const r = await registry.update(co.slug, { runtimeCredential: null });
+        if (!r.ok) return json(res, { error: r.reason }, 409);
+        deleteSecret(co.slug, RUNTIME_SECRET_NAME);
+        return json(res, { ok: true, runtimeCredential: null, runtimeCredentialSet: false });
       }
 
       // A company's service routes: which named service the injecting proxy

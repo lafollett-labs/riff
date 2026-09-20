@@ -8,7 +8,7 @@ import { found } from './genesis.ts';
 import {
   archiveDir, companyHome, DEFAULT_POLICY, listCompanies, persisted, readPolicy,
   resolveConfig, scaffoldConfig, setRunningFlag, slugId,
-  type CompanyPolicy, type CompanyRef, type RiffConfig, type ServiceRoute,
+  type CompanyPolicy, type CompanyRef, type RiffConfig, type RuntimeCredential, type ServiceRoute,
 } from '../core/config.ts';
 import type { Clock } from '../core/clock.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
@@ -333,7 +333,13 @@ export class Registry {
              // config it reads fresh below. A caller that instead computed the
              // full map from its own in-memory snapshot would drop a concurrent
              // write — two sets racing, the second overwriting the first.
-             setService?: { name: string; route: ServiceRoute }; deleteService?: string },
+             setService?: { name: string; route: ServiceRoute }; deleteService?: string;
+             // The company's own runtime-credential TYPE. An object sets it, null
+             // clears it back to the install default, undefined leaves it. Like a
+             // service route, NOT structural: the keyproxy reads it fresh per
+             // request, so a change is live without a rebuild that would abort a
+             // mid-write shift. The token VALUE is written to the vault, not here.
+             runtimeCredential?: RuntimeCredential | null },
   ): Promise<{ ok: true; slug: string } | { ok: false; reason: string }> {
     if (!this.has(slug)) return { ok: false, reason: `no company '${slug}'` };
 
@@ -386,7 +392,13 @@ export class Registry {
       // at construction; routes are normally set while a company is stopped.
       ...((patch.setService || patch.deleteService)
         ? { services: mergeServices(cfg.services, patch.setService, patch.deleteService) } : {}),
+      // object = set; null/undefined = don't spread. The null case is a CLEAR,
+      // handled by the delete below — ...cfg carried the old value in, and
+      // exactOptionalPropertyTypes forbids assigning undefined to remove it.
+      ...(patch.runtimeCredential ? { runtimeCredential: patch.runtimeCredential } : {}),
     };
+    // undefined = leave as-is; null = revert to the install default.
+    if (patch.runtimeCredential === null) delete next.runtimeCredential;
     // Where it lives is the directory's job to say, not the file's.
     atomicWriteFileSync(path, JSON.stringify(persisted(next), null, 2) + '\n');
     if (structural) {

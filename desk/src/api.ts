@@ -3,9 +3,10 @@
 // and ships a module that dies in the browser. Vite says so in a warning and
 // exits 0 anyway, so scripts/check-sfc-types.mjs enforces it instead.
 import type { Vitals, Trend } from '../../src/analytics/types.ts';
-import type { CompanyRef as ConfigCompanyRef, CompanyPolicy, ServiceRoute } from '../../src/core/config.ts';
+import type { CompanyRef as ConfigCompanyRef, CompanyPolicy, RuntimeCredential, RuntimeCredentialType, ServiceRoute } from '../../src/core/config.ts';
 import type { Turn, SessionSummary } from '../../src/ledger/transcript.ts';
 export type { ServiceRoute };
+export type { RuntimeCredential, RuntimeCredentialType };
 export type { Turn, SessionSummary };
 export type { Vitals, Trend };
 
@@ -75,10 +76,26 @@ export type Event = {
 // the server's own declaration; SFC checking is the other half of the pair.
 export type { CompanyPolicy };
 
+/**
+ * The runtime-credential surface, shared by the install default (unscoped
+ * /api/settings) and a company's own override (/api/runtime-credential): the
+ * TYPE, and whether a token VALUE is stored. The value is write-only and never
+ * read back, exactly like a secret, so it is never in this shape.
+ */
+export type RuntimeCredentialState = {
+  runtimeCredential: RuntimeCredential | null;
+  runtimeCredentialSet: boolean;
+};
+
 export type State = {
   slug: string;
   company: { name: string; business: string };
   policy: CompanyPolicy;
+  /** This company's OWN runtime credential, or null when it inherits the
+   *  installation default; `runtimeCredentialSet` is whether a token value is
+   *  stored for it. The value is write-only and never read back. */
+  runtimeCredential: RuntimeCredential | null;
+  runtimeCredentialSet: boolean;
   board: Array<{ id: string; name: string; role: string }>;
   ceo: { id: string; name: string };
   agents: Agent[];
@@ -215,6 +232,28 @@ export const api = {
     if (!r.ok) throw new Error(data.error ?? `import → ${r.status}`);
     return data;
   },
+  /**
+   * The installation's own settings, not any one company — no slug in the query,
+   * like companies(). Today just the DEFAULT runtime credential every company
+   * inherits until it overrides it. The token value is write-only: this reports
+   * the type and whether a value is set, never the value.
+   */
+  settings: async (): Promise<RuntimeCredentialState> => {
+    const r = await fetch('/api/settings');
+    if (!r.ok) throw new Error(`/api/settings → ${r.status}`);
+    return r.json() as Promise<RuntimeCredentialState>;
+  },
+  putSettings: async (body: { runtimeCredential?: RuntimeCredential; value?: string }):
+    Promise<{ ok: boolean } & RuntimeCredentialState> => {
+    const r = await fetch('/api/settings', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json().catch(() => ({})) as
+      { ok: boolean } & RuntimeCredentialState & { error?: string };
+    if (!r.ok) throw new Error(data.error ?? `/api/settings → ${r.status}`);
+    return data;
+  },
 
   state: () => get<State>('/api/state'),
   approvals: () => get<Approval[]>('/api/approvals'),
@@ -241,6 +280,16 @@ export const api = {
     send<{ ok: boolean; name: string }>('/api/secrets', 'PUT', { name, value }),
   deleteSecret: (name: string) =>
     send<{ deleted: boolean }>(`/api/secrets?name=${encodeURIComponent(name)}`, 'DELETE'),
+  /**
+   * A company's OWN runtime credential, overriding the install default. Set the
+   * type and/or a new token value; the value is write-only, like a secret. DELETE
+   * reverts the company to the install default and drops its stored value. Every
+   * call carries the company on screen, so it is always set for exactly it.
+   */
+  putRuntimeCredential: (body: { type?: RuntimeCredentialType; value?: string }) =>
+    send<{ ok: boolean } & RuntimeCredentialState>('/api/runtime-credential', 'PUT', body),
+  deleteRuntimeCredential: () =>
+    send<{ ok: boolean } & RuntimeCredentialState>('/api/runtime-credential', 'DELETE'),
   /**
    * A company's service routes — where the injecting proxy forwards a named
    * service and which vault secret it injects. These carry no value (a secret

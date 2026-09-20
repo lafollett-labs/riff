@@ -112,21 +112,23 @@ type VaultFile = {
   secrets: Record<string, Sealed>;
 };
 
-const readVault = (slug: string): VaultFile | null => {
-  const path = vaultPath(slug);
+// The vault helpers key off a path rather than a slug so the install-level vault
+// (a single fixed file, below) shares the exact same crypto and master key as
+// every per-company vault — one code path, no second implementation to drift.
+const readVaultAt = (path: string): VaultFile | null => {
   if (!existsSync(path)) return null;
   return JSON.parse(readFileSync(path, 'utf8')) as VaultFile;
 };
 
-const openVault = (master: Buffer, slug: string): { file: VaultFile; dek: Buffer } => {
-  const existing = readVault(slug);
+const openVaultAt = (master: Buffer, path: string): { file: VaultFile; dek: Buffer } => {
+  const existing = readVaultAt(path);
   if (existing) return { file: existing, dek: unseal(master, existing.dek) };
   const dek = randomBytes(KEY_BYTES);
   return { file: { v: 1, dek: seal(master, dek), secrets: {} }, dek };
 };
 
-const writeVault = (slug: string, file: VaultFile): void =>
-  writeSecret600(vaultPath(slug), JSON.stringify(file, null, 2) + '\n');
+const writeVaultAt = (path: string, file: VaultFile): void =>
+  writeSecret600(path, JSON.stringify(file, null, 2) + '\n');
 
 // A secret is delivered to the product as an environment variable, so its name
 // has to be a legal one: letters, digits and underscore, not leading with a
@@ -141,13 +143,9 @@ const checkName = (name: string): void => {
   }
 };
 
-/**
- * Store or replace one secret. Write-only by design: there is no companion that
- * returns a stored value to an API caller — see getSecret, which the injector
- * uses and the gateway does not expose.
- */
-export const putSecret = (companySlug: string, name: string, value: string): void => {
-  const slug = slugId(companySlug);
+// The write and read cores, keyed by vault path. Name/value validation lives
+// here so the per-company and install-level writers cannot diverge on it.
+const putSecretAt = (path: string, name: string, value: string): void => {
   checkName(name);
   // An empty secret reads as "set" to anything listing names and as "unset" to
   // anything resolving it — the two disagree, so refuse the blank outright.
@@ -155,15 +153,47 @@ export const putSecret = (companySlug: string, name: string, value: string): voi
     throw operatorError('refusing to store an empty secret; delete the name instead of storing a blank that reads as set');
   }
   const master = loadOrCreateMasterKey();
-  const { file, dek } = openVault(master, slug);
+  const { file, dek } = openVaultAt(master, path);
   file.secrets[name] = seal(dek, Buffer.from(value, 'utf8'));
-  writeVault(slug, file);
+  writeVaultAt(path, file);
 };
+
+const getSecretAt = (path: string, name: string): string | null => {
+  const file = readVaultAt(path);
+  if (!file) return null;
+  const sealed = file.secrets[name];
+  if (!sealed) return null;
+  const dek = unseal(loadOrCreateMasterKey(), file.dek);
+  return unseal(dek, sealed).toString('utf8');
+};
+
+/** Presence of a name without decrypting it — the "is it set?" the gateway
+ *  answers for a reserved name it must never list or return. */
+const hasSecretAt = (path: string, name: string): boolean => {
+  const file = readVaultAt(path);
+  return file ? Object.hasOwn(file.secrets, name) : false;
+};
+
+const deleteSecretAt = (path: string, name: string): boolean => {
+  const file = readVaultAt(path);
+  if (!file || !(name in file.secrets)) return false;
+  delete file.secrets[name];
+  writeVaultAt(path, file);
+  return true;
+};
+
+/**
+ * Store or replace one secret. Write-only by design: there is no companion that
+ * returns a stored value to an API caller — see getSecret, which the injector
+ * uses and the gateway does not expose.
+ */
+export const putSecret = (companySlug: string, name: string, value: string): void =>
+  putSecretAt(vaultPath(slugId(companySlug)), name, value);
 
 /** The names a company has, sorted. NEVER the values — this is what the API
  *  may return, and the reason values and names are separable at all. */
 export const listSecretNames = (companySlug: string): string[] => {
-  const file = readVault(slugId(companySlug));
+  const file = readVaultAt(vaultPath(slugId(companySlug)));
   return file ? Object.keys(file.secrets).sort() : [];
 };
 
@@ -172,25 +202,17 @@ export const listSecretNames = (companySlug: string): string[] => {
  * sidecar; the gateway must never return this to a client. Null means the
  * company has no such secret, distinct from a decrypt failure, which throws.
  */
-export const getSecret = (companySlug: string, name: string): string | null => {
-  const slug = slugId(companySlug);
-  const file = readVault(slug);
-  if (!file) return null;
-  const sealed = file.secrets[name];
-  if (!sealed) return null;
-  const dek = unseal(loadOrCreateMasterKey(), file.dek);
-  return unseal(dek, sealed).toString('utf8');
-};
+export const getSecret = (companySlug: string, name: string): string | null =>
+  getSecretAt(vaultPath(slugId(companySlug)), name);
+
+/** Whether a company has a secret of this name, without reading its value —
+ *  lets the gateway report a reserved credential as set without listing it. */
+export const hasSecret = (companySlug: string, name: string): boolean =>
+  hasSecretAt(vaultPath(slugId(companySlug)), name);
 
 /** Remove one secret. Returns whether it was there to remove. */
-export const deleteSecret = (companySlug: string, name: string): boolean => {
-  const slug = slugId(companySlug);
-  const file = readVault(slug);
-  if (!file || !(name in file.secrets)) return false;
-  delete file.secrets[name];
-  writeVault(slug, file);
-  return true;
-};
+export const deleteSecret = (companySlug: string, name: string): boolean =>
+  deleteSecretAt(vaultPath(slugId(companySlug)), name);
 
 /**
  * Drop a company's whole vault. Called when a company is archived so its
@@ -200,3 +222,29 @@ export const dropVault = (companySlug: string): void => {
   const path = vaultPath(slugId(companySlug));
   if (existsSync(path)) rmSync(path);
 };
+
+/**
+ * The installation-level vault: one fixed file for installation-wide secrets —
+ * today just the DEFAULT Claude runtime token, the fallback a company uses when
+ * it has not set its own. Sealed under the same master key as every company
+ * vault. A fixed path rather than a sentinel slug, because slugId would normalise
+ * a sentinel and could collide with a real company a user later founds.
+ *
+ * Read-only by construction on the keyproxy: getInstallSecret / hasInstallSecret
+ * only read, and reach loadOrCreateMasterKey only once the vault file already
+ * exists — which means the gateway (the only writer, on the read-write mount)
+ * already created the master key beside it. The read-only keyproxy never creates.
+ */
+export const installVaultPath = (): string => join(secretsDir(), 'install.vault.json');
+
+export const putInstallSecret = (name: string, value: string): void =>
+  putSecretAt(installVaultPath(), name, value);
+
+export const getInstallSecret = (name: string): string | null =>
+  getSecretAt(installVaultPath(), name);
+
+export const hasInstallSecret = (name: string): boolean =>
+  hasSecretAt(installVaultPath(), name);
+
+export const deleteInstallSecret = (name: string): boolean =>
+  deleteSecretAt(installVaultPath(), name);

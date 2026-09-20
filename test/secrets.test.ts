@@ -161,3 +161,47 @@ describe('the secrets directory is owner-only', () => {
     assert.equal(mode, 0o700);
   });
 });
+
+describe('the installation-level vault holds the runtime default, separately', () => {
+  test('an install secret round-trips', () => {
+    secrets.putInstallSecret('RIFF_RUNTIME_TOKEN', 'sk-ant-install');
+    assert.equal(secrets.getInstallSecret('RIFF_RUNTIME_TOKEN'), 'sk-ant-install');
+    assert.equal(secrets.hasInstallSecret('RIFF_RUNTIME_TOKEN'), true);
+  });
+
+  test('an absent install secret is null / false, not an error', () => {
+    assert.equal(secrets.getInstallSecret('NOPE'), null);
+    assert.equal(secrets.hasInstallSecret('NOPE'), false);
+  });
+
+  test('it lives at a fixed path, not a company slug, and does not cross with one', () => {
+    secrets.putInstallSecret('RIFF_RUNTIME_TOKEN', 'install-default');
+    secrets.putSecret('shipit', 'RIFF_RUNTIME_TOKEN', 'shipit-own');
+    // Same name, two different vaults, two different values.
+    assert.equal(secrets.getInstallSecret('RIFF_RUNTIME_TOKEN'), 'install-default');
+    assert.equal(secrets.getSecret('shipit', 'RIFF_RUNTIME_TOKEN'), 'shipit-own');
+    assert.ok(existsSync(join(process.env['RIFF_ROOT']!, 'secrets', 'install.vault.json')));
+  });
+
+  test('its plaintext is not on disk', () => {
+    secrets.putInstallSecret('RIFF_RUNTIME_TOKEN', 'super-secret-default');
+    const raw = readFileSync(join(process.env['RIFF_ROOT']!, 'secrets', 'install.vault.json'), 'utf8');
+    assert.ok(!raw.includes('super-secret-default'));
+  });
+
+  test('deleting an install secret reports whether it was there', () => {
+    secrets.putInstallSecret('RIFF_RUNTIME_TOKEN', 'v');
+    assert.equal(secrets.deleteInstallSecret('RIFF_RUNTIME_TOKEN'), true);
+    assert.equal(secrets.getInstallSecret('RIFF_RUNTIME_TOKEN'), null);
+    assert.equal(secrets.deleteInstallSecret('RIFF_RUNTIME_TOKEN'), false);
+  });
+});
+
+describe('hasSecret answers presence without reading the value', () => {
+  test('true only when the named secret is stored', () => {
+    secrets.putSecret('shipit', 'RIFF_RUNTIME_TOKEN', 'v');
+    assert.equal(secrets.hasSecret('shipit', 'RIFF_RUNTIME_TOKEN'), true);
+    assert.equal(secrets.hasSecret('shipit', 'MISSING'), false);
+    assert.equal(secrets.hasSecret('nobody', 'RIFF_RUNTIME_TOKEN'), false);
+  });
+});

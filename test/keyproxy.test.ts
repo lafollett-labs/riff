@@ -198,6 +198,28 @@ describe('the real key reaches the upstream and the scoped token does not', () =
     // ...and a route-declared header wins over the caller's own value.
     assert.equal(seen?.headers['user-agent'], 'claude-code/test');
   });
+
+  test('anthropic-beta MERGES the caller\'s betas with the route\'s, rather than dropping them', async () => {
+    // Claude Code sends its own anthropic-beta carrying the context-management
+    // beta its auto-compaction needs. Overwriting it with the route's oauth flag
+    // dropped it, and the API rejected the body's context_management field with a
+    // 400 — every long-context shift failed. The two must arrive together.
+    const token = proxytoken.mintScopedToken('shipit', 3600);
+    const r = await fetch(`http://127.0.0.1:${port(proxy)}/svc/anthropic/messages`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-type': 'application/json',
+        'anthropic-beta': 'context-management-2025-06-27,fine-grained-tool-streaming-2025-05-14',
+      },
+      body: '{"model":"claude","context_management":{}}',
+    });
+    assert.equal(r.status, 200);
+    const betas = String(seen?.headers['anthropic-beta']).split(',').map((s) => s.trim());
+    assert.ok(betas.includes('oauth-2025-04-20'), 'the route\'s required flag is present');
+    assert.ok(betas.includes('context-management-2025-06-27'), 'the caller\'s beta survived');
+    assert.ok(betas.includes('fine-grained-tool-streaming-2025-05-14'), 'all the caller\'s betas survived');
+  });
 });
 
 describe('nothing gets through without a valid, scoped, declared route', () => {

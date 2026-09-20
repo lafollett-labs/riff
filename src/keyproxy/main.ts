@@ -192,7 +192,22 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
     for (const [k, v] of Object.entries(route.headers)) {
       const lk = k.toLowerCase();
       if (HOP_BY_HOP.has(lk) || lk === injectHeader) continue;
-      headers[lk] = v;
+      // `anthropic-beta` is a comma-separated list, and Claude Code sends its own
+      // — the context-management beta its auto-compaction needs, among others.
+      // Overwriting it dropped those, and the API then rejected the request
+      // body's `context_management` field with `400 Extra inputs are not
+      // permitted`, failing every long-context shift on the runtime route. So for
+      // this one header MERGE the route's required flag into the caller's list
+      // (deduped) instead of replacing it; every other header still wins outright.
+      const prev = headers[lk];
+      if (lk === 'anthropic-beta' && (typeof prev === 'string' || Array.isArray(prev))) {
+        const prevStr = Array.isArray(prev) ? prev.join(',') : prev;
+        const seen = new Set<string>();
+        for (const b of `${prevStr},${v}`.split(',').map((s) => s.trim()).filter(Boolean)) seen.add(b);
+        headers[lk] = [...seen].join(',');
+      } else {
+        headers[lk] = v;
+      }
     }
   }
   const scheme = route.scheme ?? 'Bearer';

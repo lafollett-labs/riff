@@ -82,24 +82,24 @@ onMounted(load);
 
     <section class="set">
       <h2>Default runtime credential</h2>
-      <p class="muted note">
-        The credential the agents' own Claude inference runs on. A subscription
-        token is a long-lived setup token; an API key is an Anthropic key. The
-        token value is write-only — set once, never shown again. To change it, set
-        it again.
-      </p>
 
       <p v-if="loading" class="muted note">Loading…</p>
       <template v-else>
-        <p class="status faint">
-          <template v-if="valueSet">
-            A default token is set<template v-if="loaded"> —
-            <span class="mono">{{ label(loaded.type) }}</span></template>.
-          </template>
-          <template v-else>
-            No installation default token is set yet. A company with no credential
-            of its own cannot run until one is.
-          </template>
+        <div class="badge" :class="valueSet ? 'is-set' : 'not-set'" role="status">
+          <span class="dot" />
+          <span v-if="valueSet">
+            Set<template v-if="loaded"> — <b class="mono">{{ label(loaded.type) }}</b></template>
+          </span>
+          <span v-else>Not set</span>
+        </div>
+
+        <p class="muted note">
+          The credential the agents' own Claude inference runs on. A subscription
+          token is a long-lived setup token; an API key is an Anthropic key. The
+          token value is write-only — set once, never shown again; this screen only
+          ever reports the type and that a value is set, never the value itself.
+          <template v-if="!valueSet"> A company with no credential of its own cannot
+          run until an installation default is set.</template>
         </p>
 
         <label class="fld-l" for="rc-type">Credential type</label>
@@ -140,7 +140,15 @@ h2 { font-size: 12px; letter-spacing: .07em; text-transform: uppercase; color: v
   margin: 0 0 12px; font-weight: 600; }
 section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line); }
 .note { font-size: 13px; line-height: 1.6; margin: 0 0 16px; max-width: 62ch; }
-.status { font-size: 13px; line-height: 1.5; margin: 0 0 18px; }
+.badge { display: inline-flex; align-items: center; gap: 8px; font-size: 13px;
+  padding: 7px 12px; border-radius: 6px; margin: 0 0 16px; border: 1px solid; }
+.badge .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.badge.is-set { color: var(--ok); background: color-mix(in srgb, var(--ok) 10%, transparent);
+  border-color: color-mix(in srgb, var(--ok) 40%, transparent); }
+.badge.is-set .dot { background: var(--ok); }
+.badge.not-set { color: var(--gold); background: color-mix(in srgb, var(--gold) 10%, transparent);
+  border-color: color-mix(in srgb, var(--gold) 40%, transparent); }
+.badge.not-set .dot { background: var(--gold); }
 .fld-l { display: block; font-size: 12px; color: var(--muted); margin: 0 0 5px; }
 .fld { background: #15100d; color: var(--ink); border: 1px solid var(--line-2);
   border-radius: 5px; padding: 8px 10px; font: inherit; font-size: 13px; }

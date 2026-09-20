@@ -44,6 +44,20 @@ const picking = ref(false);
 
 const current = computed(() => VIEWS.find((v) => v.id === view.value)?.comp ?? Envelope);
 
+/**
+ * Companies and Settings are installation-level — they are not about the company
+ * the switcher last had selected. Leaving the per-company chrome (the company
+ * name as the rail title, the section nav, the board list, the run/staff footer)
+ * on screen read as "you are inside ShipIt looking at its settings", which is not
+ * what these screens are. On an install view the rail collapses to the switcher.
+ */
+const installView = computed(() => view.value === 'settings' || view.value === 'companies');
+const railTitle = computed(() => {
+  if (view.value === 'settings') return 'Riff settings';
+  if (view.value === 'companies') return 'Manage companies';
+  return state.value?.company.name ?? (companies.value.length ? 'Pick a company' : 'The Desk');
+});
+
 let stop: (() => void) | null = null;
 let timer: ReturnType<typeof setInterval> | null = null;
 
@@ -197,8 +211,8 @@ const util = computed(() => {
       <div class="brand">
         <button class="switcher" @click="picking = !picking" :aria-expanded="picking">
           <span class="names">
-            <span class="co">{{ state?.company.name ?? (companies.length ? 'Pick a company' : 'The Desk') }}</span>
-
+            <span class="co">{{ railTitle }}</span>
+            <span v-if="installView" class="sub faint mono">installation</span>
           </span>
           <span class="chev" :class="{ up: picking }">▾</span>
         </button>
@@ -222,19 +236,21 @@ const util = computed(() => {
           </button>
         </div>
       </div>
-      <button v-for="v in VIEWS" :key="v.id" class="navitem"
-              :class="{ on: view === v.id }" @click="view = v.id">
-        <span>{{ v.label }}</span>
-        <span v-if="v.id === 'envelope' && state?.pendingBoard" class="pill">{{ state.pendingBoard }}</span>
-      <span v-else-if="v.id === 'inbox' && state?.unread" class="pill">{{ state.unread }}</span>
-        <span v-else-if="v.id === 'staff' && state" class="faint">{{ state.headcount }}</span>
-      <span v-else-if="v.id === 'work' && state?.tasks" class="faint">{{ state.tasks }}</span>
-        <span v-else-if="v.id === 'commons' && state" class="faint">
-          {{ state.commons.held }}/{{ state.commons.ceiling }}
-        </span>
-      </button>
+      <template v-if="!installView">
+        <button v-for="v in VIEWS" :key="v.id" class="navitem"
+                :class="{ on: view === v.id }" @click="view = v.id">
+          <span>{{ v.label }}</span>
+          <span v-if="v.id === 'envelope' && state?.pendingBoard" class="pill">{{ state.pendingBoard }}</span>
+          <span v-else-if="v.id === 'inbox' && state?.unread" class="pill">{{ state.unread }}</span>
+          <span v-else-if="v.id === 'staff' && state" class="faint">{{ state.headcount }}</span>
+          <span v-else-if="v.id === 'work' && state?.tasks" class="faint">{{ state.tasks }}</span>
+          <span v-else-if="v.id === 'commons' && state" class="faint">
+            {{ state.commons.held }}/{{ state.commons.ceiling }}
+          </span>
+        </button>
+      </template>
       <div class="grow" />
-      <div class="who faint" v-if="state">
+      <div class="who faint" v-if="state && !installView">
         <div v-for="b in state.board" :key="b.id">{{ b.name }} · {{ b.role }}</div>
       </div>
     </nav>
@@ -272,7 +288,7 @@ const util = computed(() => {
       </button>
     </div>
 
-    <footer class="status mono" v-if="state">
+    <footer class="status mono" v-if="state && !installView">
       <button class="run" :class="{ on: state.running }" :disabled="working" @click="toggle">
         <span class="led" />
         {{ state.running ? 'Pause' : (neverRun ? 'Start work' : 'Resume') }}
@@ -310,6 +326,7 @@ const util = computed(() => {
 .switcher:hover { border-color: var(--line); background: #1a1512; }
 .switcher .names { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .co { font-family: var(--serif); font-size: 17px; color: var(--ink); line-height: 1.2; }
+.sub { font-size: 10px; letter-spacing: .09em; text-transform: uppercase; }
 
 .chev { margin-left: auto; color: var(--faint); font-size: 11px; padding-top: 3px; }
 .chev.up { transform: rotate(180deg); }

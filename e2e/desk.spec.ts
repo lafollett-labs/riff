@@ -1721,6 +1721,14 @@ test('the installation default runtime credential is write-only and needs a toke
   await page.getByRole('button', { name: /Riff settings/ }).click();
   await expect(page.locator('main h1').first()).toContainText(/Riff Settings/i);
 
+  // Install-level screen: the rail sheds the per-company chrome (section nav,
+  // run/staff footer) so it does not read as "inside a company looking at its
+  // settings". The rail title names the installation, not the company.
+  await expect(page.locator('.rail .co')).toContainText(/Riff settings/i);
+  await expect(page.locator('.rail .sub')).toContainText(/installation/i);
+  await expect(page.locator('.navitem')).toHaveCount(0);
+  await expect(page.locator('footer.status')).toHaveCount(0);
+
   const set = page.locator('.set');
   // A type alone is not a credential: Save stays inert until a token is entered,
   // so a stray click can never store a valueless default.
@@ -1735,8 +1743,11 @@ test('the installation default runtime credential is write-only and needs a toke
   // masked — only the type and "a value is set" come back.
   await expect(page.locator('main')).not.toContainText('sk-ant-super-secret-default');
   await expect(page.locator('#rc-value')).toHaveValue('');
-  await expect(set.locator('.status')).toContainText(/A default token is set/);
-  await expect(set.locator('.status')).toContainText(/API key/);
+  // The durable "it is set" signal is the badge — a persistent indicator, not
+  // just the transient "Saved." message (the operator could not tell the two
+  // apart on reload, which is why this became a badge).
+  await expect(set.locator('.badge.is-set')).toContainText(/Set/);
+  await expect(set.locator('.badge.is-set')).toContainText(/API key/);
 });
 
 test('a company runtime-credential override is write-only, and revertible to the default', async ({ page }) => {

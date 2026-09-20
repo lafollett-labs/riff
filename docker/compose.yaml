@@ -1,14 +1,18 @@
 # Two containers and one deliberate hole in the wall.
 #
-# `factory` has a shell, a compiler, and a long-lived Claude token. It sits on
-# a network with NO route off the machine. The only way out is `egress`, which
-# forwards to an anchored denylist and logs every request it passed.
+# `factory` has a shell and a compiler, but NO Claude token: it authenticates
+# through the keyproxy on a scoped, per-shift token, so `docker inspect` on it
+# shows no credential. It sits on a network with NO route off the machine. The
+# only way out is `egress`, which forwards to an anchored denylist and logs every
+# request it passed.
 #
 # That is the whole security model, and it is structural: an agent that talks
-# its way past every tool check still has nowhere to send anything.
+# its way past every tool check still has nowhere to send anything, and the real
+# token it would send is a container away in the keyproxy's vault.
 #
-#   cp .env.example .env        # then put your token in it
-#   docker compose up --build
+#   cp .env.example .env           # optional compose settings; no token here
+#   docker/up.sh up --build        # drains any live shift first; set the token
+#                                  # in the console (Riff Settings), not a file
 #
 name: riff
 

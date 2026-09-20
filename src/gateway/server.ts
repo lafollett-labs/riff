@@ -1087,19 +1087,15 @@ server.listen(PORT, () => {
   // A scheduler lives in a process; the operator's intent does not. Anything
   // left running goes back to work rather than quietly stopping on a restart.
   //
-  // Unless the container came up without a credentials record. Then every
-  // company it restored would wake, fail to authenticate and spend a shift
-  // saying so — the entrypoint sets RIFF_HOLD_PAUSED rather than let that
-  // happen, and the operator starts them once the record is delivered.
-  // Two reasons to hold, and they cover the two failures of 2026-09-11. The
-  // entrypoint sets RIFF_HOLD_PAUSED when no record arrived before its deadline
-  // (the record was absent). The credential check catches a record that did
-  // arrive but cannot authenticate — present but with its token fields nulled
-  // by a failed refresh — which the entrypoint's mere -s presence test passes.
-  // Resume each running company only if its runtime credential resolves — a
-  // company that cannot authenticate is held rather than woken to fail silently,
-  // per-company now that the credential is per-company. RIFF_HOLD_PAUSED still
-  // holds everything at once for the operator's own reasons.
+  // Unless a company's runtime credential does not resolve. Then it would wake,
+  // fail to authenticate and spend a shift saying so — the failure of 2026-09-11,
+  // twice. So resume each running company only if the keyproxy can resolve its
+  // credential (per-company vault, or the install default); one that cannot is
+  // held rather than woken to fail silently. This is the automatic hold now that
+  // the credential lives in the vault — the old entrypoint credentials-wait that
+  // set RIFF_HOLD_PAUSED is gone. RIFF_HOLD_PAUSED remains an operator-only
+  // blanket hold (nothing sets it automatically): export it to bring the stack up
+  // with everything paused, whatever each company's credential says.
   const held = process.env['RIFF_HOLD_PAUSED'] === '1';
   const resumed = new Set(held ? [] : registry.resume((slug) => runtimeCredentialHealth(slug).live));
   if (held) {

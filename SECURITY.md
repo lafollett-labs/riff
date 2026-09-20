@@ -252,6 +252,12 @@ fact. Those are a scope control, a workflow control and an audit trail. None of
 them is a wall. Run this on hardware you are willing to have a determined process
 act from.
 
+Migrating from the old env-token model: `up.sh` and `compose.yaml` no longer read
+`RIFF_TOKEN_CMD`, `RIFF_CREDENTIALS_CMD` or `CLAUDE_CODE_OAUTH_TOKEN`, so any such
+line left in your `docker/.env` or `$RIFF_ENV` is now inert. Delete them — a dead
+plaintext token or credential-fetch command is exposure with no benefit — and set
+the runtime credential once in the console under Riff Settings.
+
 ### A company's own keys live one container away, not in the factory
 
 The runtime token above is Riff's own — an installation default, or a per-company

@@ -5,7 +5,7 @@ import {
   readRuntimeCredential, RUNTIME_SECRET_NAME,
 } from '../core/config.ts';
 import { Registry, type Company } from '../company/registry.ts';
-import { startCredentialHealth } from '../runtime/credential.ts';
+import { runtimeCredentialHealth } from '../runtime/credential.ts';
 import { windowsFromUsage } from '../runtime/limits.ts';
 import { renameAgent } from '../company/rename.ts';
 import { redefineAgent } from '../company/redefine.ts';
@@ -99,7 +99,7 @@ const json = (res: ServerResponse, body: unknown, status = 200): void => {
  * A no-op outside the container: see startCredentialHealth.
  */
 const refuseIfNoCredential = (res: ServerResponse, slug: string): boolean => {
-  const cred = startCredentialHealth();
+  const cred = runtimeCredentialHealth(slug);
   if (cred.live) return false;
   json(res, { error: `cannot start ${slug}: ${cred.why}`, fix: cred.fix }, 503);
   return true;
@@ -1087,21 +1087,32 @@ server.listen(PORT, () => {
   // (the record was absent). The credential check catches a record that did
   // arrive but cannot authenticate — present but with its token fields nulled
   // by a failed refresh — which the entrypoint's mere -s presence test passes.
+  // Resume each running company only if its runtime credential resolves — a
+  // company that cannot authenticate is held rather than woken to fail silently,
+  // per-company now that the credential is per-company. RIFF_HOLD_PAUSED still
+  // holds everything at once for the operator's own reasons.
   const held = process.env['RIFF_HOLD_PAUSED'] === '1';
-  const cred = startCredentialHealth();
-  const hold = held || !cred.live;
-  const resumed = new Set(hold ? [] : registry.resume());
-  if (hold) {
-    const why = cred.live ? 'no credentials record at start' : cred.why;
-    console.log(`\n  Held paused: ${why}. `
-      + 'Deliver one with docker/up.sh creds, then start what you want.');
+  const resumed = new Set(held ? [] : registry.resume((slug) => runtimeCredentialHealth(slug).live));
+  if (held) {
+    console.log('\n  Held paused: RIFF_HOLD_PAUSED is set. Start what you want when ready.');
   }
 
   const all = registry.list();
   console.log(`\n  Riff · ${all.length} compan${all.length === 1 ? 'y' : 'ies'}`);
   for (const c of all) {
-    const mark = c.running ? (resumed.has(c.slug) ? '● resumed' : '● working') : '○ paused ';
-    console.log(`    ${mark}  ${c.slug.padEnd(22)} ${c.name}${c.business ? ` — ${c.business}` : ''}`);
+    let mark = '○ paused ';
+    let why = '';
+    if (c.running) {
+      if (resumed.has(c.slug)) mark = '● resumed';
+      else if (held) mark = '⚠ held   '; // blanket RIFF_HOLD_PAUSED
+      else {
+        // Running, not resumed, no blanket hold: its credential did not resolve.
+        const h = runtimeCredentialHealth(c.slug);
+        mark = h.live ? '● working' : '⚠ held   ';
+        if (!h.live) why = `  — ${h.why}`;
+      }
+    }
+    console.log(`    ${mark}  ${c.slug.padEnd(22)} ${c.name}${c.business ? ` — ${c.business}` : ''}${why}`);
   }
   console.log(`\n  http://localhost:${PORT}\n`);
 });

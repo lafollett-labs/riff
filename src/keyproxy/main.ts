@@ -1,8 +1,12 @@
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse,
   type OutgoingHttpHeaders } from 'node:http';
 import { request as httpsRequest } from 'node:https';
-import { resolveConfig, type ServiceRoute } from '../core/config.ts';
-import { getSecret } from '../core/secrets.ts';
+import {
+  resolveConfig, RUNTIME_SERVICE_NAME, RUNTIME_SECRET_NAME, RUNTIME_UPSTREAM,
+  runtimeRouteHeaders, runtimeRouteShape, type ServiceRoute,
+} from '../core/config.ts';
+import { getSecret, getInstallSecret } from '../core/secrets.ts';
+import { readSettings } from '../core/settings.ts';
 import { verifyScopedToken } from '../core/proxytoken.ts';
 
 /**
@@ -59,6 +63,32 @@ const readBody = (req: IncomingMessage): Promise<Buffer> =>
     req.on('error', reject);
   });
 
+/**
+ * The reserved `_runtime` route the agents' own Claude inference reaches — built,
+ * not stored, so no company can declare it (its leading underscore is barred by
+ * SERVICE_NAME_RE) and it never shows in a company's `services`. Type and token
+ * come from the SAME tier: a company on its own credential uses its own type and
+ * its own vault secret; otherwise the installation default type and the install
+ * vault. Never a per-company token under the install type, or vice versa. Fails
+ * closed with a message naming where to set the credential.
+ */
+const runtimeRoute = (company: string):
+  { route: ServiceRoute; key: string } | { status: number; msg: string } => {
+  const own = resolveConfig(process.cwd(), company).runtimeCredential;
+  const type = own?.type ?? readSettings().runtimeCredential?.type ?? 'subscription';
+  const key = own ? getSecret(company, RUNTIME_SECRET_NAME) : getInstallSecret(RUNTIME_SECRET_NAME);
+  if (key == null) {
+    return { status: 502, msg: own
+      ? "this company has a runtime credential type but no token; set it in the company's Runtime credential"
+      : 'no runtime credential is set; set one in Riff Settings' };
+  }
+  const { header, scheme } = runtimeRouteShape(type);
+  return {
+    route: { upstream: RUNTIME_UPSTREAM, secret: RUNTIME_SECRET_NAME, header, scheme, headers: runtimeRouteHeaders(type) },
+    key,
+  };
+};
+
 const routeFor = (company: string, service: string): ServiceRoute | null => {
   // resolveConfig with an explicit slug reads exactly that company's config;
   // services defaults to {} for a company that declares none.
@@ -102,15 +132,27 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
   const scope = token ? verifyScopedToken(token) : null;
   if (!scope) return send(res, 401, 'missing or invalid scoped token');
 
-  const route = routeFor(scope.company, service);
-  // A service the company has not declared gets nothing — same answer whether
-  // it is unknown or forbidden, so probing tells an attacker nothing.
-  if (!route) return send(res, 404, `no service '${service}' for this company`);
-
-  const key = getSecret(scope.company, route.secret);
-  // The route names a secret the vault does not hold: a misconfiguration, not a
-  // caller error, and never a reason to forward the call unauthenticated.
-  if (key == null) return send(res, 502, `service '${service}' has no credential configured`);
+  // The reserved runtime route is synthesized from the credential type; every
+  // other service is a declared route whose secret the vault holds.
+  let route: ServiceRoute;
+  let key: string;
+  if (service === RUNTIME_SERVICE_NAME) {
+    const rt = runtimeRoute(scope.company);
+    if ('status' in rt) return send(res, rt.status, rt.msg);
+    route = rt.route;
+    key = rt.key;
+  } else {
+    const declared = routeFor(scope.company, service);
+    // A service the company has not declared gets nothing — same answer whether
+    // it is unknown or forbidden, so probing tells an attacker nothing.
+    if (!declared) return send(res, 404, `no service '${service}' for this company`);
+    const secret = getSecret(scope.company, declared.secret);
+    // The route names a secret the vault does not hold: a misconfiguration, not a
+    // caller error, and never a reason to forward the call unauthenticated.
+    if (secret == null) return send(res, 502, `service '${service}' has no credential configured`);
+    route = declared;
+    key = secret;
+  }
 
   const target = upstreamURL(route, rest, url.search);
 

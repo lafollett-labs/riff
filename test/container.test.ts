@@ -648,11 +648,10 @@ describe('a container that never got its credentials', () => {
     assert.match(entrypoint, /RIFF_HOLD_PAUSED=1/);
     const server = readFileSync(new URL('../src/gateway/server.ts', import.meta.url), 'utf8');
     assert.match(server, /const held = process\.env\['RIFF_HOLD_PAUSED'\] === '1';/);
-    // The hold now has two reasons: the entrypoint's no-record-at-deadline flag,
-    // and a delivered-but-dead credential the flag's -s presence test cannot
-    // see (present with its token fields nulled — the 02:54 failure).
-    assert.match(server, /const hold = held \|\| !cred\.live;/);
-    assert.match(server, /const resumed = new Set\(hold \? \[\] : registry\.resume\(\)\);/);
+    // Two reasons to hold, now per-company: the entrypoint's no-record-at-deadline
+    // flag holds everything at once, and a company whose runtime credential does
+    // not resolve is skipped at resume rather than woken to fail authenticating.
+    assert.match(server, /registry\.resume\(\(slug\) => runtimeCredentialHealth\(slug\)\.live\)/);
   });
 
   test('up.sh hands the record over however it leaves, not only when it finishes', () => {

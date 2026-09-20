@@ -64,6 +64,15 @@ describe('a service route is validated before it can reach config', () => {
     assert.ok(validateServiceRoute('open-router_2', { upstream: 'https://a.test', secret: 'KEY' }).ok);
   });
 
+  test('a leading-underscore name is refused, so the reserved `_runtime` route cannot be shadowed', () => {
+    // SERVICE_NAME_RE requires a leading alphanumeric — that is the whole
+    // collision defence for the synthesized runtime route: no company can ever
+    // declare a service the keyproxy would confuse with `_runtime`.
+    for (const bad of ['_runtime', '_x', '_']) {
+      assert.equal(validateServiceRoute(bad, { upstream: 'https://a.test', secret: 'KEY' }).ok, false, bad);
+    }
+  });
+
   test('a secret that is not an environment identifier is refused', () => {
     for (const bad of ['', '1KEY', 'a-b', 'a.b', 'a b']) {
       assert.equal(validateServiceRoute('svc', { upstream: 'https://a.test', secret: bad }).ok, false, bad);

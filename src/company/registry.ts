@@ -141,10 +141,14 @@ export class Registry {
    * Start every company the operator left running. Called once on boot, so a
    * restart does not silently pause work somebody asked for.
    */
-  resume(): string[] {
+  resume(canResume?: (slug: string) => boolean): string[] {
     const back: string[] = [];
     for (const ref of listCompanies()) {
       if (!ref.wanted) continue;
+      // A company whose runtime credential cannot be resolved is held rather than
+      // resumed into a shift that would fail to authenticate — the same silent
+      // failure the wake-time preflight guards. The caller supplies the check.
+      if (canResume && !canResume(ref.slug)) continue;
       const c = this.get(ref.slug);
       if (!c) continue;
       c.scheduler.start();

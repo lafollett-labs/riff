@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { readRuntimeCredential } from '../src/core/config.ts';
+import { readRuntimeCredential, runtimeRouteShape, runtimeRouteHeaders } from '../src/core/config.ts';
 
 /**
  * readRuntimeCredential is what stands between a hand-edited config and a shape
@@ -20,6 +20,20 @@ describe('readRuntimeCredential accepts only the two known shapes', () => {
     for (const bad of [undefined, null, {}, { type: 'other' }, { type: 42 }, 'subscription', [], 7]) {
       assert.equal(readRuntimeCredential(bad), undefined, JSON.stringify(bad));
     }
+  });
+});
+
+describe('the synthesized runtime route has the shape each credential type needs', () => {
+  test('a subscription token is a Bearer with the OAuth beta + claude-code UA', () => {
+    assert.deepEqual(runtimeRouteShape('subscription'), { header: 'authorization', scheme: 'Bearer' });
+    const h = runtimeRouteHeaders('subscription');
+    assert.equal(h['anthropic-beta'], 'oauth-2025-04-20');
+    assert.match(h['user-agent']!, /^claude-code\//);
+  });
+
+  test('an API key is x-api-key raw with the version header', () => {
+    assert.deepEqual(runtimeRouteShape('apiKey'), { header: 'x-api-key', scheme: '' });
+    assert.ok(runtimeRouteHeaders('apiKey')['anthropic-version']);
   });
 });
 

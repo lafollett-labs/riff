@@ -1,6 +1,8 @@
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { shellIsContained } from './permissions.ts';
+import { resolveConfig, RUNTIME_SECRET_NAME } from '../core/config.ts';
+import { hasSecret, hasInstallSecret } from '../core/secrets.ts';
 
 /**
  * The slice of ~/.claude/.credentials.json a start decision reads.
@@ -93,6 +95,40 @@ export const startCredentialHealth = (
     return credentialHealth(undefined, readRecord(env['HOME'] ?? ''), Date.now());
   }
   return credentialHealth(env['CLAUDE_CODE_OAUTH_TOKEN'], null, Date.now());
+};
+
+/**
+ * Whether a company has a runtime credential the keyproxy can actually inject —
+ * the post-cutover preflight, replacing the env/record check above (the raw token
+ * no longer lives in the factory env). Mirrors the keyproxy's resolution so the
+ * gate and the injector agree: a company on its OWN credential needs its own vault
+ * token; otherwise the installation default must be set. Refusing here turns "wake,
+ * fail to authenticate, burn a shift saying so" into a loud 503 that names the fix.
+ *
+ * Gated to the contained runtime for the same reason as startCredentialHealth: on
+ * an operator's machine and in the test suite there is no factory to gate, and the
+ * throwaway installations tests run against have no credential set — so outside a
+ * container this answers live and never blocks a test's found-and-run.
+ */
+export const runtimeCredentialHealth = (
+  slug: string,
+  contained: boolean = shellIsContained(),
+): CredentialHealth => {
+  if (!contained) return { live: true };
+  const own = resolveConfig(process.cwd(), slug).runtimeCredential;
+  const has = own ? hasSecret(slug, RUNTIME_SECRET_NAME) : hasInstallSecret(RUNTIME_SECRET_NAME);
+  if (has) return { live: true };
+  return own
+    ? {
+        live: false,
+        why: "this company's runtime credential type is set but no token is stored",
+        fix: "set the company's runtime credential in the console",
+      }
+    : {
+        live: false,
+        why: 'no runtime credential is set for this installation',
+        fix: 'set a default runtime credential in Riff Settings',
+      };
 };
 
 /** Read and parse the record, treating anything unreadable as absent. */

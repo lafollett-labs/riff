@@ -9,7 +9,7 @@ import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import { createTools, TOOL_NAMESPACE } from './tools.ts';
 import { makeCanUseTool, shellIsContained } from './permissions.ts';
-import { DEFAULT_POLICY, installRoot, type ServiceRoute } from '../core/config.ts';
+import { DEFAULT_POLICY, installRoot, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
 import { mintScopedToken } from '../core/proxytoken.ts';
 import type { TranscriptSink } from '../ledger/transcript.ts';
 import { worstWindow, isWeekly, windowsFromUsage, limitsReadable, mergeWindow,
@@ -791,10 +791,45 @@ export const scopedSecretEnv = (
   shiftTimeoutMs: number | undefined,
 ): Record<string, string> => {
   const env: Record<string, string> = {};
-  if (!companySlug || !services || !Object.keys(services).length) return env;
+  // A shift now always needs a scoped token — the agents' OWN Claude inference
+  // routes through the keyproxy's reserved runtime route, not just the company's
+  // product services — so this mints one whenever there is a company, declared
+  // services or not.
+  if (!companySlug) return env;
   const ttlSeconds = Math.ceil((shiftTimeoutMs ?? 45 * 60_000) / 1000) + 300;
   const token = mintScopedToken(companySlug, ttlSeconds);
-  for (const route of Object.values(services)) env[route.secret] = token;
+  // Product services share the scoped token under each declared secret name.
+  if (services) for (const route of Object.values(services)) env[route.secret] = token;
+  // The runtime route, set LAST so it wins over any oddly-named product secret:
+  // point the SDK at the keyproxy and present the scoped token, which the proxy
+  // swaps for the real credential. The real token never enters the factory env.
+  env['ANTHROPIC_BASE_URL'] = RUNTIME_BASE_URL;
+  env['ANTHROPIC_AUTH_TOKEN'] = token;
+  return env;
+};
+
+/**
+ * The child-process env for a shift: the factory env, plus the toolchain cache and
+ * config-dir redirects and the scoped proxy tokens, MINUS any inherited
+ * CLAUDE_CODE_OAUTH_TOKEN. The agents authenticate through the keyproxy's runtime
+ * route now (ANTHROPIC_BASE_URL + a scoped ANTHROPIC_AUTH_TOKEN, both in secretEnv),
+ * so a raw subscription token in the child env would only let the SDK bypass the
+ * proxy — and be readable by everything the shift spawns, which is the exposure
+ * this whole move closes. Production no longer delivers it to the factory; the
+ * strip keeps dev and test honest against the same contract.
+ */
+const shiftChildEnv = (
+  cacheDir: string | undefined,
+  configDir: string | undefined,
+  secretEnv: Record<string, string>,
+): NodeJS.ProcessEnv => {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...(cacheDir ? cacheEnv(cacheDir) : {}),
+    ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+    ...secretEnv,
+  };
+  delete env['CLAUDE_CODE_OAUTH_TOKEN'];
   return env;
 };
 
@@ -1420,16 +1455,13 @@ export const tick = async (
         effort: 'medium',
         thinking: { type: 'adaptive' },
 
-        // Spread process.env rather than replace it — omitting `env` inherits
-        // it, so naming the field at all means naming everything the CLI
-        // needs, the subscription token included. The toolchain cache redirect,
-        // the session store on the volume, and the scoped proxy tokens are
-        // added on top.
+        // The child env inherits the factory env, adds the toolchain cache and
+        // session-store redirects and the scoped proxy tokens, and strips the raw
+        // subscription token — the agents authenticate through the keyproxy now.
+        // secretEnv always carries the runtime routing for a real shift, so `env`
+        // is named whenever there is a company; see shiftChildEnv.
         ...(d.cacheDir || d.configDir || Object.keys(secretEnv).length
-          ? { env: { ...process.env,
-                     ...(d.cacheDir ? cacheEnv(d.cacheDir) : {}),
-                     ...(d.configDir ? { CLAUDE_CONFIG_DIR: d.configDir } : {}),
-                     ...secretEnv } }
+          ? { env: shiftChildEnv(d.cacheDir, d.configDir, secretEnv) }
           : {}),
 
         // ---- continuity ----

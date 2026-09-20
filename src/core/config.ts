@@ -416,6 +416,31 @@ export const readRuntimeCredential = (raw: unknown): RuntimeCredential | undefin
   return type === 'apiKey' || type === 'subscription' ? { type } : undefined;
 };
 
+/**
+ * The synthesized `_runtime` route the keyproxy builds from a company's (or the
+ * install default's) credential TYPE. The upstream is always Anthropic; the shape
+ * differs by type. A subscription (OAuth) token authenticates as a Bearer and the
+ * upstream requires the beta flag + a claude-code user-agent (the pair the Agent
+ * SDK adds, and what the usage poller already sends successfully); an API key
+ * authenticates as `x-api-key` and wants the version header. Kept here so the
+ * keyproxy and its tests build the exact same route.
+ */
+export const RUNTIME_UPSTREAM = 'https://api.anthropic.com';
+export const CLAUDE_CODE_UA = 'claude-code/2.1.270';
+/**
+ * Where a shift's Agent SDK is pointed (`ANTHROPIC_BASE_URL`): the keyproxy's
+ * reserved runtime route. The SDK appends `/v1/messages`; the keyproxy forwards
+ * to Anthropic with the real credential injected. The port is the keyproxy's
+ * fixed default (`KEYPROXY_PORT`), matching the product `/svc/<name>` convention.
+ */
+export const RUNTIME_BASE_URL = 'http://keyproxy:8890/svc/_runtime';
+export const runtimeRouteHeaders = (type: RuntimeCredentialType): Record<string, string> =>
+  type === 'apiKey'
+    ? { 'anthropic-version': '2023-06-01' }
+    : { 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': CLAUDE_CODE_UA };
+export const runtimeRouteShape = (type: RuntimeCredentialType): { header: string; scheme: string } =>
+  type === 'apiKey' ? { header: 'x-api-key', scheme: '' } : { header: 'authorization', scheme: 'Bearer' };
+
 export type RiffConfig = {
   version: 1;
   /**

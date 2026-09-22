@@ -17,6 +17,7 @@ import Secrets from './views/Secrets.vue';
 import Services from './views/Services.vue';
 import Vitals from './views/Vitals.vue';
 import Splitter, { rememberedWidth } from './Splitter.vue';
+import NavIcon from './NavIcon.vue';
 
 const VIEWS = [
   { id: 'overview', label: 'Overview', comp: Overview },
@@ -250,7 +251,8 @@ const util = computed(() => {
       <template v-if="!installView">
         <button v-for="v in VIEWS" :key="v.id" class="navitem"
                 :class="{ on: view === v.id }" @click="view = v.id">
-          <span>{{ v.label }}</span>
+          <NavIcon class="ic" :name="v.id" />
+          <span class="lbl">{{ v.label }}</span>
           <span v-if="v.id === 'envelope' && state?.pendingBoard" class="pill">{{ state.pendingBoard }}</span>
           <span v-else-if="v.id === 'inbox' && state?.unread" class="pill">{{ state.unread }}</span>
           <span v-else-if="v.id === 'staff' && state" class="faint">{{ state.headcount }}</span>
@@ -364,7 +366,12 @@ const util = computed(() => {
 }
 .navitem:hover { background: #1a1512; color: var(--ink-2); }
 .navitem.on { background: var(--panel); color: var(--ink); box-shadow: inset 2px 0 0 var(--accent); }
-.navitem span:first-child { flex: 1; }
+/* The icon inherits the item's ink by default; the active one lifts to the
+   accent so the current view reads at a glance. */
+.navitem .ic { color: var(--faint); }
+.navitem:hover .ic { color: var(--muted); }
+.navitem.on .ic { color: var(--gold); }
+.navitem .lbl { flex: 1; }
 .pill { background: var(--alert); color: #fff; border-radius: 10px; padding: 1px 8px; font-size: 11px; font-weight: 600; }
 .grow { flex: 1; }
 .who { padding: 0 20px; font-size: 12px; line-height: 1.7; }

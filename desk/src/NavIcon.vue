@@ -4,8 +4,17 @@
  * `currentColor` so each inherits the nav item's ink — dim by default, and
  * lifted to the accent on the active item by a rule in App.vue. Decorative:
  * `aria-hidden`, with the item's text label carrying the accessible name.
+ *
+ * `name` is the union of the ids this component draws, not `string`. App.vue's
+ * VIEWS is `as const`, so `<NavIcon :name="v.id">` typechecks only while every
+ * view id has a branch here — add a view without its icon and `npm run check`
+ * fails at the call site rather than shipping an empty <svg>. Keep this in sync
+ * with the branches below (and with VIEWS); the check is what enforces it.
  */
-defineProps<{ name: string }>();
+type NavName =
+  | 'overview' | 'envelope' | 'inbox' | 'record' | 'shift' | 'staff' | 'work'
+  | 'commons' | 'secrets' | 'services' | 'vitals' | 'feed' | 'config';
+defineProps<{ name: NavName }>();
 </script>
 
 <template>

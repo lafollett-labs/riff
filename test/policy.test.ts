@@ -69,31 +69,31 @@ describe('the Tune panel edits the whole policy schema', () => {
   // with no editor in the console — the operator could not set the very bounds
   // that keep an unattended run from spending the plan. A restated copy of the
   // type in desk had even dropped portfolioCeiling, so it typechecked blind.
-  test('every policy field has an editor in Overview.vue, and none is stray', () => {
-    const src = readFileSync(new URL('../desk/src/views/Overview.vue', import.meta.url), 'utf8');
+  test('every policy field has an editor in CompanySettings.vue, and none is stray', () => {
+    const src = readFileSync(new URL('../desk/src/views/CompanySettings.vue', import.meta.url), 'utf8');
     // Plain dials declare themselves as `{ key: 'field', label: ... }`.
     const dialKeys = [...src.matchAll(/key: '([a-zA-Z]+)', label:/g)].map((m) => m[1]!);
     // Fields whose value is transformed in the field (percent, dollars) are
     // handled outside DIALS and sent by name in the save patch.
     const special = ['throttleAboveUtilization', 'pauseAboveUtilization', 'dailyCapCents'];
-    // Diagnostic-only, deliberately off the operator's Tune panel: set via the
+    // Diagnostic-only, deliberately off the operator's Settings page: set via the
     // API/config when someone is diagnosing a stopped shift, not a knob to graze past.
     const diagnostic = ['shiftTrace'];
     const editable = new Set([...dialKeys, ...special, ...diagnostic]);
     const schema = Object.keys(DEFAULT_POLICY);
 
     const missing = schema.filter((k) => !editable.has(k));
-    assert.deepEqual(missing, [], `policy fields with no editor in the Tune panel: ${missing.join(', ')}`);
+    assert.deepEqual(missing, [], `policy fields with no editor on the Settings page: ${missing.join(', ')}`);
     const stray = [...editable].filter((k) => !schema.includes(k));
-    assert.deepEqual(stray, [], `Tune panel edits keys that are not policy fields: ${stray.join(', ')}`);
+    assert.deepEqual(stray, [], `the Settings page edits keys that are not policy fields: ${stray.join(', ')}`);
   });
 
-  // The panel groups the dials for layout, and a dial rendered by a group it was
+  // The page groups the dials for layout, and a dial rendered by a group it was
   // left out of renders nowhere — a real field with no editor, the exact bug the
   // guard above exists to catch, but invisible to it because it reads only DIALS.
   // The DialKey type stops a stray group key; only this stops a missing one.
   test('every dial sits in exactly one group', () => {
-    const src = readFileSync(new URL('../desk/src/views/Overview.vue', import.meta.url), 'utf8');
+    const src = readFileSync(new URL('../desk/src/views/CompanySettings.vue', import.meta.url), 'utf8');
     const dialKeys = [...src.matchAll(/key: '([a-zA-Z]+)', label:/g)].map((m) => m[1]!);
     const groupKeys = [...src.matchAll(/keys: \[([^\]]+)\]/g)]
       .flatMap((m) => [...m[1]!.matchAll(/'([a-zA-Z]+)'/g)].map((x) => x[1]!));

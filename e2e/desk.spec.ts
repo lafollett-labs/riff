@@ -858,25 +858,28 @@ test('how hard a company works is a setting, not a constant in the source', asyn
   // Every company got the same hardcoded dials. A company writing documents
   // finished inside 24 turns; a company writing software hit that wall on
   // every single shift.
-  await go(page, 'Overview', 'Testwright Co');
+  await go(page, 'Settings');
   const dials = page.locator('.dials');
-  await expect(dials).toContainText('turns a shift');
+  await expect(dials).toContainText('Turns a shift');
 
-  await dials.getByRole('button', { name: 'Tune' }).click();
-  // Nothing to save until something changes.
+  // The dials are the settings page's own content now, not a panel behind a
+  // Tune toggle, so they are editable on arrival. Nothing to save until
+  // something changes.
   await expect(dials.getByRole('button', { name: 'Save' })).toBeDisabled();
 
-  const turns = dials.locator('input').first();
+  const turns = page.getByLabel('Turns a shift');
   await turns.fill('120');
   await expect(dials.getByRole('button', { name: 'Save' })).toBeEnabled();
   await dials.getByRole('button', { name: 'Save' }).click();
 
-  await expect(dials).toContainText('120 turns a shift');
+  // Saved, and the field resyncs to what the server actually kept, so Save
+  // greys out again rather than looking perpetually unsaved.
+  await expect(turns).toHaveValue('120');
+  await expect(dials.getByRole('button', { name: 'Save' })).toBeDisabled();
 
   // Every dial must be bound to a key the company actually has. A key that is
   // not on the policy renders an empty box, saves NaN, and silently restores
   // the default — which looks exactly like the setting not sticking.
-  await dials.getByRole('button', { name: 'Tune' }).click();
   for (const box of await dials.locator('input').all()) {
     await expect(box).not.toHaveValue('');
   }
@@ -884,8 +887,8 @@ test('how hard a company works is a setting, not a constant in the source', asyn
   // And it survives a reload, because it is written down rather than held in
   // a component that is about to be unmounted.
   await page.reload();
-  await go(page, 'Overview', 'Testwright Co');
-  await expect(page.locator('.dials')).toContainText('120 turns a shift');
+  await go(page, 'Settings');
+  await expect(page.getByLabel('Turns a shift')).toHaveValue('120');
 });
 
 test('the console updates itself as the company works', async ({ page }) => {
@@ -1041,10 +1044,10 @@ test.describe('many companies, one console', () => {
 
     await expect(page.locator('.co')).toHaveText('Halyard Works');
 
-    // The rate is readable on the company's own page.
-    await go(page, 'Overview', 'Halyard Works');
-    await expect(page.locator('.dials .summary')).toContainText('2 working at once');
-    await expect(page.locator('.dials .summary')).toContainText('every 45 min');
+    // The rate is readable on the company's own settings page.
+    await go(page, 'Settings');
+    await expect(page.getByLabel('Working at once')).toHaveValue('2');
+    await expect(page.getByLabel('Minutes between shifts')).toHaveValue('45');
 
     // The board seat has to be on the roster, not merely in a config file: the
     // gate reads standing from config, so a name the roster never had was
@@ -1274,11 +1277,9 @@ test('a dial keeps what you typed while the console refreshes under it', async (
   // faster than the timer.
   await page.clock.install();
   await page.goto('/');
-  await go(page, 'Overview', 'Testwright Co');
+  await go(page, 'Settings');
 
   const panel = page.locator('section.dials');
-  await panel.getByRole('button', { name: 'Tune' }).click();
-
   const turns = panel.getByRole('spinbutton').first();
   const was = await turns.inputValue();
   await turns.fill(String(Number(was) + 3));
@@ -1290,12 +1291,30 @@ test('a dial keeps what you typed while the console refreshes under it', async (
   await expect(turns).toHaveValue(String(Number(was) + 3));
   await expect(save).toBeEnabled();
 
-  // Done discards, so the panel still shows what the server holds rather than
-  // what was typed at it — and the fixture is left as the rest found it.
-  await panel.getByRole('button', { name: 'Done' }).click();
-  await panel.getByRole('button', { name: 'Tune' }).click();
+  // Reset discards, so the panel shows what the server holds rather than what
+  // was typed at it — and the fixture is left as the rest found it.
+  await panel.getByRole('button', { name: 'Reset' }).click();
   await expect(panel.getByRole('spinbutton').first()).toHaveValue(was);
-  await panel.getByRole('button', { name: 'Done' }).click();
+});
+
+test('clearing a percentage safety bound leaves it unchanged, not zeroed', async ({ page }) => {
+  // A blank number field reads back '' from v-model.number, and '' / 100 is 0.
+  // The dials and the dollar cap ran through a blank-guard; the two percentages
+  // did not, so clearing "Stop at" and saving sent pauseAboveUtilization: 0 —
+  // the server clamped it to its 5% floor and rebuilt the company to stop only
+  // at 5% of the window, a safety bound switched off by an empty field.
+  await go(page, 'Settings');
+  const dials = page.locator('.dials');
+  const stop = page.getByLabel('Stop at');
+  const was = await stop.inputValue();
+  expect(Number(was)).toBeGreaterThan(10); // a real headroom bound, not the floor
+
+  await stop.fill('');
+  await dials.getByRole('button', { name: 'Save' }).click();
+
+  // The blank was read as "leave it", not "set 0": the field comes back at the
+  // server's kept value, not the 5% floor a zero would have clamped to.
+  await expect(stop).toHaveValue(was);
 });
 
 test('a seat can be closed from the console, and never a board seat', async ({ page }) => {
@@ -1774,9 +1793,9 @@ test('the switcher returns from an install view to the active company', async ({
 });
 
 test('a company runtime-credential override is write-only, and revertible to the default', async ({ page }) => {
-  // Overview's own h1 is the company name, so reach it by the rail button and its
-  // section heading rather than the generic `go` helper.
-  await page.getByRole('button', { name: /^Overview/ }).click();
+  // The runtime credential lives on the company's Settings page now, beside the
+  // dials — both are configuration, not the front-page status Overview keeps.
+  await go(page, 'Settings');
   const rc = page.locator('.rc');
   await expect(rc.locator('h2')).toHaveText('Runtime credential');
 
@@ -1799,6 +1818,35 @@ test('a company runtime-credential override is write-only, and revertible to the
   await rc.getByRole('button', { name: 'Use installation default' }).click();
   await expect(rc.locator('.rc-status')).toContainText(/Inheriting the installation default/);
   await expect(rc.getByRole('button', { name: 'Save' })).toBeDisabled();
+});
+
+test('a chosen credential type survives a refresh before the token is pasted', async ({ page }) => {
+  // The picker read "mid-edit" as "a token has been typed", so selecting the type
+  // first — the order the on-screen hint instructs — left that false and the 20s
+  // poll reverted the picker to the stored type. Pasting the token then saved it
+  // under the wrong shape, and the keyproxy injects that with the wrong auth.
+  await page.clock.install();
+  await page.goto('/');
+  await go(page, 'Settings');
+  const rc = page.locator('.rc');
+
+  // An override gives the poll-sync a stored type to revert to; an inheriting
+  // company's credential is null and never fires the watch.
+  await page.locator('#co-rc-type').selectOption('apiKey');
+  await page.locator('#co-rc-value').fill('sk-ant-first-value');
+  await rc.getByRole('button', { name: 'Save' }).click();
+  await expect(rc.locator('.rc-status')).toContainText(/API key/);
+
+  // Change the type without pasting a value, then let a full poll interval pass.
+  await page.locator('#co-rc-type').selectOption('subscription');
+  await page.clock.fastForward('00:25');
+
+  // The deliberate pick stands; the poll did not snap it back to the stored type.
+  await expect(page.locator('#co-rc-type')).toHaveValue('subscription');
+
+  // Leave the fixture inheriting again.
+  await rc.getByRole('button', { name: 'Use installation default' }).click();
+  await expect(rc.locator('.rc-status')).toContainText(/Inheriting the installation default/);
 });
 
 test('a service route is set by name, shows its upstream, and warns when its secret is unset', async ({ page }) => {

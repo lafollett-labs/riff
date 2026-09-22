@@ -10,6 +10,7 @@ import Commons from './views/Commons.vue';
 import Work from './views/Work.vue';
 import Companies from './views/Companies.vue';
 import Settings from './views/Settings.vue';
+import CompanySettings from './views/CompanySettings.vue';
 import Inbox from './views/Inbox.vue';
 import Overview from './views/Overview.vue';
 import Secrets from './views/Secrets.vue';
@@ -30,6 +31,10 @@ const VIEWS = [
   { id: 'services', label: 'Services', comp: Services },
   { id: 'vitals',   label: 'Vitals',   comp: Vitals },
   { id: 'feed',     label: 'Feed',     comp: Feed },
+  // A company's own settings — how hard it works, and its runtime credential.
+  // Bottom-anchored, the settings convention, and a distinct id from the
+  // installation-level 'settings' the switcher opens.
+  { id: 'config',   label: 'Settings', comp: CompanySettings },
 ] as const;
 
 const view = ref<string>('envelope');

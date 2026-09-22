@@ -87,3 +87,25 @@ trace; no regressions. Two awareness-level items surfaced, both non-blocking:
 level items remain, and the cheap a11y one was applied. The split fixes two latent
 safety/auth bugs the old Overview shipped, and both are now covered by regression
 tests.
+
+## Icon follow-on (commits `1215190`, `157ce17`)
+
+A separate, presentational follow-on: each rail nav item got a line-drawn glyph
+(`desk/src/NavIcon.vue`), stroked in `currentColor` — `var(--faint)` at rest,
+`var(--muted)` on hover, `var(--gold)` on the active item. Icons are `aria-hidden`;
+the text label stays the accessible name, so the switcher buttons and e2e selectors
+are unchanged.
+
+pe-vue five-pass on `1215190`: architecture clean (design tokens, no raw hex), the
+`span:first-child` → `.lbl` flex change verified correct, all 13 view ids had a
+matching branch. One awareness finding:
+
+- **LOW-001 — `NavIcon` had a `name: string` prop and no fallback branch**, so a
+  future view added without an icon would ship a silently-empty `<svg>` with no
+  compile-time signal — the exact drift the desk's SFC type pairing catches
+  elsewhere. **Applied (`157ce17`):** the prop is now the union of ids NavIcon
+  draws; because `VIEWS` is `as const`, `<NavIcon :name="v.id">` typechecks only
+  while every view has an icon. Verified the guard fires: a branchless view raises
+  `TS2322 "'reports' is not assignable to type 'NavName'"` at the call site.
+
+✅ **APPROVED** — icon follow-on. `npm run check` clean; `npm run test:ui` 77 pass.

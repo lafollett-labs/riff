@@ -25,7 +25,7 @@ const NOW = '2026-08-25T12:00:00.000Z';
 const person = (id: string, tier: Tier = 'member'): Agent => ({
   id, name: id[0]!.toUpperCase() + id.slice(1), tier, role: 'engineer',
   department: '', reportsTo: 'ceo', status: 'active', activity: '', mandate: '',
-  hiredAt: '2026-08-01T00:00:00.000Z', hiredBy: null, model: 'claude-opus-5',
+  hiredAt: '2026-08-01T00:00:00.000Z', hiredBy: null, model: 'claude-opus-5', effort: 'company',
 });
 
 let clock: ReturnType<typeof fixedClock>;

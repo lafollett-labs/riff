@@ -891,6 +891,65 @@ test('how hard a company works is a setting, not a constant in the source', asyn
   await expect(page.getByLabel('Turns a shift')).toHaveValue('120');
 });
 
+test('what the staff think with is a company setting, saved without a restart', async ({ page }) => {
+  // Every seat was stamped claude-opus-5 at hire and effort was one constant
+  // in the source, so the day a better model shipped it reached nobody.
+  await go(page, 'Settings');
+  const mind = page.locator('.mind');
+  const model = page.locator('#co-model');
+  const effort = page.locator('#co-effort');
+  await expect(model).toHaveValue('default');
+  await expect(model.locator('option[value="default"]')).toContainText('Default');
+  await expect(effort).toHaveValue('medium');
+  await expect(mind.getByRole('button', { name: 'Save thinking' })).toBeDisabled();
+
+  await effort.selectOption('high');
+  await mind.getByRole('button', { name: 'Save thinking' }).click();
+  await expect(mind.getByRole('status')).toHaveText('Saved.');
+  await expect(mind.getByRole('button', { name: 'Save thinking' })).toBeDisabled();
+
+  await page.reload();
+  await go(page, 'Settings');
+  await expect(page.locator('#co-effort')).toHaveValue('high');
+
+  // Put it back: the company is shared by every test in this file.
+  await page.locator('#co-effort').selectOption('medium');
+  await page.locator('.mind').getByRole('button', { name: 'Save thinking' }).click();
+  await expect(page.locator('.mind').getByRole('status')).toHaveText('Saved.');
+});
+
+test('one seat can think with its own model, and the roster shows who was singled out', async ({ page }) => {
+  await go(page, 'Staff');
+  const card = page.locator('.card', { hasText: 'Wick' });
+  await expect(card.locator('.chip')).toHaveCount(0);
+  await card.click();
+
+  const detail = page.locator('.detail');
+  const model = detail.getByLabel('Model', { exact: true });
+  await expect(model).toHaveValue('company');
+  await expect(model.locator('option[value="company"]')).toContainText('Company default');
+  await expect(detail.getByRole('button', { name: 'Save model and effort' })).toBeDisabled();
+
+  await model.selectOption('sonnet');
+  await detail.getByLabel('Effort', { exact: true }).selectOption('low');
+  await detail.getByRole('button', { name: 'Save model and effort' }).click();
+  await expect(detail.getByRole('status')).toContainText('from their next shift');
+  await expect(card.locator('.chip')).toHaveText('sonnet · low');
+
+  // Handed back, the seat follows the company again and loses its chip.
+  await model.selectOption('company');
+  await detail.getByLabel('Effort', { exact: true }).selectOption('company');
+  await detail.getByRole('button', { name: 'Save model and effort' }).click();
+  await expect(card.locator('.chip')).toHaveCount(0);
+});
+
+test('the board has no model to choose', async ({ page }) => {
+  await go(page, 'Staff');
+  await page.locator('.card', { hasText: 'Tester' }).click();
+  await expect(page.locator('.detail .persona')).toBeVisible();
+  await expect(page.locator('.detail').getByLabel('Model', { exact: true })).toHaveCount(0);
+});
+
 test('the console updates itself as the company works', async ({ page }) => {
   // Views used to load once on mount, so anything the company did while you
   // were looking at a page simply did not appear until you navigated away and
@@ -1253,7 +1312,7 @@ test('an agent can be given a name from the console, id and all', async ({ page 
   await page.locator('.card', { hasText: 'Fen' }).first().click();
   await page.getByRole('button', { name: 'Rename…' }).click();
   await page.getByLabel('New name').fill('Fenwick Ash');
-  await page.getByRole('button', { name: 'Save' }).click();
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
 
   // The id moved with the name, not just the label.
   await expect(page.locator('.card', { hasText: 'Fenwick Ash' })).toBeVisible();

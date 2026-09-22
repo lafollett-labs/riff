@@ -1,5 +1,6 @@
 import type { Agent, AgentId } from '../core/types.ts';
 import type { ServiceRoute } from '../core/config.ts';
+import type { StaffDefaults } from '../core/models.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { TranscriptStore } from '../ledger/transcript.ts';
 import type { Gate } from '../policy/gate.ts';
@@ -121,6 +122,8 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
 
 type Deps = {
   ledger: Ledger; transcript?: TranscriptStore; gate: Gate; world: World; clock: Clock;
+  /** The company's model and effort as of now, asked at each wake. See TickDeps.staff. */
+  staff?: () => StaffDefaults;
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
   release?: 'none' | 'bundle';
   /** This company, and the services its product may reach through the
@@ -629,6 +632,7 @@ export class Scheduler {
       const r = await tick({
         agent: a, ledger: this.#d.ledger, gate: this.#d.gate,
         world: this.#d.world, clock: this.#d.clock,
+        ...(this.#d.staff ? { staff: this.#d.staff() } : {}),
         ...(this.#opts.perTickBudgetUsd != null ? { maxBudgetUsd: this.#opts.perTickBudgetUsd } : {}),
         maxTurns: this.#opts.maxTurns,
         rotateAtContextPct: this.#opts.rotateAtContextPct,

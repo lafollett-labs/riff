@@ -3,6 +3,7 @@ import type { Ledger } from '../ledger/ledger.ts';
 import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import type { Tier } from '../core/types.ts';
+import { INHERIT } from '../core/models.ts';
 
 export type SeatSpec = {
   name: string;
@@ -55,7 +56,7 @@ export const fillSeat = (
     id, name: spec.name, tier: spec.tier, role: spec.role,
     department: spec.department ?? '', reportsTo, status: 'active',
     activity: 'just arrived', mandate: spec.mandate ?? '',
-    hiredAt: clock.iso(), hiredBy: spec.proposedBy, model: 'claude-opus-5',
+    hiredAt: clock.iso(), hiredBy: spec.proposedBy, model: INHERIT, effort: INHERIT,
   });
   world.ensureStaff(id);
 

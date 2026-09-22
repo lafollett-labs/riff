@@ -947,6 +947,104 @@ describe('what a script used to do, the API does', () => {
   });
 });
 
+describe('the board chooses what each seat thinks with', () => {
+  const post = (port: number, body: Record<string, unknown>) =>
+    fetch(`http://localhost:${port}/api/agents/model`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+  const found = (port: number, name: string) =>
+    fetch(`http://localhost:${port}/api/companies`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, ceo: 'Juno', chair: 'Cali', running: false }),
+    });
+
+  test('a seat can be singled out and handed back, and the record says what it was', async () => {
+    const { port, kill } = await serve();
+    try {
+      await found(port, 'Minds Co');
+      const state = async () => (await (await fetch(`http://localhost:${port}/api/state?c=minds-co`)).json()) as
+        { staff: { model: string; effort: string }; agents: Array<{ id: string; model: string; effort: string }> };
+
+      const before = await state();
+      assert.deepEqual(before.staff, { model: 'default', effort: 'medium' }, 'a new company runs on Default');
+      const juno = () => before.agents.find((a) => a.id === 'juno');
+      assert.deepEqual({ model: juno()?.model, effort: juno()?.effort }, { model: 'company', effort: 'company' },
+        'and its CEO follows the company rather than carrying a stamp');
+
+      const r = await post(port, { company: 'minds-co', who: 'juno', model: 'sonnet', effort: 'low' });
+      const body = await r.json() as Record<string, unknown>;
+      assert.equal(r.status, 200, JSON.stringify(body));
+      assert.equal(body['changed'], true);
+      const seat = (await state()).agents.find((a) => a.id === 'juno');
+      assert.deepEqual({ model: seat?.model, effort: seat?.effort }, { model: 'sonnet', effort: 'low' });
+
+      const events = await (await fetch(`http://localhost:${port}/api/events?c=minds-co`)).json() as
+        { events: Array<{ kind: string; actor: string; subject: string | null; dataJson: string | null }> };
+      const e = events.events.find((x) => x.kind === 'agent.model');
+      assert.equal(e?.actor, 'board');
+      assert.deepEqual(JSON.parse(e?.dataJson ?? '{}'),
+        { model: 'sonnet', effort: 'low', was: { model: 'company', effort: 'company' } });
+
+      // Handing one setting back leaves the other where it was.
+      assert.equal((await post(port, { company: 'minds-co', who: 'juno', model: 'company' })).status, 200);
+      const back = (await state()).agents.find((a) => a.id === 'juno');
+      assert.deepEqual({ model: back?.model, effort: back?.effort }, { model: 'company', effort: 'low' });
+    } finally { kill(); }
+  });
+
+  test('no model the CLI does not offer, no effort that does not exist, and never the board', async () => {
+    // A typo is not a value to clamp: it would fail every shift at wake.
+    const { port, kill } = await serve();
+    try {
+      await found(port, 'Strict Co');
+      const ask = (b: Record<string, unknown>) => post(port, { company: 'strict-co', ...b });
+      assert.equal((await ask({ who: 'juno', model: 'gpt-5' })).status, 400);
+      assert.equal((await ask({ who: 'juno', model: '--dangerously-skip-permissions' })).status, 400);
+      assert.equal((await ask({ who: 'juno', effort: 'turbo' })).status, 400);
+      assert.equal((await ask({ who: 'cali', model: 'sonnet' })).status, 409, 'the board is human');
+      assert.equal((await ask({ who: 'nobody', model: 'sonnet' })).status, 404);
+
+      const patch = (staff: Record<string, unknown>) =>
+        fetch(`http://localhost:${port}/api/companies/strict-co`, {
+          method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ staff }),
+        });
+      assert.equal((await patch({ model: 'gpt-5' })).status, 400);
+      assert.equal((await patch({ effort: 'turbo' })).status, 400);
+      assert.equal((await patch({ model: 'sonnet', effort: 'high' })).status, 200);
+      const s = await (await fetch(`http://localhost:${port}/api/state?c=strict-co`)).json() as
+        { staff: unknown; agents: Array<{ id: string; model: string }> };
+      assert.deepEqual(s.staff, { model: 'sonnet', effort: 'high' });
+      assert.equal(s.agents.find((a) => a.id === 'juno')?.model, 'company', 'and none of the refusals moved anyone');
+    } finally { kill(); }
+  });
+
+  test('changing the company default does not let the company go', () => {
+    // A policy change rebuilds the scheduler and aborts whoever is mid-shift.
+    // This is read at each wake instead, so writing it must not cost a shift.
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const { readFileSync } = await import('node:fs');
+      const r = new Registry(systemClock);
+      const a = r.found({ name: 'Steady Co', business: 'x', ceo: 'Juno', chair: 'Cali' });
+      if (!a.ok) throw new Error('found failed');
+      const before = r.get('steady-co').scheduler;
+      await r.update('steady-co', { staff: { model: 'haiku', effort: 'low' } });
+      const after = r.get('steady-co');
+      console.log(JSON.stringify({
+        same: after.scheduler === before,
+        live: after.cfg.staff,
+        disk: JSON.parse(readFileSync(after.cfg.home + '/config.json', 'utf8')).staff,
+      }));
+    `);
+    assert.deepEqual(JSON.parse(out), {
+      same: true,
+      live: { model: 'haiku', effort: 'low' },
+      disk: { model: 'haiku', effort: 'low' },
+    });
+  });
+});
+
 describe('a fresh installation starts empty', () => {
   test('the server founds nothing, and still serves', async () => {
     // It used to found "Untitled Company" so a new checkout was never blank.
@@ -988,10 +1086,23 @@ describe('a shift records how full its context got', () => {
     }
   });
 
-  test('the window comes from the agent\'s own model, not whichever is first', () => {
+  test('the window comes from the model that ran, not whichever is first', async () => {
     // modelUsage carries an auxiliary Haiku at 200K next to a main model at
-    // 1M. Keyed wrong, the percentage is measured against the wrong ceiling.
-    assert.match(staff(), /modelUsage\?\.\[agent\.model\]\?\.contextWindow/);
+    // 1M. Keyed wrong, the percentage is measured against the wrong ceiling —
+    // and keyed on the seat's setting, an alias like `default` matches nothing
+    // and rotation never fires. The key is the id the CLI resolved at init.
+    const { contextWindowOf } = await import('../src/runtime/staff.ts');
+    type Usage = Parameters<typeof contextWindowOf>[0];
+    const usage = {
+      'claude-haiku-4-5-20251001': { contextWindow: 200_000 },
+      'claude-opus-5-5[1m]': { contextWindow: 1_000_000 },
+    } as unknown as Usage;
+    assert.equal(contextWindowOf(usage, 'claude-opus-5-5[1m]'), 1_000_000);
+    assert.equal(contextWindowOf({ 'claude-opus-5-5': { contextWindow: 1_000_000 } } as unknown as Usage,
+      'claude-opus-5-5[1m]'), 1_000_000, 'reported without its suffix');
+    assert.equal(contextWindowOf(usage, 'claude-opus-5-5'), 1_000_000, 'resolved without, reported with');
+    assert.equal(contextWindowOf(usage, 'default'), undefined, 'an alias is not a key, and Haiku is not the answer');
+    assert.equal(contextWindowOf(undefined, 'claude-opus-5-5'), undefined);
   });
 
   test('a shift that never got a turn reports no context rather than zero', () => {
@@ -1136,7 +1247,7 @@ describe('the whole company is readable, not only the board\'s slice', () => {
       const l = a.company.ledger;
       l.upsertAgent({ id: 'ora', name: 'Ora', tier: 'lead', role: 'Head', department: '',
         reportsTo: 'vale', status: 'active', activity: '', mandate: '',
-        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm' });
+        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm', effort: 'company' });
 
       const fanout = l.sendMessage('vale', null, 'to the whole company');
       l.sendMessage('vale', 'ora', 'just for you');
@@ -1177,7 +1288,7 @@ describe('the whole company is readable, not only the board\'s slice', () => {
       const l = a.company.ledger;
       l.upsertAgent({ id: 'ora', name: 'Ora', tier: 'lead', role: 'Head', department: '',
         reportsTo: 'vale', status: 'active', activity: '', mandate: '',
-        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm' });
+        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm', effort: 'company' });
 
       l.sendMessage('vale', 'cali', 'for the chair');
       l.sendMessage('vale', 'ora', 'between colleagues');
@@ -1226,7 +1337,7 @@ describe('the whole company is readable, not only the board\'s slice', () => {
       const l = a.company.ledger;
       l.upsertAgent({ id: 'ora', name: 'Ora', tier: 'lead', role: 'Head', department: '',
         reportsTo: 'vale', status: 'active', activity: '', mandate: '',
-        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm' });
+        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm', effort: 'company' });
 
       l.sendMessage('cali', 'vale', 'section one, before anything else');
       l.sendMessage('cali', ['vale', 'ora'], 'and hire someone');
@@ -1265,7 +1376,7 @@ describe('the whole company is readable, not only the board\'s slice', () => {
       const l = a.company.ledger;
       l.upsertAgent({ id: 'ora', name: 'Ora', tier: 'lead', role: 'Head', department: '',
         reportsTo: 'vale', status: 'active', activity: '', mandate: '',
-        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm' });
+        hiredAt: systemClock.iso(), hiredBy: 'vale', model: 'm', effort: 'company' });
 
       l.sendMessage('vale', 'ora', 'draft the pricing page');
       const delivered = l.sendMessage('cali', ['vale', 'ora'], 'talk to legal first');

@@ -112,7 +112,8 @@ describe('an SDK message maps to the rows that record it', () => {
   test('the final result records the tally, not a wall of nothing', () => {
     record({ type: 'result', subtype: 'success', result: 'done', num_turns: 7, total_cost_usd: 1.25 });
     assert.equal(rows[0]!.role, 'result');
-    assert.deepEqual(rows[0]!.meta, { subtype: 'success', turns: 7, costUsd: 1.25 });
+    assert.deepEqual(rows[0]!.meta, { subtype: 'success', turns: 7, sessionCostUsd: 1.25 },
+      'the conversation\'s running total, named as one — a resume carries it forward');
   });
 
   test('recording never throws — a broken sink cannot fail a shift', () => {

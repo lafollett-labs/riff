@@ -13,7 +13,7 @@ const clock = fixedClock('2026-08-25T10:00:00.000Z');
 const agent = (id: string, tier: Tier, reportsTo: string | null = null): Agent => ({
   id, name: id[0]!.toUpperCase() + id.slice(1), tier, role: tier,
   department: '', reportsTo, status: 'active', activity: '', mandate: '',
-  hiredAt: clock.iso(), hiredBy: null, model: 'x',
+  hiredAt: clock.iso(), hiredBy: null, model: 'x', effort: 'company',
 });
 
 let dir: string, ledger: Ledger, world: World;

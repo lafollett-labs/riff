@@ -9,7 +9,7 @@ import type { Agent, Tier } from '../src/core/types.ts';
 const agent = (id: string, tier: Tier, reportsTo: string | null = 'ceo'): Agent => ({
   id, name: id[0]!.toUpperCase() + id.slice(1), tier, role: tier,
   department: '', reportsTo, status: 'active', activity: '', mandate: '',
-  hiredAt: '2026-08-01T00:00:00.000Z', hiredBy: null, model: 'claude-opus-5',
+  hiredAt: '2026-08-01T00:00:00.000Z', hiredBy: null, model: 'claude-opus-5', effort: 'company',
 });
 
 let clock: ReturnType<typeof fixedClock>;

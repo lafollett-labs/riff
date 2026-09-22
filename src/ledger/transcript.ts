@@ -41,7 +41,7 @@ export type TurnInput = {
   /** Tool name for a call; the call's id for its result. */
   name?: string | null;
   text?: string;
-  /** JSON-serialisable: model, costUsd, isError, subtype, turns, id. */
+  /** JSON-serialisable: model, sessionCostUsd, isError, subtype, turns, id. */
   meta?: unknown;
 };
 

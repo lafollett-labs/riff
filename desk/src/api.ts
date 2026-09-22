@@ -5,17 +5,16 @@
 import type { Vitals, Trend } from '../../src/analytics/types.ts';
 import type { CompanyRef as ConfigCompanyRef, CompanyPolicy, RuntimeCredential, RuntimeCredentialType, ServiceRoute } from '../../src/core/config.ts';
 import type { Turn, SessionSummary } from '../../src/ledger/transcript.ts';
+import type { Effort, ModelCatalog, ModelOption, StaffDefaults } from '../../src/core/models.ts';
+import type { Agent } from '../../src/core/types.ts';
+export type { Effort, ModelCatalog, ModelOption, StaffDefaults };
 export type { ServiceRoute };
 export type { RuntimeCredential, RuntimeCredentialType };
 export type { Turn, SessionSummary };
 export type { Vitals, Trend };
 
 /** Everything the Desk knows, it knows from these. */
-export type Agent = {
-  id: string; name: string; tier: string; role: string;
-  department: string; reportsTo: string | null; status: string;
-  activity: string; mandate: string; hiredAt: string; hiredBy: string | null;
-};
+export type { Agent };
 
 export type Approval = {
   id: string; requestedBy: string; capability: string; tier: string;
@@ -91,6 +90,8 @@ export type State = {
   slug: string;
   company: { name: string; business: string };
   policy: CompanyPolicy;
+  /** The model and effort every seat without its own setting runs on. */
+  staff: StaffDefaults;
   /** This company's OWN runtime credential, or null when it inherits the
    *  installation default; `runtimeCredentialSet` is whether a token value is
    *  stored for it. The value is write-only and never read back. */
@@ -211,9 +212,14 @@ export const api = {
                   changes: { role?: string; mandate?: string; persona?: string }) =>
     send<{ who: string; name: string; changed: string[] }>('/api/agents/redefine', 'POST',
       { company, who, why, ...changes }),
+  /** A seat's own model and effort; `company` hands either back to the company default. */
+  setSeatModel: (company: string, who: string, setting: { model?: string; effort?: Effort | 'company' }) =>
+    send<{ who: string; model: string; effort: string; changed: boolean }>('/api/agents/model', 'POST',
+      { company, who, ...setting }),
   renameCompany: (slug: string,
                   patch: { name?: string; business?: string; slug?: string;
-                           policy?: Partial<CompanyPolicy>; release?: 'none' | 'bundle' }) =>
+                           policy?: Partial<CompanyPolicy>; release?: 'none' | 'bundle';
+                           staff?: Partial<StaffDefaults> }) =>
     send<{ slug: string }>(`/api/companies/${encodeURIComponent(slug)}`, 'PATCH', patch),
   archiveCompany: (slug: string) =>
     send<{ archived: string; at: string }>(`/api/companies/${encodeURIComponent(slug)}`, 'DELETE'),
@@ -231,6 +237,12 @@ export const api = {
       { slug: string; renamed: boolean; manifest: { name: string }; error?: string };
     if (!r.ok) throw new Error(data.error ?? `import → ${r.status}`);
     return data;
+  },
+  /** The models a seat may be given, as the bundled CLI lists them. Install-level, like settings(). */
+  models: async (): Promise<ModelCatalog> => {
+    const r = await fetch('/api/models');
+    if (!r.ok) throw new Error(`/api/models → ${r.status}`);
+    return r.json() as Promise<ModelCatalog>;
   },
   /**
    * The installation's own settings, not any one company — no slug in the query,

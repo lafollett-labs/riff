@@ -153,7 +153,7 @@ describe('a company travels whole', () => {
 
     // Nothing on disk claims to know where the company is.
     assert.deepEqual(res['storedKeys'],
-      ['board', 'ceo', 'company', 'connectors', 'policy', 'release', 'services', 'version']);
+      ['board', 'ceo', 'company', 'connectors', 'policy', 'release', 'services', 'staff', 'version']);
 
     // So moving the folder is all it takes.
     assert.deepEqual(res['slugs'], ['wanderer']);

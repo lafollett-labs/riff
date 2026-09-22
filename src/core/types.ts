@@ -46,7 +46,13 @@ export type Agent = {
   activity: string;
   hiredAt: string;
   hiredBy: AgentId | null;
+  /**
+   * The model this seat runs on: a model id or alias, `company` to follow the
+   * company default, or `human` for a board seat. See src/core/models.ts.
+   */
   model: string;
+  /** This seat's effort level, or `company` to follow the company default. */
+  effort: string;
   /** Why this seat exists. Written by whoever created it; read by the board. */
   mandate: string;
 };

@@ -8,7 +8,7 @@ import type { Agent, AgentId, Tier } from '../src/core/types.ts';
 const staff = (id: string, tier: Tier): Agent => ({
   id, name: id, tier, role: tier, department: '', reportsTo: 'ceo',
   status: 'active', activity: '', mandate: '',
-  hiredAt: '2026-08-01T00:00:00.000Z', hiredBy: null, model: 'claude-opus-5',
+  hiredAt: '2026-08-01T00:00:00.000Z', hiredBy: null, model: 'claude-opus-5', effort: 'company',
 });
 
 /** One executive, three leads, six members — the shape that exposes the bug. */

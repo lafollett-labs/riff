@@ -4,6 +4,7 @@ import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, statSync 
 import { execFileSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { atomicWriteFileSync } from './atomicwrite.ts';
+import { DEFAULT_STAFF, readStaffDefaults, type StaffDefaults } from './models.ts';
 
 /**
  * Where the company lives.
@@ -429,7 +430,7 @@ export const readRuntimeCredential = (raw: unknown): RuntimeCredential | undefin
  * its tests build the exact same route.
  */
 export const RUNTIME_UPSTREAM = 'https://api.anthropic.com';
-export const CLAUDE_CODE_UA = 'claude-code/2.1.270';
+export const CLAUDE_CODE_UA = 'claude-code/2.1.280';
 export const ANTHROPIC_VERSION = '2023-06-01';
 /**
  * Where a shift's Agent SDK is pointed (`ANTHROPIC_BASE_URL`): the keyproxy's
@@ -502,6 +503,13 @@ export type RiffConfig = {
   release: 'none' | 'bundle';
   /** How hard this company works, and what it may authorise. See CompanyPolicy. */
   policy: CompanyPolicy;
+  /**
+   * The model and effort every seat runs on unless the board gave it its own.
+   * Not in `policy` on purpose: a policy change rebuilds the scheduler, which
+   * aborts whoever is mid-shift, and this is read per wake — so changing it
+   * never has to cost a shift. See src/core/models.ts.
+   */
+  staff: StaffDefaults;
   /**
    * Whether this company should be working.
    *
@@ -699,6 +707,7 @@ const fromHome = (home: string): RiffConfig => {
     services: {},
     release: 'none',
     policy: DEFAULT_POLICY,
+    staff: DEFAULT_STAFF,
   };
 };
 
@@ -799,6 +808,7 @@ export const resolveConfig = (cwd = process.cwd(), slug?: string): RiffConfig =>
     // Companies founded before policy existed have none written down, and
     // read back at the defaults rather than at zero.
     policy: readPolicy(stored.policy),
+    staff: readStaffDefaults(stored.staff),
     ...(runtimeCredential ? { runtimeCredential } : {}),
   };
 };

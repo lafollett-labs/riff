@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
-import { api, type Agent, type Event, type State } from '../api';
+import { ref, computed, watch } from 'vue';
+import { api, type Agent, type Effort, type Event, type State } from '../api';
 import { render } from '../markdown';
 import { onEvents } from '../live';
+import { useModels, modelLabel, effortsFor, withStored, EFFORTS, INHERIT } from '../models';
 
 const props = defineProps<{ state: State; events: Event[] }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -30,6 +31,7 @@ const tree = computed(() => {
 const select = async (a: Agent) => {
   open.value = open.value === a.id ? null : a.id;
   persona.value = '';
+  loadMind(a);
   redefining.value = null; // never carry an open editor across a seat switch
   if (!open.value) return;
   loading.value = true;
@@ -156,6 +158,70 @@ const doRedefine = async (a: Agent) => {
   } catch (e) { redefineErr.value = e instanceof Error ? e.message : String(e); }
 };
 
+// A seat's own model and effort. `company` follows the company default set in
+// Settings, which is where every seat starts; picking anything else singles the
+// seat out until it is handed back. Board-only — no staff tool reaches this.
+const { models: catalog, status: catalogStatus } = useModels();
+const mModel = ref('');
+const mEffort = ref('');
+const mSaving = ref(false);
+const mErr = ref('');
+const mSaved = ref('');
+
+const syncMind = (a: Agent) => {
+  mModel.value = a.model;
+  mEffort.value = a.effort;
+};
+/** A different seat opened: its own values, and none of the last seat's messages. */
+const loadMind = (a: Agent) => {
+  syncMind(a);
+  mErr.value = '';
+  mSaved.value = '';
+};
+const openAgent = computed(() => props.state.agents.find((x) => x.id === open.value) ?? null);
+const mDirty = computed(() =>
+  !!openAgent.value && (mModel.value !== openAgent.value.model || mEffort.value !== openAgent.value.effort));
+// The poll replaces the roster every twenty seconds; resync the open seat's
+// pickers from it unless they are mid-edit. Only the values: a save's own
+// refresh lands here too, and must not wipe the "Saved." it just earned.
+watch(() => [openAgent.value?.model, openAgent.value?.effort], () => {
+  if (openAgent.value && !mDirty.value) syncMind(openAgent.value);
+});
+// A fresh edit means the last "Saved." no longer describes the pickers.
+watch(mDirty, (d) => { if (d) mSaved.value = ''; });
+// The view outlives a company switch, and a seat id can exist in both — an
+// unsaved pick must never be saved onto the other company's seat.
+watch(() => props.state.slug, () => {
+  open.value = null;
+  mErr.value = '';
+  mSaved.value = '';
+});
+
+const seatOptions = computed(() =>
+  withStored(catalog.value, catalogStatus.value === 'ready', openAgent.value ? [openAgent.value.model] : []));
+/** The model the seat would run on with the pickers as they stand. */
+const effectiveModel = computed(() => (mModel.value === INHERIT ? props.state.staff.model : mModel.value));
+const takes = computed(() => effortsFor(catalog.value, effectiveModel.value));
+const noEffort = computed(() => takes.value !== null && takes.value.length === 0);
+
+/** A seat singled out gets a chip on its card; one following the company does not. */
+const own = (a: Agent): string => [a.model, a.effort].filter((v) => v !== INHERIT).join(' · ');
+
+const saveMind = async (a: Agent) => {
+  mSaving.value = true;
+  mErr.value = '';
+  try {
+    const r = await api.setSeatModel(props.state.slug, a.id,
+      { model: mModel.value, effort: mEffort.value as Effort | 'company' });
+    mSaved.value = r.changed ? `Saved. ${a.name} runs on it from their next shift.` : 'No change.';
+    emit('changed');
+  } catch (e) {
+    mErr.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    mSaving.value = false;
+  }
+};
+
 const send = async (a: Agent) => {
   if (!draft.value.trim()) return;
   sending.value = true;
@@ -179,6 +245,7 @@ const send = async (a: Agent) => {
         <span class="role">{{ a.role }}</span>
         <span class="faint tier mono">{{ a.tier }}</span>
         <span class="grow" />
+        <span v-if="own(a) && a.tier !== 'board'" class="chip mono" title="Its own model and effort">{{ own(a) }}</span>
         <span v-if="state.awake.includes(a.id)" class="now mono">working now</span>
         <span class="activity muted">{{ a.activity || '—' }}</span>
       </button>
@@ -187,6 +254,33 @@ const send = async (a: Agent) => {
         <div class="meta faint mono">
           {{ a.department }} · hired {{ new Date(a.hiredAt).toLocaleDateString() }}
           <template v-if="a.hiredBy"> by {{ a.hiredBy }}</template>
+        </div>
+        <div v-if="a.tier !== 'board'" class="mind">
+          <label class="pickf">
+            <span class="lbl faint mono">Model</span>
+            <select v-model="mModel" class="rn" aria-label="Model">
+              <option :value="INHERIT">Company default · {{ modelLabel(catalog, state.staff.model) }}</option>
+              <option v-for="o in seatOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+            </select>
+          </label>
+          <label class="pickf">
+            <span class="lbl faint mono">Effort</span>
+            <!-- Never disabled whole: "Company default" must stay choosable, or an
+                 effort override on a model that takes none could not be handed back. -->
+            <select v-model="mEffort" class="rn" aria-label="Effort"
+                    :aria-describedby="noEffort ? `no-effort-${a.id}` : undefined">
+              <option :value="INHERIT">Company default · {{ state.staff.effort }}</option>
+              <option v-for="e in EFFORTS" :key="e" :value="e"
+                      :disabled="takes !== null && !takes.includes(e)">{{ e }}</option>
+            </select>
+          </label>
+          <button class="go" :disabled="!mDirty || mSaving" :aria-busy="mSaving"
+                  aria-label="Save model and effort" @click="saveMind(a)">
+            {{ mSaving ? 'Saving…' : 'Save' }}
+          </button>
+          <span v-if="noEffort" :id="`no-effort-${a.id}`" class="faint hint">This model takes no effort setting; it is ignored.</span>
+          <span v-if="mErr" class="err" role="alert">{{ mErr }}</span>
+          <span v-else-if="mSaved" class="faint hint" role="status">{{ mSaved }}</span>
         </div>
         <div class="persona body" v-html="render(persona || 'No persona on file.')" />
         <div class="say">
@@ -312,6 +406,15 @@ h1 { font-size: 30px; }
 .detail { border: 1px solid var(--line); border-top: 0; border-radius: 0 0 6px 6px;
   background: #191411; padding: 16px 18px; margin: -6px 0 14px; }
 .meta { font-size: 11px; margin-bottom: 12px; }
+.mind { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; margin-bottom: 14px;
+  padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.pickf { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.pickf .lbl { font-size: 10px; letter-spacing: .1em; text-transform: uppercase; }
+.mind select { font-size: 13px; max-width: 100%; }
+.mind .hint { font-size: 11.5px; }
+.mind .err { color: var(--alert); font-size: 12px; }
+.chip { font-size: 10.5px; color: var(--gold); border: 1px solid var(--line-2); border-radius: 10px;
+  padding: 1px 7px; white-space: nowrap; }
 .persona { font-size: 14px; color: var(--ink-2); max-height: 380px; overflow-y: auto; }
 .say { display: flex; gap: 8px; margin-top: 14px; }
 .say textarea { flex: 1; font: inherit; font-size: 13px; background: #15100d; color: var(--ink);

@@ -23,7 +23,7 @@ import type { RiffClient } from './client.ts';
 const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 // Without a Claude-Code-shaped User-Agent the usage endpoint answers with
 // aggressive 429s; the beta header is what makes it return the windows at all.
-const UA = 'claude-code/2.1.270';
+const UA = 'claude-code/2.1.280';
 const BETA = 'oauth-2025-04-20';
 const DEFAULT_INTERVAL_MS = 5 * 60_000;
 

@@ -13,7 +13,7 @@ const clock = fixedClock('2026-09-14T10:00:00.000Z');
 const agent = (id: string, tier: Tier, over: Partial<Agent> = {}): Agent => ({
   id, name: id[0]!.toUpperCase() + id.slice(1), tier, role: tier,
   department: '', reportsTo: null, status: 'active', activity: '', mandate: 'seat exists to X',
-  hiredAt: clock.iso(), hiredBy: null, model: 'x', ...over,
+  hiredAt: clock.iso(), hiredBy: null, model: 'x', effort: 'company', ...over,
 });
 
 let dir: string, ledger: Ledger, world: World;

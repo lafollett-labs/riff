@@ -30,6 +30,37 @@ export class Ledger {
     this.#db = new DatabaseSync(path);
     this.#clock = clock;
     this.#db.exec(readFileSync(SCHEMA, 'utf8'));
+    this.#migrate();
+  }
+
+  /**
+   * Ledgers written before a column existed. schema.sql only ever creates, so a
+   * table that predates a column is brought up to date here, once.
+   */
+  #migrate(): void {
+    const cols = (this.#db.prepare('PRAGMA table_info(agents)').all() as Row[]).map((r) => str(r['name']));
+    if (!cols.includes('effort')) {
+      this.#db.exec("ALTER TABLE agents ADD COLUMN effort TEXT NOT NULL DEFAULT 'company'");
+    }
+    // Every seat was stamped with a model id at hire, and nothing could ever
+    // change it — so no stored value is anybody's choice. They move to the
+    // company default together, once; a choice made after this is kept.
+    // The guard is read again inside the write lock: two processes opening one
+    // ledger (the gateway, and an `exec node -e` beside it) must not both run
+    // it, or the second undoes a choice the board made in between.
+    if (this.getMeta('migrated:seat-models') == null) {
+      this.#db.exec('BEGIN IMMEDIATE');
+      try {
+        if (this.getMeta('migrated:seat-models') == null) {
+          this.#db.prepare("UPDATE agents SET model='company' WHERE model!='human'").run();
+          this.setMeta('migrated:seat-models', this.#clock.iso());
+        }
+        this.#db.exec('COMMIT');
+      } catch (e) {
+        this.#db.exec('ROLLBACK');
+        throw e;
+      }
+    }
   }
 
 
@@ -232,15 +263,15 @@ export class Ledger {
   // ---------------------------------------------------------------- agents
   upsertAgent(a: Agent): void {
     this.#db.prepare(
-      `INSERT INTO agents(id,name,tier,role,department,reports_to,status,activity,mandate,hired_at,hired_by,model)
-       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+      `INSERT INTO agents(id,name,tier,role,department,reports_to,status,activity,mandate,hired_at,hired_by,model,effort)
+       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
        ON CONFLICT(id) DO UPDATE SET
          name=excluded.name, tier=excluded.tier, role=excluded.role,
          department=excluded.department, reports_to=excluded.reports_to,
          status=excluded.status, activity=excluded.activity,
-         mandate=excluded.mandate, model=excluded.model`
+         mandate=excluded.mandate, model=excluded.model, effort=excluded.effort`
     ).run(a.id, a.name, a.tier, a.role, a.department, a.reportsTo, a.status,
-          a.activity, a.mandate, a.hiredAt, a.hiredBy, a.model);
+          a.activity, a.mandate, a.hiredAt, a.hiredBy, a.model, a.effort);
   }
 
   /**
@@ -290,6 +321,7 @@ export class Ledger {
       reportsTo: nstr(r['reports_to']), status: str(r['status']) as Agent['status'],
       activity: str(r['activity']), mandate: str(r['mandate']),
       hiredAt: str(r['hired_at']), hiredBy: nstr(r['hired_by']), model: str(r['model']),
+      effort: str(r['effort']),
     };
   }
 

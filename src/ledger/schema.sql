@@ -27,7 +27,9 @@ CREATE TABLE IF NOT EXISTS agents (
   mandate     TEXT NOT NULL DEFAULT '',
   hired_at    TEXT NOT NULL,
   hired_by    TEXT REFERENCES agents(id),
-  model       TEXT NOT NULL
+  model       TEXT NOT NULL,
+  -- 'company' follows the company default; see src/core/models.ts.
+  effort      TEXT NOT NULL DEFAULT 'company'
 );
 
 

@@ -1,8 +1,9 @@
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
-import { query, type CanUseTool, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { query, type CanUseTool, type ModelUsage, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
+import { DEFAULT_STAFF, mindOf, type Effort, type StaffDefaults } from '../core/models.ts';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
@@ -103,6 +104,10 @@ export const sandboxFilesystem = (worldRoot: string, configDir?: string): {
 
 export type TickDeps = {
   agent: Agent;
+  /** The company's model and effort, for a seat that has none of its own. Read
+   *  per wake, so a change reaches the next shift without a rebuild. See
+   *  src/core/models.ts. Absent runs the built-in default. */
+  staff?: StaffDefaults;
   ledger: Ledger;
   gate: Gate;
   world: World;
@@ -886,9 +891,82 @@ export const recordShiftMessage = (
       }
     } else if (m.type === 'result') {
       const text = m.subtype === 'success' && 'result' in m ? String((m as { result?: unknown }).result ?? '') : '';
-      sink.append({ sessionId, agentId, role: 'result', kind: 'result', text, meta: { subtype: m.subtype, turns: m.num_turns, costUsd: m.total_cost_usd } });
+      sink.append({ sessionId, agentId, role: 'result', kind: 'result', text, meta: { subtype: m.subtype, turns: m.num_turns,
+        // The conversation's running total, not this leg's: from 0.3.280 a resume
+        // carries the saved total forward (see meterDelta). Named for what it is.
+        sessionCostUsd: m.total_cost_usd } });
     }
   } catch { /* recording must never fail a shift */ }
+};
+
+/** A conversation's running totals as its CLI last reported them. */
+export type SessionMeter = { session: string; costUsd: number; usage: Record<string, TokenCount> };
+
+const ZERO: TokenCount = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+
+/**
+ * What one result added to a conversation, given the totals it had reached.
+ *
+ * From 0.3.280 a resumed session carries its saved totals into the new query:
+ * the first result of a resumed shift already includes every earlier shift of
+ * the conversation (sdk.d.ts, modelUsage: "a resumed or forked session
+ * continues from the totals its transcript saved"). 0.3.243 started each query
+ * at zero, and summing results was correct. Summed now, every shift would
+ * record the whole conversation so far, and vitals — which adds shifts up —
+ * would grow quadratically with the conversation's age.
+ *
+ * The baseline only counts for the same session: a new one starts at zero. A
+ * figure below the baseline is a reset (or a crash result carrying zeros), so
+ * it counts in full and never makes a delta negative; the baseline keeps the
+ * higher of the two so a zeroed crash result cannot erase it.
+ */
+export const meterDelta = (
+  before: SessionMeter | null, session: string, costUsd: number,
+  usage: Record<string, ModelUsage> | undefined,
+): { costUsd: number; tokens: TokenCount; after: SessionMeter } => {
+  const base = before?.session === session ? before : null;
+  const tokens: TokenCount = { ...ZERO };
+  const after: SessionMeter = { session, costUsd: 0, usage: { ...(base?.usage ?? {}) } };
+  for (const [model, u] of Object.entries(usage ?? {})) {
+    const now: TokenCount = {
+      input: u.inputTokens, output: u.outputTokens,
+      cacheRead: u.cacheReadInputTokens, cacheWrite: u.cacheCreationInputTokens,
+    };
+    const was = base?.usage[model] ?? ZERO;
+    const reset = (Object.keys(now) as Array<keyof TokenCount>).some((k) => now[k] < was[k]);
+    const kept = { ...ZERO };
+    for (const k of Object.keys(now) as Array<keyof TokenCount>) {
+      tokens[k] += reset ? now[k] : now[k] - was[k];
+      kept[k] = Math.max(now[k], was[k]);
+    }
+    after.usage[model] = kept;
+  }
+  const wasCost = base?.costUsd ?? 0;
+  after.costUsd = Math.max(costUsd, wasCost);
+  return { costUsd: costUsd < wasCost ? costUsd : costUsd - wasCost, tokens, after };
+};
+
+/**
+ * The context window of the model a shift ran on.
+ *
+ * modelUsage keys on the wire id, and the seat's setting may be an alias —
+ * `default`, `opus[1m]` — that never appears there; keying on the setting left
+ * the denominator at zero and rotation silently off. The init message's
+ * resolved id is the key, tried with and without its `[1m]` suffix since the
+ * two are not reported the same way everywhere. Never "the largest entry": an
+ * auxiliary Haiku sits beside the main model and must not be mistaken for it.
+ */
+export const contextWindowOf = (
+  usage: Record<string, ModelUsage> | undefined, model: string,
+): number | undefined => {
+  if (!usage) return undefined;
+  const bare = model.replace(/\[[^\]]*\]$/, '');
+  for (const k of [model, bare]) {
+    const w = usage[k]?.contextWindow;
+    if (w) return w;
+  }
+  const hit = Object.keys(usage).find((k) => k.replace(/\[[^\]]*\]$/, '') === bare);
+  return hit ? usage[hit]?.contextWindow : undefined;
 };
 
 /**
@@ -1015,6 +1093,9 @@ export const tick = async (
    * on the agent's model or the percentage is against the wrong ceiling.
    */
   let contextWindow = 0;
+  const mind = mindOf(agent, d.staff ?? DEFAULT_STAFF);
+  /** The model and effort the CLI reported at init: null effort means none was sent. */
+  const ran: { model?: string; effort?: Effort | null } = {};
   /**
    * What the shift cost in context, for the record. Omitted rather than
    * reported as zero when a shift died before any assistant turn — a 0% that
@@ -1042,6 +1123,10 @@ export const tick = async (
       if (w.resetsAt != null) byWindow[`resets_${kind}`] = w.resetsAt;
     }
     return {
+      // What the shift ran on, so vitals can set output and window spend
+      // against it — the reason to try a model on a seat at all.
+      model: ran.model ?? mind.model,
+      effort: ran.effort === undefined ? mind.effort : (ran.effort ?? 'none'),
       ...byWindow,
       ...(spentAny()
         ? {
@@ -1087,10 +1172,16 @@ export const tick = async (
    * From `modelUsage` rather than `usage` on the SDK's own instruction: usage
    * is the main loop only, while modelUsage covers subagents, sidechains and
    * compaction — all of which spend the operator's window. It is cumulative
-   * within one query() call, and each leg is one call answering with one
-   * result, so legs add and turns within a leg do not.
+   * across the whole conversation, resumes included, so each result is counted
+   * as what it added over the last one this seat's session reported — see
+   * meterDelta. The baseline is kept in meta beside the session id, because
+   * the conversation outlives the shift.
    */
   const tokens: TokenCount = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+  let meterBase: SessionMeter | null = (() => {
+    try { return JSON.parse(ledger.getMeta(`session-meter:${agent.id}`) || 'null') as SessionMeter | null; }
+    catch { return null; }
+  })();
 
   /**
    * What each leg was allowed and what it came back having spent.
@@ -1332,8 +1423,9 @@ export const tick = async (
     // Hold the prompt open as a one-message stream instead of passing a string.
     //
     // A string prompt makes the SDK mark the query single-turn and close stdin
-    // the instant the first result lands (0.3.243, Query.readMessages: "First
-    // result received for single-turn query, closing stdin"). stdin carries the
+    // the instant the first result lands (0.3.243, unchanged in 0.3.280;
+    // Query.readMessages: "First result received for single-turn query,
+    // closing stdin"). stdin carries the
     // canUseTool control channel, so on a RESUMED session — whose transcript
     // loads over async I/O that jitters startup ordering — the result can land
     // at or before the first tool turn, stdin closes, and every later gate call
@@ -1360,12 +1452,17 @@ export const tick = async (
       prompt: onePrompt(),
       options: {
         cwd: world.root,
-        model: agent.model,
+        model: mind.model,
         // Rebuilt per leg rather than per shift: after a hand-over this is
         // where the memory the agent just wrote itself comes back in. Build
         // it once at the top and the replacement conversation starts with a
         // stale copy of the very notes it was told to rely on.
-        systemPrompt: buildSystemPrompt(d),
+        // snapshot:false, or it is not rebuilt at all. From 0.3.280 the CLI
+        // records a conversation's system prompt on its first request and
+        // replays that record on every resume until compaction — so a seat
+        // resumed shift after shift would keep the roster, rules, persona and
+        // memory of the day its conversation began.
+        systemPrompt: { type: 'custom', prompt: buildSystemPrompt(d), snapshot: false },
 
         // ---- isolation ----
         settingSources: [],          // no ~/.claude/settings.json, no CLAUDE.md
@@ -1452,7 +1549,7 @@ export const tick = async (
         // ---- limits ----
         maxTurns,
         ...(d.maxBudgetUsd != null ? { maxBudgetUsd: d.maxBudgetUsd } : {}),
-        effort: 'medium',
+        effort: mind.effort,
         thinking: { type: 'adaptive' },
 
         // The child env inherits the factory env, adds the toolchain cache and
@@ -1557,6 +1654,11 @@ export const tick = async (
         // poll for six minutes (Carver, 2026-09-16, seq 6286). Once the result is
         // in, ignore any init that follows it.
         if (sawResult) { trace('init after result — phantom re-init, ignored'); continue; }
+        // What the CLI resolved the setting to — `default` becomes a real model
+        // id here, and an effort the model cannot take comes back lowered — so
+        // the record says what ran, not what was asked for.
+        ran.model = m.model;
+        if (m.effort !== undefined) ran.effort = m.effort;
         toolsUp = toolsConnected(m.mcp_servers);
         trace(`init tools=${companyServerStatus(m.mcp_servers) ?? 'absent'}`);
         // The init snapshot can precede the in-process ('sdk') company server's
@@ -1605,7 +1707,10 @@ export const tick = async (
         sawResult = true;
         trace(`result ${m.subtype} turns=${m.num_turns}`);
         turns += m.num_turns;
-        costUsd += m.total_cost_usd;
+        const added = meterDelta(meterBase, m.session_id, m.total_cost_usd, m.modelUsage);
+        meterBase = added.after;
+        ledger.setMeta(`session-meter:${agent.id}`, JSON.stringify(meterBase));
+        costUsd += added.costUsd;
         legs.push({ budget: maxTurns, turns: m.num_turns, subtype: m.subtype });
 
         // The turn ceiling arrives as a result, not as a throw.
@@ -1624,14 +1729,15 @@ export const tick = async (
         // Counted before the hand-over guard below: a hand-over leg spends the
         // operator's window like any other, even though its context is the
         // conversation we are about to throw away.
-        for (const u of Object.values(m.modelUsage ?? {})) {
-          tokens.input += u.inputTokens;
-          tokens.output += u.outputTokens;
-          tokens.cacheRead += u.cacheReadInputTokens;
-          tokens.cacheWrite += u.cacheCreationInputTokens;
-        }
+        tokens.input += added.tokens.input;
+        tokens.output += added.tokens.output;
+        tokens.cacheRead += added.tokens.cacheRead;
+        tokens.cacheWrite += added.tokens.cacheWrite;
         if (handover) { releaseInput(); continue; }
-        contextWindow = m.modelUsage?.[agent.model]?.contextWindow ?? contextWindow;
+        const window = contextWindowOf(m.modelUsage, ran.model ?? mind.model);
+        // Unresolved leaves the denominator at zero and rotation silently off.
+        if (!window) trace(`no context window for ${ran.model ?? mind.model} in ${Object.keys(m.modelUsage ?? {}).join(',')}`);
+        contextWindow = window ?? contextWindow;
         // "ended: error_max_turns" was going into the journal and the commit
         // message — an error code standing in for the agent's own account of
         // its shift. Their last words are a truer record than the subtype.

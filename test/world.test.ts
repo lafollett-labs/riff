@@ -80,7 +80,7 @@ describe('notes — the 742-notes mechanic', () => {
     ledger.upsertAgent({
       id: 'greg', name: 'Greg', tier: 'lead', role: 'Head of Product',
       department: 'product', reportsTo: null, status: 'active',
-      activity: '', mandate: '', hiredAt: clock.iso(), hiredBy: null, model: 'claude-opus-5',
+      activity: '', mandate: '', hiredAt: clock.iso(), hiredBy: null, model: 'claude-opus-5', effort: 'company',
     });
     world.ensureStaff('greg');
     world.writeNote('greg', 'dennis', 'Dennis carried the listings', 'He did most of the work today.');

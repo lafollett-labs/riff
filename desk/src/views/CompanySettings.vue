@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, nextTick } from 'vue';
-import { api, type Event, type State, type RuntimeCredentialType } from '../api';
+import { api, type Effort, type Event, type State, type RuntimeCredentialType } from '../api';
+import { useModels, effortsFor, withStored, EFFORTS, EFFORT_HINTS } from '../models';
 
 // `events` is part of the shared per-company view contract App.vue binds; this
 // view reads only `state`. Declaring it keeps it off the root as a fallthrough.
@@ -13,6 +14,55 @@ const emit = defineEmits<{ changed: [] }>();
  * config here outgrew a panel behind a Tune toggle — a settings surface shows
  * its controls, it does not hide them.
  */
+
+// --------------------------------------------------------------- thinking
+/**
+ * The model and effort every seat runs on unless it has its own (Staff). Saved
+ * on its own, apart from the dials, because it is read at each wake: saving it
+ * rebuilds nothing, so nobody mid-shift is cut off for it.
+ */
+const { models: catalog, status: catalogStatus, fallback: catalogFallback } = useModels();
+const model = ref(props.state.staff.model);
+const effort = ref<Effort>(props.state.staff.effort);
+const mindSaving = ref(false);
+const mindErr = ref('');
+const mindSaved = ref(false);
+
+const mindDirty = computed(() =>
+  model.value !== props.state.staff.model || effort.value !== props.state.staff.effort);
+/** The catalog's rows, plus the stored value when the CLI no longer lists it. */
+const modelOptions = computed(() =>
+  withStored(catalog.value, catalogStatus.value === 'ready', [props.state.staff.model, model.value]));
+const modelNote = computed(() => catalog.value.find((m) => m.value === model.value)?.description ?? '');
+/** null: unknown model, so every level stays offered and the server decides. */
+const takes = computed(() => effortsFor(catalog.value, model.value));
+const noEffort = computed(() => takes.value !== null && takes.value.length === 0);
+
+const resetMind = () => {
+  model.value = props.state.staff.model;
+  effort.value = props.state.staff.effort;
+  mindErr.value = '';
+};
+watch(() => props.state.staff, () => { if (!mindDirty.value) resetMind(); }, { deep: true });
+watch(() => props.state.slug, () => { mindSaved.value = false; resetMind(); });
+watch(mindDirty, (d) => { if (d) mindSaved.value = false; });
+
+const saveMind = async () => {
+  mindSaving.value = true;
+  mindErr.value = '';
+  try {
+    await api.renameCompany(props.state.slug, { staff: { model: model.value, effort: effort.value } });
+    const s = (await api.state()).staff;
+    model.value = s.model;
+    effort.value = s.effort;
+    mindSaved.value = true;
+    emit('changed');
+  } catch (e) {
+    mindErr.value = e instanceof Error ? e.message : 'Could not save.';
+  } finally {
+    mindSaving.value = false;
+  }
+};
 
 // ------------------------------------------------------------------ dials
 /**
@@ -263,6 +313,52 @@ const useDefault = async () => {
       <p class="faint mono line">{{ state.company.name }} · {{ state.slug }}</p>
     </header>
 
+    <section class="mind">
+      <h2>Thinking</h2>
+      <p class="muted intro">
+        The model every seat runs on, and how hard it thinks, unless a seat has its
+        own on the Staff page. Read at each wake, so a change reaches everyone's
+        next shift and nothing restarts.
+      </p>
+
+      <div class="dial">
+        <label class="k" for="co-model">Model</label>
+        <select id="co-model" v-model="model" class="pick" aria-describedby="why-model">
+          <option v-for="o in modelOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
+        </select>
+        <span class="why faint" id="why-model">
+          {{ modelNote || 'Default is Claude Code’s own default: the latest Opus the bundled CLI knows.' }}
+        </span>
+      </div>
+      <div class="dial">
+        <label class="k" for="co-effort">Effort</label>
+        <select id="co-effort" v-model="effort" class="pick" :disabled="noEffort"
+                aria-describedby="why-effort">
+          <option v-for="e in EFFORTS" :key="e" :value="e"
+                  :disabled="takes !== null && !takes.includes(e)">{{ e }}</option>
+        </select>
+        <span class="why faint" id="why-effort">
+          {{ noEffort ? 'This model takes no effort setting; it is ignored.' : EFFORT_HINTS[effort] }}
+        </span>
+      </div>
+
+      <p v-if="catalogStatus === 'failed'" class="faint note">
+        The model list could not be loaded, so only the current setting is offered.
+      </p>
+      <p v-else-if="catalogFallback" class="faint note">
+        The bundled CLI could not be asked for its models, so these are the common ones every account has.
+      </p>
+      <p v-if="mindErr" class="err" role="alert">{{ mindErr }}</p>
+      <div class="row">
+        <button class="go" :disabled="mindSaving || !mindDirty" :aria-busy="mindSaving"
+                aria-label="Save thinking" @click="saveMind">
+          {{ mindSaving ? 'Saving…' : 'Save' }}
+        </button>
+        <button class="ghost" :disabled="mindSaving || !mindDirty" @click="resetMind">Reset</button>
+      </div>
+      <p v-if="!mindErr && mindSaved" class="ok" role="status">Saved.</p>
+    </section>
+
     <section class="dials">
       <h2>How hard it works</h2>
       <p class="muted intro">
@@ -385,9 +481,14 @@ h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: v
 .ok { color: var(--gold); font-size: 13px; margin-top: 6px; }
 .row { display: flex; gap: 8px; margin-top: 16px; }
 
-.dials { border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+.dials, .mind { border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
   padding: 16px 18px 18px; margin-bottom: 26px; }
-.dials h2 { margin-bottom: 8px; }
+.dials h2, .mind h2 { margin-bottom: 8px; }
+.mind .dial { grid-template-columns: 190px minmax(0, 300px) 1fr; }
+.pick { font: inherit; font-size: 13px; background: #15100d; color: var(--ink); min-width: 0;
+  border: 1px solid var(--line-2); border-radius: 5px; padding: 5px 8px; max-width: 100%; }
+.pick:focus { outline: none; border-color: var(--accent); }
+.note { font-size: 11.5px; line-height: 1.5; margin-top: 6px; }
 .intro { font-size: 12.5px; line-height: 1.6; margin-bottom: 6px; max-width: 62ch; }
 .group-title { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--faint);
   margin: 0; padding-top: 13px; border-top: 1px solid var(--line); }
@@ -401,7 +502,7 @@ h2 { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: v
   border: 1px solid var(--line-2); border-radius: 5px; padding: 5px 8px; }
 .dial .pct { white-space: nowrap; color: var(--faint); font-size: 12px; }
 @media (max-width: 560px) {
-  .dial { grid-template-columns: 1fr; gap: 3px; padding: 8px 0; }
+  .dial, .mind .dial { grid-template-columns: 1fr; gap: 3px; padding: 8px 0; }
   .dial input { width: 100%; max-width: 160px; }
 }
 

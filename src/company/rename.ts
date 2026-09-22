@@ -36,8 +36,8 @@ export const renameAgent = (
     // Order matters: insert the new row before repointing anything at it, and
     // drop the old one only once nothing references it.
     db.prepare(
-      `INSERT INTO agents(id,name,tier,role,department,reports_to,status,activity,mandate,hired_at,hired_by,model)
-       SELECT ?,?,tier,role,department,reports_to,status,activity,mandate,hired_at,hired_by,model
+      `INSERT INTO agents(id,name,tier,role,department,reports_to,status,activity,mandate,hired_at,hired_by,model,effort)
+       SELECT ?,?,tier,role,department,reports_to,status,activity,mandate,hired_at,hired_by,model,effort
        FROM agents WHERE id=?`
     ).run(newId, name, oldId);
 

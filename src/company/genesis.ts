@@ -6,6 +6,7 @@ import { World } from '../worldfs/world.ts';
 import { constitutionFor, RULES_TEXT } from '../policy/rules.ts';
 import { scaffoldConfig, type RiffConfig } from '../core/config.ts';
 import type { Clock } from '../core/clock.ts';
+import { INHERIT } from '../core/models.ts';
 
 /**
  * Found the company.
@@ -55,7 +56,7 @@ export const found = (cfg: RiffConfig, clock: Clock): {
       id: member.id, name: member.name, tier: 'board', role: member.role,
       department: 'board', reportsTo: null, status: 'active',
       activity: '', mandate: 'Terminal authority. Approves what leaves the company.',
-      hiredAt: clock.iso(), hiredBy: null, model: 'human',
+      hiredAt: clock.iso(), hiredBy: null, model: 'human', effort: INHERIT,
     });
     world.ensureStaff(member.id);
   }
@@ -68,7 +69,7 @@ export const found = (cfg: RiffConfig, clock: Clock): {
     activity: 'founding the company',
     mandate: `Build ${cfg.company.name} into a company that does real work in ${isPhrase ? business : 'its field'}. ` +
              `Decide what it is for, who it needs, and what it should ship. The board approves; you decide what to ask for.`,
-    hiredAt: clock.iso(), hiredBy: chair?.id ?? null, model: 'claude-opus-5',
+    hiredAt: clock.iso(), hiredBy: chair?.id ?? null, model: INHERIT, effort: INHERIT,
   });
   }
 
@@ -84,7 +85,7 @@ export const found = (cfg: RiffConfig, clock: Clock): {
       id: member.id, name: member.name, tier: 'board', role: member.role,
       department: 'board', reportsTo: null, status: 'active',
       activity: '', mandate: 'Terminal authority. Approves what leaves the company.',
-      hiredAt: clock.iso(), hiredBy: null, model: 'human',
+      hiredAt: clock.iso(), hiredBy: null, model: 'human', effort: INHERIT,
     });
   }
 

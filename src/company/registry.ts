@@ -11,6 +11,7 @@ import {
   type CompanyPolicy, type CompanyRef, type RiffConfig, type RuntimeCredential, type ServiceRoute,
 } from '../core/config.ts';
 import type { Clock } from '../core/clock.ts';
+import { DEFAULT_STAFF, readStaffDefaults, type StaffDefaults } from '../core/models.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { atomicWriteFileSync } from '../core/atomicwrite.ts';
@@ -226,6 +227,7 @@ export class Registry {
       // Absent means every default, and every named field is clamped, so a
       // request cannot ask for a thousand concurrent agents.
       policy: input.policy === undefined ? DEFAULT_POLICY : readPolicy(input.policy),
+      staff: DEFAULT_STAFF,
     };
     scaffoldConfig(cfg);
     return { ok: true, company: this.#build(slug, cfg) };
@@ -278,6 +280,9 @@ export class Registry {
         maxSessionMs: Math.round(p.maxSessionHours * 60 * 60_000),
         shiftTrace: p.shiftTrace,
       },
+      // A getter, not a value: the company default is changed without a
+      // rebuild (see update), so the scheduler asks at each wake.
+      staff: () => this.#open.get(slug)?.cfg.staff ?? cfg.staff,
       // A run that ends on its own bound is as stopped as one the operator
       // stopped, and has to be recorded the same way or the next boot starts
       // it again with the bound gone. See Deps.onBoundReached.
@@ -343,7 +348,11 @@ export class Registry {
              // service route, NOT structural: the keyproxy reads it fresh per
              // request, so a change is live without a rebuild that would abort a
              // mid-write shift. The token VALUE is written to the vault, not here.
-             runtimeCredential?: RuntimeCredential | null },
+             runtimeCredential?: RuntimeCredential | null;
+             // The company's model and effort. Not structural, for the reason
+             // runtimeCredential is not: it is read at each wake, so writing
+             // it here is enough, and a rebuild would abort mid-write shifts.
+             staff?: Partial<StaffDefaults> },
   ): Promise<{ ok: true; slug: string } | { ok: false; reason: string }> {
     if (!this.has(slug)) return { ok: false, reason: `no company '${slug}'` };
 
@@ -380,6 +389,7 @@ export class Registry {
         business: patch.business?.trim() ?? cfg.company.business,
       },
       policy: readPolicy({ ...readPolicy(cfg.policy), ...(patch.policy ?? {}) }),
+      staff: readStaffDefaults({ ...readStaffDefaults(cfg.staff), ...(patch.staff ?? {}) }),
       // The route work leaves by. Settable here because it was settable
       // nowhere: founding took it, nothing else did, and turning a company's
       // releases on afterwards meant hand-editing config.json on a running

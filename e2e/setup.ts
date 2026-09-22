@@ -160,7 +160,7 @@ export default async function globalSetup(): Promise<void> {
   transcript.append({ sessionId: sid, agentId: 'fen', role: 'user', kind: 'tool_result',
     name: 'tu_2', text: 'refused: pushing to main requires board review', meta: { isError: true } });
   transcript.append({ sessionId: sid, agentId: 'fen', role: 'result', kind: 'result',
-    text: 'done', meta: { subtype: 'success', turns: 4, costUsd: 0.42 } });
+    text: 'done', meta: { subtype: 'success', turns: 4, sessionCostUsd: 0.42 } });
 
   // A shift longer than one page (the endpoint serves 500 blocks a page), so the
   // console's auto-drain — pulling the rest with no button — is proved to land

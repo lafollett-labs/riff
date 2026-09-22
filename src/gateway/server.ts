@@ -9,6 +9,8 @@ import { runtimeCredentialHealth } from '../runtime/credential.ts';
 import { windowsFromUsage } from '../runtime/limits.ts';
 import { renameAgent } from '../company/rename.ts';
 import { redefineAgent } from '../company/redefine.ts';
+import { modelCatalog } from '../runtime/models.ts';
+import { EFFORTS, INHERIT, isEffort, isModelId, type StaffDefaults } from '../core/models.ts';
 import { vitals } from '../analytics/vitals.ts';
 import { exportCompany, exportName, importCompany } from '../company/transfer.ts';
 import { isOperatorError, installRoot } from '../core/config.ts';
@@ -144,6 +146,19 @@ const readBinaryBody = async (req: IncomingMessage, max: number): Promise<Buffer
     chunks.push(c as Buffer);
   }
   return Buffer.concat(chunks);
+};
+
+/**
+ * Why a model setting is refused, or null. The catalog is the CLI's own list;
+ * the value already stored is let through, so a seat on a model the CLI has
+ * since dropped can still have its effort changed without being moved.
+ */
+const modelRefusal = async (model: unknown, current?: string): Promise<string | null> => {
+  if (!isModelId(model)) return 'model must be a model id or alias';
+  if (model === current) return null;
+  const { models } = await modelCatalog();
+  return models.some((m) => m.value === model) ? null
+    : `'${model}' is not a model this installation offers: one of ${models.map((m) => m.value).join(', ')}`;
 };
 
 /**
@@ -286,6 +301,12 @@ const server = createServer(async (req, res) => {
           resetsAt: w.resetsAt ? new Date(w.resetsAt * 1000).toISOString() : null,
         })),
       });
+    }
+
+    // The models a seat may be given, as the bundled CLI lists them. The same
+    // list for every company, so it is not behind ?c=.
+    if (p === '/api/models' && method === 'GET') {
+      return json(res, await modelCatalog());
     }
 
     // Installation-level settings — the Riff-level surface, not any one company.
@@ -555,6 +576,43 @@ const server = createServer(async (req, res) => {
       return json(res, { error: r.reason }, code);
     }
 
+    // A seat's own model and effort, overriding the company's. Board-only by
+    // construction: this endpoint is the one way in, and no staff tool reaches
+    // it — a seat that could raise its own effort would, and the operator's
+    // window would pay. `company` hands a setting back to the company default.
+    // Takes effect at the seat's next shift; one in flight keeps what it began.
+    if (p === '/api/agents/model' && method === 'POST') {
+      const b = await readBody(req);
+      const slug = String(b['company'] ?? '') || (resolveSlug() ?? '');
+      const co = slug ? registry.get(slug) : null;
+      if (!co) return json(res, { error: `no company '${slug}'` }, 404);
+
+      const a = co.ledger.getAgent(String(b['who'] ?? ''));
+      if (!a) return json(res, { error: `no agent '${String(b['who'] ?? '')}'` }, 404);
+      if (a.tier === 'board') return json(res, { error: 'the board is human; it has no model' }, 409);
+      if (a.status === 'departed') return json(res, { error: `${a.name} has left` }, 409);
+
+      const has = (k: string): boolean => Object.prototype.hasOwnProperty.call(b, k);
+      const model = has('model') ? b['model'] : a.model;
+      const effort = has('effort') ? b['effort'] : a.effort;
+      if (model !== INHERIT) {
+        const why = await modelRefusal(model, a.model);
+        if (why) return json(res, { error: why }, 400);
+      }
+      if (effort !== INHERIT && !isEffort(effort)) {
+        return json(res, { error: `effort must be 'company' or one of ${EFFORTS.join(', ')}` }, 400);
+      }
+      const next = { model: String(model), effort: String(effort) };
+      if (next.model === a.model && next.effort === a.effort) return json(res, { who: a.id, ...next, changed: false });
+
+      co.ledger.upsertAgent({ ...a, ...next });
+      co.ledger.emit('board', 'agent.model', a.id, {
+        model: next.model, effort: next.effort,
+        was: { model: a.model, effort: a.effort },
+      });
+      return json(res, { who: a.id, ...next, changed: true });
+    }
+
     if (p.startsWith('/api/companies/') && (method === 'PATCH' || method === 'DELETE')) {
       const target = p.slice('/api/companies/'.length);
 
@@ -573,6 +631,25 @@ const server = createServer(async (req, res) => {
         if (tooLong) return json(res, { error: tooLong }, 400);
       }
       const was = registry.list().find((c) => c.slug === target)?.business ?? '';
+
+      // The company's model and effort. Checked here rather than clamped like
+      // policy: a model the CLI does not offer is not a value to round to the
+      // nearest one, it is a typo that would fail every shift at wake.
+      let staff: Partial<StaffDefaults> | undefined;
+      if (b['staff'] && typeof b['staff'] === 'object') {
+        const s = b['staff'] as Record<string, unknown>;
+        const current = registry.get(target)?.cfg.staff;
+        staff = {};
+        if (s['model'] !== undefined) {
+          const why = await modelRefusal(s['model'], current?.model);
+          if (why) return json(res, { error: why }, 400);
+          staff.model = String(s['model']);
+        }
+        if (s['effort'] !== undefined) {
+          if (!isEffort(s['effort'])) return json(res, { error: `effort must be one of ${EFFORTS.join(', ')}` }, 400);
+          staff.effort = s['effort'];
+        }
+      }
       const r = await registry.update(target, {
         ...(typeof b['name'] === 'string' ? { name: b['name'] } : {}),
         ...(typeof b['business'] === 'string' ? { business: b['business'] } : {}),
@@ -582,6 +659,7 @@ const server = createServer(async (req, res) => {
         ...(b['policy'] && typeof b['policy'] === 'object'
           ? { policy: b['policy'] as Record<string, number> } : {}),
         ...(b['release'] === 'bundle' || b['release'] === 'none' ? { release: b['release'] } : {}),
+        ...(staff ? { staff } : {}),
       });
       if (!r.ok) return json(res, { error: r.reason }, 409);
       if (r.slug !== target) { watchers.delete(target); lastSeq.delete(target); }
@@ -629,6 +707,8 @@ const server = createServer(async (req, res) => {
           slug: co.slug,
           company: cfg.company,
           policy: cfg.policy,
+          // The model and effort every seat without its own runs on.
+          staff: cfg.staff,
           board: cfg.board,
           ceo: cfg.ceo,
           // Settable at founding and by PATCH, and until now readable nowhere:

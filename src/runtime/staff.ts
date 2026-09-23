@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import type { Writable } from 'node:stream';
-import { query, type CanUseTool, type HookCallback, type ModelUsage, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage,
+import { query, type CanUseTool, type HookCallback, type ModelUsage, type PermissionResult, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage,
   type SpawnOptions, type SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
 import { DEFAULT_STAFF, mindOf, type Effort, type StaffDefaults } from '../core/models.ts';
@@ -12,7 +12,7 @@ import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import { createTools, TOOL_NAMESPACE } from './tools.ts';
-import { makeCanUseTool, shellIsContained } from './permissions.ts';
+import { makeCanUseTool, makePreToolCheck, PRE_CHECKED, shellIsContained } from './permissions.ts';
 import { DEFAULT_POLICY, installRoot, companiesDir, isCompanyHome, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
 import { mintScopedToken } from '../core/proxytoken.ts';
 import type { TranscriptSink } from '../ledger/transcript.ts';
@@ -1017,27 +1017,33 @@ export const recordShiftMessage = (
   sink: TranscriptSink, sessionId: string, agentId: string, m: SDKMessage,
 ): void => {
   try {
+    // A subagent's messages arrive in the same stream, and were recorded as if
+    // the agent had made them: Carver's helper's reads read as Carver's own.
+    // `parent` is the Agent call that spawned the subagent.
+    const parent = (m.type === 'assistant' || m.type === 'user') && m.parent_tool_use_id
+      ? { parent: m.parent_tool_use_id } : {};
     if (m.type === 'assistant') {
       const model = (m.message as { model?: string }).model;
       for (const b of m.message.content) {
         if (b.type === 'text') {
-          if (b.text.trim()) sink.append({ sessionId, agentId, role: 'assistant', kind: 'text', text: b.text, meta: { model } });
+          if (b.text.trim()) sink.append({ sessionId, agentId, role: 'assistant', kind: 'text', text: b.text, meta: { model, ...parent } });
         } else if (b.type === 'thinking') {
-          if (b.thinking.trim()) sink.append({ sessionId, agentId, role: 'assistant', kind: 'thinking', text: b.thinking, meta: { model } });
+          if (b.thinking.trim()) sink.append({ sessionId, agentId, role: 'assistant', kind: 'thinking', text: b.thinking, meta: { model, ...parent } });
         } else if (b.type === 'tool_use') {
-          sink.append({ sessionId, agentId, role: 'assistant', kind: 'tool_use', name: b.name, text: JSON.stringify(b.input), meta: { model, id: b.id } });
+          sink.append({ sessionId, agentId, role: 'assistant', kind: 'tool_use', name: b.name, text: JSON.stringify(b.input), meta: { model, id: b.id, ...parent } });
         }
       }
     } else if (m.type === 'user') {
       const content = m.message.content;
+      const tagged = 'parent' in parent ? { meta: parent } : {};
       if (typeof content === 'string') {
-        if (content.trim()) sink.append({ sessionId, agentId, role: 'user', kind: 'text', text: content });
+        if (content.trim()) sink.append({ sessionId, agentId, role: 'user', kind: 'text', text: content, ...tagged });
       } else {
         for (const b of content) {
           if (b.type === 'text') {
-            if (b.text.trim()) sink.append({ sessionId, agentId, role: 'user', kind: 'text', text: b.text });
+            if (b.text.trim()) sink.append({ sessionId, agentId, role: 'user', kind: 'text', text: b.text, ...tagged });
           } else if (b.type === 'tool_result') {
-            sink.append({ sessionId, agentId, role: 'user', kind: 'tool_result', name: b.tool_use_id, text: toolResultText(b.content), meta: { isError: b.is_error ?? false } });
+            sink.append({ sessionId, agentId, role: 'user', kind: 'tool_result', name: b.tool_use_id, text: toolResultText(b.content), meta: { isError: b.is_error ?? false, ...parent } });
           }
         }
       }
@@ -1206,6 +1212,9 @@ const RESUMED_PROMPT = [
  * are bounded at 120s by their own `timeout`.
  */
 export const LANDING_GRACE_MS = 3 * 60_000;
+
+/** The tool that spawns a subagent: `Agent` from CLI 2.1, `Task` before it. */
+const SUBAGENT_TOOLS = new Set(['Agent', 'Task']);
 
 /** Where a shift is against its limits after a batch of tool calls. */
 export type Landing = { stop: 'time' | 'turns' } | { say: string; mark: string } | null;
@@ -1469,14 +1478,116 @@ export const tick = async (
     }
     : (_op: string): void => { /* auditing off */ };
 
-  const gate2 = makeCanUseTool({
+  const permissionDeps = {
     actor: agent.id, world, gate, toolCapabilities: capabilities,
-    ...(d.trace ? { onDecision: (t, o, why) => d.trace!(`  gate  ${o.padEnd(5)} ${t} ${why}`) } : {}),
-  });
+    ...(d.trace ? { onDecision: (t: string, o: 'allow' | 'deny', why: string) => d.trace!(`  gate  ${o.padEnd(5)} ${t} ${why}`) } : {}),
+  };
+  const gate2 = makeCanUseTool(permissionDeps);
+  const preCheck = makePreToolCheck(permissionDeps);
+  /** What the pre-check decided, by call, so canUseTool answers it once. */
+  const preDecided = new Map<string, PermissionResult>();
+  /** The tool calls the gate was asked about, so a subagent's record can say
+   *  whether its spawn crossed the gate or went around it as Read does. */
+  const gatedCalls = new Set<string>();
   const gated: CanUseTool = (name, input, opts) => {
     gateCalls++;
+    gatedCalls.add(opts.toolUseID);
     trace(`gate ask ${name}`);
+    // Already decided before the CLI's own approval: answering again would
+    // put every such call on the record twice.
+    const pre = preDecided.get(opts.toolUseID);
+    if (pre) { preDecided.delete(opts.toolUseID); return Promise.resolve(pre); }
     return gate2(name, input, opts);
+  };
+  /** The gate for what the CLI approves by itself; see makePreToolCheck. */
+  const preTool: HookCallback = async (input) => {
+    if (input.hook_event_name !== 'PreToolUse') return {};
+    let r: PermissionResult | null;
+    try {
+      r = await preCheck(input.tool_name, input.tool_input as Record<string, unknown>, input.tool_use_id);
+    } catch (e) {
+      // A hook that throws is a hook error to the CLI, which then approves the
+      // call by itself: no refusal and no record. Closed instead.
+      r = { behavior: 'deny', message: `The company's rules could not be checked: ${e instanceof Error ? e.message : String(e)}` };
+    }
+    if (!r) return {};
+    gatedCalls.add(input.tool_use_id);
+    trace(`pre-gate ${r.behavior} ${input.tool_name}`);
+    if (r.behavior === 'deny') {
+      return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: r.message } };
+    }
+    preDecided.set(input.tool_use_id, r);
+    return {};
+  };
+
+  /**
+   * Subagents this shift has running, by the Agent call that spawned each.
+   *
+   * Carver spawned 22 between 09-13 and 09-23 and nothing in the ledger said
+   * so: no start, no end, no count, and the transcript mixed their calls in
+   * with his. Tracked from the stream — the spawn is a tool call, everything
+   * the subagent does carries its id as parent_tool_use_id, and the call's
+   * result is its end — so a shift killed mid-subagent still says so.
+   */
+  const subagents = new Map<string, {
+    type: string; description: string; started: number; toolCalls: number; background: boolean;
+  }>();
+  let subagentsSpawned = 0;
+  const subagentDone = (id: string, how: Record<string, unknown>): void => {
+    const sa = subagents.get(id);
+    if (!sa) return;
+    subagents.delete(id);
+    ledger.emit(agent.id, 'subagent.finished', id, {
+      type: sa.type, description: sa.description, toolCalls: sa.toolCalls,
+      ms: now() - sa.started, gated: gatedCalls.has(id), ...how,
+    });
+  };
+  const watchSubagents = (m: SDKMessage): void => {
+    if (m.type === 'assistant') {
+      const parent = m.parent_tool_use_id ? subagents.get(m.parent_tool_use_id) : undefined;
+      for (const b of m.message.content) {
+        if (b.type !== 'tool_use') continue;
+        if (parent) parent.toolCalls++;
+        if (!SUBAGENT_TOOLS.has(b.name)) continue;
+        const input = b.input as { subagent_type?: unknown; description?: unknown; model?: unknown;
+          run_in_background?: unknown };
+        const sa = {
+          type: typeof input.subagent_type === 'string' ? input.subagent_type.slice(0, 64) : 'general-purpose',
+          description: typeof input.description === 'string' ? input.description.slice(0, 200) : '',
+          started: now(), toolCalls: 0, background: input.run_in_background === true,
+        };
+        subagents.set(b.id, sa);
+        subagentsSpawned++;
+        ledger.emit(agent.id, 'subagent.started', b.id, {
+          type: sa.type, description: sa.description,
+          // The model the spawn asked for, over the seat's own — the board
+          // chooses a seat's model, and nothing yet holds a subagent to it.
+          ...(typeof input.model === 'string' ? { model: input.model.slice(0, 64) } : {}),
+          ...(sa.background ? { background: true } : {}),
+        });
+      }
+    } else if (m.type === 'user' && Array.isArray(m.message.content)) {
+      for (const b of m.message.content) {
+        if (b.type !== 'tool_result') continue;
+        const sa = subagents.get(b.tool_use_id);
+        if (!sa) continue;
+        // A background spawn answers at once with a launch receipt; it is done
+        // when its completion notice comes. 18 of Carver's 25 ran this way,
+        // and ending them at the receipt recorded each as 0 calls in ~0ms.
+        if (!b.is_error && (sa.background || /^Async agent launched/.test(toolResultText(b.content)))) {
+          sa.background = true;
+          continue;
+        }
+        subagentDone(b.tool_use_id, b.is_error ? { error: true } : {});
+      }
+    } else if (m.type === 'system' && m.subtype === 'task_started' && m.tool_use_id && m.is_backgrounded) {
+      const sa = subagents.get(m.tool_use_id);
+      if (sa) sa.background = true;
+    } else if (m.type === 'system' && m.subtype === 'task_notification' && m.tool_use_id && subagents.has(m.tool_use_id)) {
+      const sa = subagents.get(m.tool_use_id)!;
+      if (m.usage) sa.toolCalls = Math.max(sa.toolCalls, m.usage.tool_uses);
+      subagentDone(m.tool_use_id, { background: true, ...(m.status !== 'completed' ? { status: m.status } : {}) });
+    }
   };
 
   // The diagnostic tail a stale-session or tools-missing event carries while
@@ -1759,6 +1870,12 @@ export const tick = async (
           // to prevent.
           failIfUnavailable: true,
           allowUnsandboxedCommands: false,
+          // Every shell command asks the gate, a subagent's included. Left to
+          // its default, a subagent's Bash was auto-allowed as sandboxed and
+          // never reached canUseTool: measured 2026-09-23, a general-purpose
+          // subagent's `echo hi > …` wrote with no gate.allow, while its Write
+          // beside it was gated and its Write into .git refused.
+          autoAllowBashIfSandboxed: false,
           // The wall around the network is the egress proxy, not this.
           //
           // Enabling the sandbox turned its network filter on as well, and
@@ -1809,7 +1926,10 @@ export const tick = async (
         // The CLI's own ceiling stays as a second net under `landing`, which
         // stops the leg one batch before the CLI would.
         maxTurns,
-        hooks: { PostToolBatch: [{ hooks: [onBatch] }] },
+        hooks: {
+          PostToolBatch: [{ hooks: [onBatch] }],
+          PreToolUse: [{ matcher: PRE_CHECKED, hooks: [preTool] }],
+        },
         ...(d.maxBudgetUsd != null ? { maxBudgetUsd: d.maxBudgetUsd } : {}),
         effort: mind.effort,
         thinking: { type: 'adaptive' },
@@ -1836,6 +1956,7 @@ export const tick = async (
       // or a stale session cuts off is still on the record. session is set by the SDK's
       // system message before any content arrives; skip until it is known.
       if (d.transcript && session) recordShiftMessage(d.transcript, session, agent.id, m);
+      watchSubagents(m);
       if (m.type === 'assistant') {
         // Every tool-using turn, not only the gated ones — this is the count
         // the ceiling is measured against. Confirmed at 30 of 30 in both the
@@ -2188,6 +2309,10 @@ export const tick = async (
 
   // Whatever happened, the shift is over and its clock is not.
   if (timeout) clearTimeout(timeout);
+  // A subagent still running when its shift ended: stopped, killed at the
+  // deadline, or cut off with the leg. The case L9 of the landing review asks
+  // how often happens.
+  for (const id of [...subagents.keys()]) subagentDone(id, { unfinished: true });
 
   // Carry the conversation's turn count to the next resume, or clear it when the
   // session did not survive the shift — the turn-count half of rotation.
@@ -2231,6 +2356,7 @@ export const tick = async (
     turns, costUsd, ceiling,
     ...(truncated ? { truncated: true } : {}),
     ...(landed ? { landed } : {}),
+    ...(subagentsSpawned ? { subagents: subagentsSpawned } : {}),
     ...(rotations ? { rotations } : {}),
     // Only when the shift did something the single number cannot explain: more
     // than one leg ran, or the total passed the ceiling. A shift that took its

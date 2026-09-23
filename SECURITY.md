@@ -133,10 +133,45 @@ all.
 
 ### Every tool call crosses one chokepoint, and the default is deny
 
-The Agent SDK routes every tool call — built-ins included — through
-`canUseTool`. That function is wired to the company's rules, and an unrecognised
-tool is **refused**, so adding a tool to the SDK later cannot silently widen
-what the staff can do.
+The Agent SDK routes tool calls through `canUseTool`, which is wired to the
+company's rules, and an unrecognised tool is **refused**, so adding a tool to
+the SDK later cannot silently widen what the staff can do.
+
+Not every call reaches it: the CLI approves some calls itself and never asks.
+Those are sent to the same function from a PreToolUse hook
+(`makePreToolCheck`), which the CLI resolves before its own approval. The hook
+only adds refusals and records; it never grants. Measured against CLI 2.1.280 in
+throwaway companies on 2026-09-23:
+
+| Call | Asked by the CLI | Crosses the gate | Bounded by |
+| - | - | - | - |
+| `Write`/`Edit`, a subagent's included | yes | yes; a subagent's `Write` into `.git` was refused | the gate, then the CLI's confined view |
+| a shell command, a subagent's included | only if not read-only | yes, every command, from the hook; `autoAllowBashIfSandboxed: false` as well | the gate, then the kernel sandbox |
+| `Read`/`Glob`/`Grep` outside `world/` | yes | yes, and refused as outside the company | the gate |
+| `Read` of a colleague's file | no | yes, from the hook: recorded as `world.read_other` | the CLI's confined view |
+| `Glob`/`Grep` over the world, `staff/`, a colleague's folder, or with a pattern that climbs out (`..`) | no | yes, from the hook: one `world.read_other` for the search. CLI 2.1.280 ships neither tool; a search runs as `rg` or `grep` in the shell, and is recorded as that command | the CLI's confined view |
+| `Read`/`Glob`/`Grep` kept inside your own folder or the commons | no | no, deliberately: every read on the record would bury the ledger | the CLI's confined view |
+| spawning a subagent (`Agent`) | no | yes, from the hook; `isolation: "remote"` is refused | each thing the subagent does is gated as above |
+
+Before these, a subagent's `echo hi > staff/tess/…` wrote with no `gate.allow`,
+a built-in `Read` of a colleague's memory was silent despite
+`transparency.read_is_loud`, and a spawn with `isolation: "remote"` was
+accepted (it ran as a background agent; nothing left the container that does
+not on every shift). A call the hook has decided is answered from that decision
+if the CLI then asks canUseTool too, so it is recorded once. The hook's matcher
+is anchored, so `TaskStop` or `BashOutput` are not taken for `Task` or `Bash`,
+and a hook that cannot reach the gate refuses the call rather than let the CLI
+approve it.
+
+What is still not gated: any tool a future CLI adds and approves by itself. The
+tool set is whatever the pinned CLI ships; pinning it with the SDK's `tools`
+option is tracked follow-up work.
+
+A subagent's run is on the record: `subagent.started` (with any `model` it asked
+for over the seat's own, and `background`) and `subagent.finished` (with `gated`,
+its tool-call count, and `unfinished` if the shift ended first; a background
+spawn is finished by its completion notice, not its launch receipt). Every
+transcript row it produced carries the `parent` call that spawned it.
 
 Paths are classified before any read or write: inside your own files, in the
 commons, in a colleague's files, or outside the company. Outside is refused.

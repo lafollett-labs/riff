@@ -93,6 +93,12 @@ type Script = {
   subagent?: boolean;
   /** Called before each batch's hook, to move the wall clock. */
   tick?: () => void;
+  /** On the first turn, spawn a subagent that makes this many tool calls,
+   *  and hand back its result unless it is still running when the leg ends. */
+  spawn?: { toolCalls: number; returns: boolean; background?: boolean };
+  /** On the first turn, a call the CLI checks with PreToolUse and then asks
+   *  canUseTool about, as it does for anything it will not approve itself. */
+  checked?: { name: string; input: Record<string, unknown> };
 };
 
 /**
@@ -128,6 +134,36 @@ const scripted = (...scripts: Script[]) => {
           for (let i = 0; i < 3; i++) yield response(`sub${leg}-${n}-${i}`, `task${n}`);
           out.push(await batch('sub'));
         }
+        if (script.checked && n === 1) {
+          const opts = { signal: new AbortController().signal };
+          const pre = args.options?.hooks?.PreToolUse?.[0];
+          assert.ok(pre && new RegExp(pre.matcher!).test(script.checked.name), 'the hook matches the tool');
+          const h = await pre.hooks[0]!({ hook_event_name: 'PreToolUse', tool_name: script.checked.name,
+            tool_input: script.checked.input, tool_use_id: 'chk1' } as never, 'chk1', opts);
+          out.push({ pre: h });
+          const denied = JSON.stringify(h).includes('"permissionDecision":"deny"');
+          if (!denied) out.push({ can: await args.options!.canUseTool!(script.checked.name, script.checked.input,
+            { ...opts, toolUseID: 'chk1' } as never) });
+        }
+        if (script.spawn && n === 1) {
+          yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'spawn-msg', usage: {},
+            content: [{ type: 'tool_use', id: 'spawn1', name: 'Agent',
+              input: { subagent_type: 'Explore', description: 'find the rules',
+                ...(script.spawn.background ? { run_in_background: true } : {}) } }] } } as unknown as SDKMessage;
+          if (script.spawn.background) {
+            yield { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result',
+              tool_use_id: 'spawn1', content: 'Async agent launched successfully.' }] } } as unknown as SDKMessage;
+          }
+          for (let i = 0; i < script.spawn.toolCalls; i++) yield response(`inside-${i}`, 'spawn1');
+          if (script.spawn.returns && script.spawn.background) {
+            yield { type: 'system', subtype: 'task_notification', task_id: 'bg1', tool_use_id: 'spawn1',
+              status: 'completed', output_file: '', summary: 'done',
+              usage: { total_tokens: 1, tool_uses: script.spawn.toolCalls + 2, duration_ms: 5 } } as unknown as SDKMessage;
+          } else if (script.spawn.returns) {
+            yield { type: 'user', parent_tool_use_id: null, message: { content: [
+              { type: 'tool_result', tool_use_id: 'spawn1', content: 'found them' }] } } as unknown as SDKMessage;
+          }
+        }
         for (let i = 0; i < (script.parallel ?? 1); i++) yield response(`msg${leg}-${n}`, null);
         script.tick?.();
         const o = await batch();
@@ -143,7 +179,7 @@ const scripted = (...scripts: Script[]) => {
 };
 
 const shift = (fake: typeof sdkQuery, o: {
-  maxTurns: number; shiftTimeoutMs?: number; now?: () => number; rotateAtSessionTurns?: number;
+  maxTurns: number; shiftTimeoutMs?: number; now?: () => number; rotateAtSessionTurns?: number; gate?: Gate;
 }) => tick({
   agent: ledger.getAgent('ceo')!, ledger, world, clock,
   gate: new Gate(ledger, constitutionFor({ ceo: 'ceo', board: [] }), { exists: () => false, count: () => 0 }),
@@ -240,5 +276,79 @@ describe('a landing and a rotation', () => {
     const s = scripted({ turns: 2, tick: () => { t += 20 * 60_000; } }, { turns: 1 });
     await shift(s.fake, { maxTurns: 200, rotateAtSessionTurns: 2, shiftTimeoutMs: 45 * 60_000, now: () => t });
     assert.equal(s.calls(), 1);
+  });
+});
+
+describe('a subagent is on the record', () => {
+  const events = (kind: string): Array<Record<string, unknown>> => ledger.eventsSince(0)
+    .filter((e) => e.kind === kind)
+    .map((e) => ({ subject: e.subject, ...JSON.parse(e.dataJson ?? '{}') as Record<string, unknown> }));
+
+  test('its start, its end, what it did, and whether the gate saw it spawn', async () => {
+    let t = 0;
+    const s = scripted({ turns: 2, spawn: { toolCalls: 3, returns: true }, tick: () => { t += 1000; } });
+    await shift(s.fake, { maxTurns: 200, now: () => t });
+    assert.deepEqual(events('subagent.started'),
+      [{ subject: 'spawn1', type: 'Explore', description: 'find the rules' }]);
+    const [done] = events('subagent.finished');
+    assert.equal(done!['toolCalls'], 3);
+    assert.equal(done!['gated'], false, 'the scripted CLI never ran the PreToolUse hook for it');
+    assert.equal(done!['unfinished'], undefined);
+    assert.equal(slept().data['subagents'], 1);
+  });
+
+  test('one still running when the shift ends is recorded as unfinished', async () => {
+    const s = scripted({ turns: 1, spawn: { toolCalls: 2, returns: false } });
+    await shift(s.fake, { maxTurns: 200 });
+    const [done] = events('subagent.finished');
+    assert.equal(done!['unfinished'], true);
+    assert.equal(done!['toolCalls'], 2);
+  });
+});
+
+describe('a background subagent and the pre-check, inside a shift', () => {
+  const events = (kind: string): Array<Record<string, unknown>> => ledger.eventsSince(0)
+    .filter((e) => e.kind === kind)
+    .map((e) => ({ subject: e.subject, ...JSON.parse(e.dataJson ?? '{}') as Record<string, unknown> }));
+
+  test('a background spawn is finished by its completion notice, not its launch receipt', async () => {
+    const s = scripted({ turns: 2, spawn: { toolCalls: 3, returns: true, background: true } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.equal(events('subagent.started')[0]!['background'], true);
+    const [done] = events('subagent.finished');
+    assert.equal(done!['background'], true);
+    assert.equal(done!['toolCalls'], 5, 'the notice\'s own count, when it saw more than the stream');
+  });
+
+  test('a background spawn still running at the end of the shift is unfinished', async () => {
+    const s = scripted({ turns: 1, spawn: { toolCalls: 1, returns: false, background: true } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.equal(events('subagent.finished')[0]!['unfinished'], true);
+  });
+
+  test('a call checked before the CLI decides is decided once, not twice', async () => {
+    const s = scripted({ turns: 1, checked: { name: 'Read', input: { file_path: join(world.root, 'staff', 'mo', 'memory.md') } } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.deepEqual(s.said[0]![0], { pre: {} });
+    assert.deepEqual(s.said[0]![1], { can: { behavior: 'allow' } });
+    assert.equal(events('gate.allow').length, 1, 'one record of the colleague read');
+  });
+
+  test('a remote spawn is refused before the CLI runs it', async () => {
+    const s = scripted({ turns: 1, checked: { name: 'Agent', input: { prompt: 'x', isolation: 'remote' } } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.match(JSON.stringify(s.said[0]![0]), /"permissionDecision":"deny".*remote isolation/);
+    assert.equal(s.said[0]!.length, 2, 'never asked of canUseTool; the batch hook follows');
+  });
+});
+
+describe('the pre-check fails closed', () => {
+  test('a gate that cannot answer refuses the call rather than letting the CLI approve it', async () => {
+    const broken = Object.assign(
+      new Gate(ledger, constitutionFor({ ceo: 'ceo', board: [] }), { exists: () => false, count: () => 0 }),
+      { request: () => { throw new Error('database is locked'); } });
+    const s = scripted({ turns: 1, checked: { name: 'Read', input: { file_path: join(world.root, 'staff', 'mo', 'memory.md') } } });
+    await shift(s.fake, { maxTurns: 200, gate: broken });
+    assert.match(JSON.stringify(s.said[0]![0]), /"permissionDecision":"deny".*could not be checked: database is locked/);
   });
 });

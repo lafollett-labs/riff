@@ -399,6 +399,7 @@ const tiles = computed(() => {
             <dt>rotated · compacted</dt>
             <dd>{{ v.shifts.rotated }} · {{ v.shifts.compacted }}</dd>
             <dt>cut at turns · time</dt><dd>{{ v.shifts.truncated }} · {{ v.shifts.outOfTime }}</dd>
+            <dt>subagents</dt><dd>{{ v.shifts.subagents }}</dd>
             <dt>failed · overran</dt>
             <dd :class="{ hot: v.shifts.overran > 0 }">{{ v.shifts.failed }} · {{ v.shifts.overran }}</dd>
           </dl>

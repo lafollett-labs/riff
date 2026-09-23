@@ -1,4 +1,4 @@
-import { dirname, resolve, sep } from 'node:path';
+import { dirname, relative, resolve, sep } from 'node:path';
 import { existsSync, realpathSync } from 'node:fs';
 import type { CanUseTool, PermissionResult } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentId, Capability } from '../core/types.ts';
@@ -47,8 +47,13 @@ export const shellIsContained = (env: NodeJS.ProcessEnv = process.env, marked: (
 
 const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead']);
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
-/** Harmless scratch space and delegation; the subagent is gated in its own turn. */
-const FREE_TOOLS = new Set(['TodoWrite', 'Task', 'Skill', 'ExitPlanMode']);
+/**
+ * Harmless scratch space and delegation. `Agent` spawns a subagent (it was
+ * `Task` before CLI 2.1, and this list still said so): CLI 2.1.280 does not
+ * ask about the spawn at all, measured as `gated: false` on subagent.finished,
+ * and the subagent's own writes and shell each cross this gate in turn.
+ */
+const FREE_TOOLS = new Set(['TodoWrite', 'Agent', 'Skill', 'ExitPlanMode']);
 const OUTSIDE_READ = new Set(['WebFetch', 'WebSearch']);
 
 type Where = { kind: 'own' } | { kind: 'other'; who: string } | { kind: 'commons' } | { kind: 'outside' };
@@ -123,6 +128,21 @@ export const classifyPath = (world: World, actor: AgentId, raw: string): Where =
 const deny = (message: string): PermissionResult => ({ behavior: 'deny', message });
 const allow = (): PermissionResult => ({ behavior: 'allow' });
 
+/** Put a request to the gate and answer the CLI in its terms. */
+const askGate = (gate: Gate, actor: AgentId, capability: Capability, summary: string,
+  target?: string | null): PermissionResult => {
+  const d = gate.request({ actor, capability, summary, ...(target ? { target } : {}) });
+  if (d.kind === 'allow') return allow();
+  if (d.kind === 'deny') return deny(`Refused by the company's rules (${d.rule}): ${d.reason}`);
+  // An escalation is not a failure — the work is parked, and the staff member
+  // is told so plainly enough that it moves on instead of retrying in a loop.
+  return deny(
+    `Held for approval (${d.rule}): ${d.reason}. ` +
+    `Approval ${d.approvalId} is now pending with the ${d.tier}. ` +
+    `Do not retry this action — it is queued. Continue with other work.`
+  );
+};
+
 export type PermissionDeps = {
   actor: AgentId;
   world: World;
@@ -142,18 +162,8 @@ export const makeCanUseTool = (deps: PermissionDeps): CanUseTool => {
   const note = (tool: string, out: 'allow' | 'deny', detail = '') =>
     deps.onDecision?.(tool, out, detail);
 
-  const ask = (capability: Capability, summary: string, target?: string | null): PermissionResult => {
-    const d = gate.request({ actor, capability, summary, ...(target ? { target } : {}) });
-    if (d.kind === 'allow') return allow();
-    if (d.kind === 'deny') return deny(`Refused by the company's rules (${d.rule}): ${d.reason}`);
-    // An escalation is not a failure — the work is parked, and the staff member
-    // is told so plainly enough that it moves on instead of retrying in a loop.
-    return deny(
-      `Held for approval (${d.rule}): ${d.reason}. ` +
-      `Approval ${d.approvalId} is now pending with the ${d.tier}. ` +
-      `Do not retry this action — it is queued. Continue with other work.`
-    );
-  };
+  const ask = (capability: Capability, summary: string, target?: string | null): PermissionResult =>
+    askGate(gate, actor, capability, summary, target);
 
   return async (toolName, input) => {
     if (SHELL_TOOLS.has(toolName)) {
@@ -217,5 +227,86 @@ export const makeCanUseTool = (deps: PermissionDeps): CanUseTool => {
     // Default-deny. New SDK tools do not become staff powers by accident.
     note(toolName, 'deny', 'unknown tool');
     return deny(`'${toolName}' is not one of this company's tools.`);
+  };
+};
+
+/**
+ * The tools the CLI can run without asking canUseTool, which the pre-check asks
+ * about. Anchored: read as a substring match, `Task` would take in TaskStop and
+ * TaskOutput and `Bash` BashOutput, which the gate does not know and would refuse.
+ */
+export const PRE_CHECKED = '^(?:Agent|Task|Read|Glob|Grep|NotebookRead|Bash)$';
+
+/**
+ * Whether a Grep or Glob stays inside your own folder or the commons. A search
+ * of the world, of staff/, or with a pattern that climbs out reads colleagues'
+ * files by the handful, and is recorded as one read of theirs.
+ */
+const searchScoped = (world: World, actor: AgentId, toolName: string, input: Record<string, unknown>): boolean => {
+  const raw = typeof input['path'] === 'string' && input['path'] ? input['path'] : '.';
+  // Resolved, as classifyPath resolves a Read: a link in your own folder that
+  // points at a colleague's made a search of theirs read as private.
+  const where = classifyPath(world, actor, raw).kind;
+  if (where === 'commons') {
+    // Through the deepest part that exists, as classifyPath walks: a folder not
+    // made yet has no realpath, and is where it says it is.
+    const real = (abs: string): string => {
+      let probe = abs;
+      while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
+      try { return realpathSync(probe) + abs.slice(probe.length); } catch { return abs; }
+    };
+    const rel = relative(real(resolve(world.root)), real(resolve(world.root, raw)));
+    if (rel !== 'commons' && !rel.startsWith('commons' + sep)) return false;
+  } else if (where !== 'own') return false;
+  const patterns = [input['glob'], toolName === 'Glob' ? input['pattern'] : undefined]
+    .filter((p): p is string => typeof p === 'string');
+  return !patterns.some((p) => p.includes('..') || p.startsWith('/'));
+};
+
+/**
+ * The gate, asked before the CLI decides for itself.
+ *
+ * canUseTool is only reached for calls the CLI wants permission for. It
+ * approves some itself — Read/Glob/Grep inside world/, a command it judges
+ * read-only, a subagent spawn — and those never crossed the gate: a built-in
+ * Read of a colleague's memory was silent despite `transparency.read_is_loud`,
+ * and a spawn could ask for `isolation: "remote"` with nothing to refuse it.
+ * Measured against CLI 2.1.280 on 2026-09-23.
+ *
+ * Run from a PreToolUse hook, which the CLI resolves before its own approval.
+ * Returns the decision, or null where there is nothing to decide: reading your
+ * own files or the commons is unremarkable, and logging every read would bury
+ * the ledger. It adds refusals and records; a null or an allow grants nothing
+ * the CLI's own flow would not.
+ */
+export const makePreToolCheck = (deps: PermissionDeps) => {
+  const can = makeCanUseTool(deps);
+  return async (toolName: string, input: Record<string, unknown>, toolUseID: string): Promise<PermissionResult | null> => {
+    if (toolName === 'Agent' || toolName === 'Task') {
+      // Probed: a remote spawn was accepted and ran as a background agent.
+      // Whatever "remote" resolves to, a company's work stays in its container.
+      if (input['isolation'] === 'remote') {
+        deps.onDecision?.(toolName, 'deny', 'remote isolation');
+        return deny('Subagents run inside this company\'s container; remote isolation is not available. ' +
+          'Spawn it without `isolation`.');
+      }
+    }
+    if (toolName === 'Grep' || toolName === 'Glob') {
+      // No path is the working directory: world/, every colleague's files in it.
+      const root = typeof input['path'] === 'string' && input['path'] ? input['path'] : deps.world.root;
+      const where = classifyPath(deps.world, deps.actor, root).kind;
+      if (where === 'outside') return can(toolName, { ...input, path: root }, { signal: AbortSignal.timeout(30_000), toolUseID } as never);
+      if (searchScoped(deps.world, deps.actor, toolName, input)) return null;
+      const across = relative(resolve(deps.world.root), resolve(deps.world.root, root)) || 'the world';
+      const what = [input['pattern'], input['glob']].filter((p) => typeof p === 'string').join(' ');
+      return askGate(deps.gate, deps.actor, 'world.read_other', `${toolName} ${what} across ${across}`.slice(0, 200), root);
+    }
+    if (READ_TOOLS.has(toolName)) {
+      const p = pathFrom(input);
+      if (!p) return null;
+      const where = classifyPath(deps.world, deps.actor, p).kind;
+      if (where === 'own' || where === 'commons') return null;
+    }
+    return can(toolName, input, { signal: AbortSignal.timeout(30_000), toolUseID } as never);
   };
 };

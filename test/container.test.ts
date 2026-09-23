@@ -599,6 +599,13 @@ describe('one company cannot read another', () => {
     assert.match(staff, /enabled: true/);
   });
 
+  test('a sandboxed command still asks the gate, a subagent\'s included', () => {
+    // Left to its default, a general-purpose subagent's `echo hi > …` wrote
+    // with no gate.allow while the main agent's shell was gated (measured
+    // 2026-09-23 in a throwaway company; after this, the same call was gated).
+    assert.match(staff, /autoAllowBashIfSandboxed: false/);
+  });
+
   test('a sandbox that cannot start fails the shift instead of running anyway', () => {
     // The documented default is a warning and unsandboxed commands, which is
     // the one outcome this must never produce.

@@ -231,6 +231,7 @@ export const vitals = (
   let costUsd = 0;
   let truncated = 0;
   let outOfTime = 0;
+  let subagents = 0;
   let barren = 0;
   let deliveries = 0;
   const posted: Array<{ path: string; at: string }> = [];
@@ -246,6 +247,7 @@ export const vitals = (
       slept++;
       turns += t;
       costUsd += c;
+      subagents += numberOf(dj, 'subagents');
       if (dj['landed'] === 'time') outOfTime++;
       else if (dj['truncated'] === true) truncated++;
       turnsBy.set(e.actor, (turnsBy.get(e.actor) ?? 0) + t);
@@ -284,6 +286,7 @@ export const vitals = (
     overran,
     truncated,
     outOfTime,
+    subagents,
     rotated: n('session.rotated'),
     rotateFailed: n('session.rotate_failed'),
     compacted: n('session.compacted'),

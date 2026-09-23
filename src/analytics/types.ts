@@ -38,6 +38,9 @@ export type ShiftVitals = {
   /** Shifts stopped between tool calls at their time budget: landed, where
    *  `overran` was killed inside one. See `landing` in src/runtime/staff.ts. */
   outOfTime: number;
+  /** Subagents the staff spawned (the Agent tool). Each has its own
+   *  subagent.started / subagent.finished pair in the ledger. */
+  subagents: number;
   rotated: number;
   rotateFailed: number;
   compacted: number;

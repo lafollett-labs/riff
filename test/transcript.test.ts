@@ -116,6 +116,23 @@ describe('an SDK message maps to the rows that record it', () => {
       'the conversation\'s running total, named as one — a resume carries it forward');
   });
 
+  test('a subagent\'s messages are tagged with the call that spawned it', () => {
+    // They arrive in the agent's stream; untagged, Carver's helper's reads
+    // were recorded as Carver's own.
+    record({ type: 'assistant', parent_tool_use_id: null, message: { model: 'm', content: [
+      { type: 'tool_use', id: 'spawn', name: 'Agent', input: { description: 'look' } },
+    ] } });
+    record({ type: 'user', parent_tool_use_id: 'spawn', message: { content: 'Read the file.' } });
+    record({ type: 'assistant', parent_tool_use_id: 'spawn', message: { model: 'm', content: [
+      { type: 'tool_use', id: 'r1', name: 'Read', input: {} },
+    ] } });
+    record({ type: 'user', parent_tool_use_id: 'spawn', message: { content: [
+      { type: 'tool_result', tool_use_id: 'r1', content: 'text' },
+    ] } });
+    assert.deepEqual(rows.map((r) => (r.meta as { parent?: string } | undefined)?.parent),
+      [undefined, 'spawn', 'spawn', 'spawn']);
+  });
+
   test('recording never throws — a broken sink cannot fail a shift', () => {
     const boom = { append: () => { throw new Error('disk full'); } };
     assert.doesNotThrow(() => recordShiftMessage(boom, 'sess', 'jack',

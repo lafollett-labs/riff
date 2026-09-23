@@ -8,7 +8,7 @@ import { World } from '../src/worldfs/world.ts';
 import { Gate, type CommonsView } from '../src/policy/gate.ts';
 import { constitutionFor } from '../src/policy/rules.ts';
 import { fixedClock } from '../src/core/clock.ts';
-import { makeCanUseTool, shellIsContained } from '../src/runtime/permissions.ts';
+import { makeCanUseTool, makePreToolCheck, PRE_CHECKED, shellIsContained } from '../src/runtime/permissions.ts';
 import { createTools, TOOL_NAMESPACE, TOOL_PREFIX } from '../src/runtime/tools.ts';
 import type { Agent, Tier } from '../src/core/types.ts';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
@@ -70,6 +70,14 @@ beforeEach(() => {
 afterEach(() => { ledger.close(); rmSync(dir, { recursive: true, force: true }); });
 
 describe('the chokepoint', () => {
+  test('spawning a subagent is named by the tool the CLI has now', async () => {
+    // The list said `Task` after the CLI renamed it `Agent`. Today the CLI
+    // does not ask about the spawn; should it start to, subagents are allowed
+    // by name, not refused by default, and what they do is gated in turn.
+    allowed(await call('Agent', { description: 'look', prompt: 'read' }), 'Agent');
+    denied(await call('Task', {}), 'the old name is unknown now');
+  });
+
   test('the prefix it matches on is the one the SDK actually produces', async () => {
     // These were two independent strings in two files. When the MCP server was
     // renamed and this was not, every company tool fell through to the
@@ -301,5 +309,76 @@ describe('a link is not a way out of the world', () => {
     writeFileSync(join(world.root, 'staff', 'rae', 'mine.md'), 'mine\n');
     allowed(await call('Read', { file_path: 'staff/rae/mine.md' }), 'own file');
     allowed(await call('Write', { file_path: 'staff/rae/new.md', content: 'x' }), 'new own file');
+  });
+});
+
+describe('what the CLI approves by itself still crosses the gate', () => {
+  // Measured against CLI 2.1.280: Read/Glob/Grep inside world/, a command it
+  // calls read-only, and a subagent spawn never reached canUseTool. The
+  // pre-check is run from a PreToolUse hook, before the CLI decides.
+  const pre = (opts: { contained?: boolean } = {}) => makePreToolCheck({
+    actor: 'rae', world, gate, toolCapabilities: capabilities as never,
+    ...(opts.contained === undefined ? {} : { contained: opts.contained }),
+  });
+  const gateEvents = () => ledger.eventsSince(0).filter((e) => e.kind.startsWith('gate.'))
+    .map((e) => JSON.parse(e.dataJson ?? '{}').capability as string);
+
+  test('reading a colleague\'s file is on the record, as the rule says it is', async () => {
+    const r = await pre()('Read', { file_path: join(world.root, 'staff', 'ceo', 'memory.md') }, 't1');
+    allowed(r);
+    assert.deepEqual(gateEvents(), ['world.read_other']);
+  });
+
+  test('reading your own files or the commons asks nothing, and records nothing', async () => {
+    assert.equal(await pre()('Read', { file_path: join(world.root, 'staff', 'rae', 'notes.md') }, 't1'), null);
+    assert.equal(await pre()('Read', { file_path: join(world.root, 'commons', 'plan.md') }, 't2'), null);
+    assert.equal(await pre()('Grep', { pattern: 'x', path: join(world.root, 'staff', 'rae') }, 't3'), null);
+    assert.equal(await pre()('Glob', { pattern: '**/*.md', path: 'commons' }, 't4'), null);
+    assert.deepEqual(gateEvents(), []);
+  });
+
+  test('a search that reaches colleagues\' files is one recorded read of theirs', async () => {
+    // Grep with no path, or over staff/, returns lines from every colleague's
+    // memory at once; recorded before, it read as nothing at all.
+    const cases: Array<[string, Record<string, unknown>]> = [
+      ['Grep', { pattern: 'secret' }],
+      ['Grep', { pattern: 'secret', path: 'staff' }],
+      ['Grep', { pattern: 'secret', path: 'staff/ceo' }],
+      ['Grep', { pattern: 'secret', path: 'staff/rae', glob: '../ceo/**' }],
+      ['Glob', { pattern: 'staff/ceo/**' }],
+    ];
+    for (const [tool, input] of cases) allowed(await pre()(tool, input, 't'), JSON.stringify(input));
+    assert.deepEqual(gateEvents(), cases.map(() => 'world.read_other'));
+    denied(await pre()('Grep', { pattern: 'x', path: '/etc' }, 't9'), 'outside is refused');
+  });
+
+  test('a link in your own folder does not make a search of a colleague\'s private', async () => {
+    mkdirSync(join(world.root, 'staff', 'ceo'), { recursive: true });
+    mkdirSync(join(world.root, 'staff', 'rae'), { recursive: true });
+    symlinkSync(join(world.root, 'staff', 'ceo'), join(world.root, 'staff', 'rae', 'peek'));
+    allowed(await pre()('Grep', { pattern: 'x', path: join(world.root, 'staff', 'rae', 'peek') }, 't1'));
+    assert.deepEqual(gateEvents(), ['world.read_other']);
+  });
+
+  test('the hook matches the tools it names, not their neighbours', () => {
+    const m = new RegExp(PRE_CHECKED);
+    for (const t of ['Agent', 'Task', 'Read', 'Glob', 'Grep', 'NotebookRead', 'Bash']) assert.ok(m.test(t), t);
+    for (const t of ['BashOutput', 'TaskStop', 'TaskOutput', 'TaskCreate', 'ReadMcpResource']) assert.ok(!m.test(t), t);
+  });
+
+  test('a read of the repository is refused even inside world/', async () => {
+    denied(await pre()('Read', { file_path: join(world.root, '.git', 'config') }, 't1'));
+  });
+
+  test('every shell command is asked, the ones the CLI calls read-only included', async () => {
+    allowed(await pre({ contained: true })('Bash', { command: 'ls' }, 't1'));
+    assert.deepEqual(gateEvents(), ['shell']);
+    denied(await pre({ contained: false })('Bash', { command: 'ls' }, 't2'), 'no shell off the container');
+  });
+
+  test('a subagent is spawned inside the company, never remotely', async () => {
+    allowed(await pre()('Agent', { description: 'look', prompt: 'read' }, 't1'));
+    const r = denied(await pre()('Agent', { description: 'look', prompt: 'read', isolation: 'remote' }, 't2'));
+    assert.match(r.message, /remote isolation is not available/);
   });
 });

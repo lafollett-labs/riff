@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { api, type PlanUsage, type RuntimeCredential, type RuntimeCredentialType } from '../api';
+import { pressedByKeyboard, rehome } from '../focus';
 
 /**
  * Installation-level settings — Riff itself, not any one company. Today just the
@@ -87,17 +88,20 @@ onMounted(() => {
 });
 onBeforeUnmount(() => clearInterval(tick));
 
-const savePoll = async (): Promise<void> => {
+const savePoll = async (e?: UIEvent): Promise<void> => {
   const m = pollMinutes.value;
   if (typeof m !== 'number' || !Number.isFinite(m)) { pollErr.value = 'Enter a number of minutes.'; return; }
+  const from = pressedByKeyboard(e);
+  let landed = false;
   pollSaving.value = true;
   try {
     const r = await api.putUsagePoll(m);
     pollMinutes.value = savedMinutes.value = r.usagePollMinutes;
     pollSaved.value = true;
     pollErr.value = '';
+    landed = true;
   } catch (e) { pollErr.value = msg(e); }
-  finally { pollSaving.value = false; }
+  finally { pollSaving.value = false; void rehome(from, 'usage-poll', landed); }
 };
 
 const load = async (): Promise<void> => {
@@ -114,8 +118,10 @@ const load = async (): Promise<void> => {
   finally { loading.value = false; }
 };
 
-const save = async (): Promise<void> => {
+const save = async (e?: UIEvent): Promise<void> => {
   if (!canSave.value) return;
+  const from = pressedByKeyboard(e);
+  let landed = false;
   saving.value = true;
   justSaved.value = false;
   try {
@@ -129,14 +135,31 @@ const save = async (): Promise<void> => {
     value.value = '';
     justSaved.value = true;
     err.value = '';
+    landed = true;
   } catch (e) { err.value = msg(e); }
-  finally { saving.value = false; }
+  finally { saving.value = false; void rehome(from, 'rc-type', landed); }
 };
 
 // Clearing the default drops both the type and the vault value. It is behind a
 // confirm because every company inheriting it stops until a new default (or its
 // own override) is set — a company with its own credential is unaffected.
-const remove = async (): Promise<void> => {
+/** Opening the confirm unmounts the button pressed; Cancel is the safe place to land. */
+const openRemove = (e: UIEvent) => {
+  const from = pressedByKeyboard(e);
+  confirmRemove.value = true;
+  void rehome(from, 'rc-remove-cancel', true);
+};
+
+/** Cancel removes the confirm it sits in; the button that opened it is back. */
+const cancelRemove = (e: UIEvent) => {
+  const from = pressedByKeyboard(e);
+  confirmRemove.value = false;
+  void rehome(from, 'rc-remove', true);
+};
+
+const remove = async (e: UIEvent): Promise<void> => {
+  const from = pressedByKeyboard(e);
+  let landed = false;
   removing.value = true;
   try {
     const r = await api.deleteSettings();
@@ -146,8 +169,9 @@ const remove = async (): Promise<void> => {
     justSaved.value = false;
     confirmRemove.value = false;
     err.value = '';
+    landed = true;
   } catch (e) { err.value = msg(e); }
-  finally { removing.value = false; }
+  finally { removing.value = false; void rehome(from, 'rc-type', landed); }
 };
 
 onMounted(load);
@@ -205,7 +229,7 @@ onMounted(load);
           <button class="save" :disabled="!canSave" @click="save">
             {{ saving ? 'Saving…' : 'Save' }}
           </button>
-          <button v-if="valueSet && !confirmRemove" class="danger" @click="confirmRemove = true">
+          <button v-if="valueSet && !confirmRemove" id="rc-remove" class="danger" @click="openRemove">
             Remove default
           </button>
         </div>
@@ -219,7 +243,7 @@ onMounted(load);
             <button class="danger" :disabled="removing" @click="remove">
               {{ removing ? 'Removing…' : 'Remove' }}
             </button>
-            <button class="ghost" :disabled="removing" @click="confirmRemove = false">Cancel</button>
+            <button id="rc-remove-cancel" class="ghost" :disabled="removing" @click="cancelRemove">Cancel</button>
           </div>
         </div>
 

@@ -2,6 +2,7 @@
 import { ref, computed, watch, nextTick } from 'vue';
 import { api, type Effort, type Event, type State, type RuntimeCredentialType } from '../api';
 import { useModels, effortsFor, withStored, EFFORTS, EFFORT_HINTS } from '../models';
+import { pressedByKeyboard, rehome } from '../focus';
 
 // `events` is part of the shared per-company view contract App.vue binds; this
 // view reads only `state`. Declaring it keeps it off the root as a fallthrough.
@@ -47,7 +48,9 @@ watch(() => props.state.staff, () => { if (!mindDirty.value) resetMind(); }, { d
 watch(() => props.state.slug, () => { mindSaved.value = false; resetMind(); });
 watch(mindDirty, (d) => { if (d) mindSaved.value = false; });
 
-const saveMind = async () => {
+const saveMind = async (e?: UIEvent) => {
+  const from = pressedByKeyboard(e);
+  let landed = false;
   mindSaving.value = true;
   mindErr.value = '';
   try {
@@ -56,11 +59,13 @@ const saveMind = async () => {
     model.value = s.model;
     effort.value = s.effort;
     mindSaved.value = true;
+    landed = true;
     emit('changed');
   } catch (e) {
     mindErr.value = e instanceof Error ? e.message : 'Could not save.';
   } finally {
     mindSaving.value = false;
+    void rehome(from, 'co-model', landed);
   }
 };
 
@@ -166,6 +171,13 @@ const applyPolicy = (p: typeof props.state.policy) => {
 };
 const resetDials = () => applyPolicy(props.state.policy);
 
+/** Reset disables itself and Save with it; a keyboard press keeps its place. */
+const pressReset = (e: UIEvent, reset: () => void, fallback: string) => {
+  const from = pressedByKeyboard(e);
+  reset();
+  void rehome(from, fallback, true);
+};
+
 // The dials are always editable now, so the poll must never wipe what is being
 // typed. App.vue replaces the whole state object every twenty seconds, firing
 // this watch on identity even when the policy came back byte-identical; without
@@ -186,7 +198,9 @@ watch(dirty, (d) => { if (d) justSavedDials.value = false; });
 const numOr = (v: unknown, fallback: number): number =>
   v === '' || v == null ? fallback : Number(v);
 
-const saveDials = async () => {
+const saveDials = async (e?: UIEvent) => {
+  const from = pressedByKeyboard(e);
+  let landed = false;
   saving.value = true;
   perr.value = '';
   try {
@@ -209,11 +223,13 @@ const saveDials = async () => {
     // concurrent poll happens to land next. renameCompany returns only { slug }.
     applyPolicy((await api.state()).policy);
     justSavedDials.value = true;
+    landed = true;
     emit('changed');
   } catch (e) {
     perr.value = e instanceof Error ? e.message : 'Could not save.';
   } finally {
     saving.value = false;
+    void rehome(from, 'dial-cap', landed);
   }
 };
 
@@ -264,8 +280,10 @@ watch(() => props.state.slug, () => {
   rcValue.value = ''; rcErr.value = ''; rcJustSaved.value = false; rcTypeTouched.value = false;
 });
 
-const saveRc = async () => {
+const saveRc = async (e?: UIEvent) => {
   if (!rcCanSave.value) return;
+  const from = pressedByKeyboard(e);
+  let landed = false;
   rcSaving.value = true;
   rcJustSaved.value = false;
   try {
@@ -276,11 +294,13 @@ const saveRc = async () => {
     rcErr.value = '';
     // The picked type is now the stored type, so the poll may track it again.
     rcTypeTouched.value = false;
+    landed = true;
     emit('changed');
   } catch (e) {
     rcErr.value = e instanceof Error ? e.message : 'Could not save.';
   } finally {
     rcSaving.value = false;
+    void rehome(from, 'co-rc-type', landed);
   }
 };
 
@@ -354,7 +374,7 @@ const useDefault = async () => {
                 aria-label="Save thinking" @click="saveMind">
           {{ mindSaving ? 'Saving…' : 'Save' }}
         </button>
-        <button class="ghost" :disabled="mindSaving || !mindDirty" @click="resetMind">Reset</button>
+        <button class="ghost" :disabled="mindSaving || !mindDirty" @click="pressReset($event, resetMind, 'co-model')">Reset</button>
       </div>
       <p v-if="!mindErr && mindSaved" class="ok" role="status">Saved.</p>
     </section>
@@ -411,13 +431,13 @@ const useDefault = async () => {
         </template>
       </div>
 
-      <p v-if="perr" class="err">{{ perr }}</p>
+      <p v-if="perr" class="err" role="alert">{{ perr }}</p>
       <div class="row">
         <button class="go" :disabled="saving || !dirty" :aria-busy="saving"
                 aria-label="Save settings" @click="saveDials">
           {{ saving ? 'Saving…' : 'Save' }}
         </button>
-        <button class="ghost" :disabled="saving || !dirty" @click="resetDials">Reset</button>
+        <button class="ghost" :disabled="saving || !dirty" @click="pressReset($event, resetDials, 'dial-cap')">Reset</button>
       </div>
       <p v-if="!perr && justSavedDials" class="ok" role="status">Saved.</p>
     </section>

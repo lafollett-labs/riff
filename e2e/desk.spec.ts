@@ -918,6 +918,68 @@ test('what the staff think with is a company setting, saved without a restart', 
   await expect(page.locator('.mind').getByRole('status')).toHaveText('Saved.');
 });
 
+test('a keyboard Save keeps focus on the page, whether it lands or fails', async ({ page }) => {
+  // A Save disables itself while it runs and once nothing is dirty, which
+  // dropped a keyboard user's focus to <body>: the next Tab restarted at the top.
+  await go(page, 'Settings');
+  const effort = page.locator('#co-effort');
+  const save = page.locator('.mind').getByRole('button', { name: 'Save thinking' });
+
+  await effort.selectOption('high');
+  await page.route('**/api/companies/*', (route) =>
+    route.request().method() === 'PATCH'
+      ? route.fulfill({ status: 500, contentType: 'application/json', body: '{"error":"refused"}' })
+      : route.fallback());
+  await save.focus();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.mind').getByRole('alert')).toBeVisible();
+  await expect(save).toBeFocused();
+
+  await page.unroute('**/api/companies/*');
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.mind').getByRole('status')).toHaveText('Saved.');
+  await expect(page.locator('#co-model')).toBeFocused();
+
+  // A mouse click leaves focus alone: moving it would ring a field never visited.
+  await effort.selectOption('medium');
+  await save.click();
+  await expect(page.locator('.mind').getByRole('status')).toHaveText('Saved.');
+  await expect(page.locator('#co-model')).not.toBeFocused();
+
+  // The dials land on the field just above Save. The first dial is twelve
+  // fields back, and focusing it scrolled "Saved." off the screen.
+  const turns = page.getByLabel('Turns a shift');
+  const before = await turns.inputValue();
+  await turns.fill(String(Number(before) + 1));
+  const saveDials = page.getByRole('button', { name: 'Save settings' });
+  await saveDials.focus();
+  await page.keyboard.press('Enter');
+  const saved = page.locator('.dials').getByRole('status');
+  await expect(saved).toHaveText('Saved.');
+  await expect(page.locator('#dial-cap')).toBeFocused();
+  await expect(saved).toBeInViewport();
+  await turns.fill(before);
+  await saveDials.click();
+  await expect(saveDials).toBeDisabled();
+
+  // A seat's Save stays enabled until the refresh lands, and must not keep focus
+  // only to lose it when that refresh disables it.
+  await go(page, 'Staff');
+  const card = page.locator('.card', { hasText: 'Wick' });
+  await card.click();
+  const detail = page.locator('.detail');
+  const model = detail.getByLabel('Model', { exact: true });
+  await model.selectOption('sonnet');
+  await detail.getByRole('button', { name: 'Save model and effort' }).focus();
+  await page.keyboard.press('Enter');
+  await expect(card.locator('.chip')).toHaveText('sonnet');
+  await expect(model).toBeFocused();
+
+  await model.selectOption('company');
+  await detail.getByRole('button', { name: 'Save model and effort' }).click();
+  await expect(card.locator('.chip')).toHaveCount(0);
+});
+
 test('one seat can think with its own model, and the roster shows who was singled out', async ({ page }) => {
   await go(page, 'Staff');
   const card = page.locator('.card', { hasText: 'Wick' });

@@ -4,6 +4,7 @@ import { api, type Agent, type Effort, type Event, type State } from '../api';
 import { render } from '../markdown';
 import { onEvents } from '../live';
 import { useModels, modelLabel, effortsFor, withStored, EFFORTS, INHERIT } from '../models';
+import { pressedByKeyboard, rehome } from '../focus';
 
 const props = defineProps<{ state: State; events: Event[] }>();
 const emit = defineEmits<{ changed: [] }>();
@@ -207,18 +208,22 @@ const noEffort = computed(() => takes.value !== null && takes.value.length === 0
 /** A seat singled out gets a chip on its card; one following the company does not. */
 const own = (a: Agent): string => [a.model, a.effort].filter((v) => v !== INHERIT).join(' · ');
 
-const saveMind = async (a: Agent) => {
+const saveMind = async (a: Agent, e?: UIEvent) => {
+  const from = pressedByKeyboard(e);
+  let landed = false;
   mSaving.value = true;
   mErr.value = '';
   try {
     const r = await api.setSeatModel(props.state.slug, a.id,
       { model: mModel.value, effort: mEffort.value as Effort | 'company' });
     mSaved.value = r.changed ? `Saved. ${a.name} runs on it from their next shift.` : 'No change.';
+    landed = true;
     emit('changed');
   } catch (e) {
     mErr.value = e instanceof Error ? e.message : String(e);
   } finally {
     mSaving.value = false;
+    void rehome(from, `seat-model-${a.id}`, landed);
   }
 };
 
@@ -258,7 +263,7 @@ const send = async (a: Agent) => {
         <div v-if="a.tier !== 'board'" class="mind">
           <label class="pickf">
             <span class="lbl faint mono">Model</span>
-            <select v-model="mModel" class="rn" aria-label="Model">
+            <select :id="`seat-model-${a.id}`" v-model="mModel" class="rn" aria-label="Model">
               <option :value="INHERIT">Company default · {{ modelLabel(catalog, state.staff.model) }}</option>
               <option v-for="o in seatOptions" :key="o.value" :value="o.value">{{ o.label }}</option>
             </select>
@@ -275,7 +280,7 @@ const send = async (a: Agent) => {
             </select>
           </label>
           <button class="go" :disabled="!mDirty || mSaving" :aria-busy="mSaving"
-                  aria-label="Save model and effort" @click="saveMind(a)">
+                  aria-label="Save model and effort" @click="saveMind(a, $event)">
             {{ mSaving ? 'Saving…' : 'Save' }}
           </button>
           <span v-if="noEffort" :id="`no-effort-${a.id}`" class="faint hint">This model takes no effort setting; it is ignored.</span>

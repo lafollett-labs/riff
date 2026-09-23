@@ -76,17 +76,29 @@ fi
 # flight — `stop()` waits on it deliberately — and the server restores whatever
 # was running when it comes back up, so nothing has to be restarted by hand.
 drain() {
-  port=${PORT:-4173}
+  # Where the RUNNING stack is published, asked of compose. It read $PORT from
+  # the environment alone, so a PORT set in docker/.env or $RIFF_ENV — where
+  # .env.example says to set it — sent the listing to 4173, found nobody, and
+  # the rebuild recreated the container under the shifts it was there to wait
+  # for. Re-reading the env files would still be wrong the moment PORT is
+  # edited before a rebuild: that names the next container, not this one.
+  port=$(run_compose port ingress 4173 2>/dev/null | sed -n 's/.*:\([0-9][0-9]*\)$/\1/p')
+  [ -n "$port" ] || return 0            # nothing published: no stack, nothing to drain
   base="http://127.0.0.1:$port/api"
+  # Said out loud: the stack is up but its server did not answer, which looks
+  # exactly like nobody working, and only one of them is safe to rebuild over.
+  list=$(curl -sf -m 5 "$base/companies" 2>/dev/null) || {
+    echo "riff: the stack is up on 127.0.0.1:$port but its server did not answer; nothing was drained" >&2
+    return 0
+  }
   # Split on `{` so each line is one company object, carrying both its slug and
   # its running flag whatever order the fields arrive in. The first version cut
   # on commas and took the line before "running":true, which assumed slug and
   # running were adjacent — they are eight fields apart, so it silently matched
   # nothing and two rebuilds killed a shift each while the test passed against a
   # fixture that had them side by side.
-  running=$(curl -sf -m 5 "$base/companies" 2>/dev/null \
-    | tr '{' '\n' | grep '"running":true' \
-    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p') || return 0
+  running=$(printf '%s' "$list" | tr '{' '\n' | grep '"running":true' \
+    | sed -n 's/.*"slug":"\([^"]*\)".*/\1/p') || true
   [ -n "$running" ] || return 0
 
   for slug in $running; do

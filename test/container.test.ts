@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, statSync, mkdtempSync, writeFileSync, existsSync,
          copyFileSync, mkdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, homedir } from 'node:os';
+import { sandboxFilesystem } from '../src/runtime/staff.ts';
 import { spawnSync, execFileSync } from 'node:child_process';
 
 /**
@@ -268,10 +269,17 @@ describe('the example env file describes this container, not an imagined one', (
    * called, to prove the launcher drains before a rebuild and starts nothing it
    * should not.
    */
-  const launch = (args: string[] = ['up']): { out: string; curl: string; argv: string } => {
+  const launch = (args: string[] = ['up'], env: Record<string, string> = {}):
+      { out: string; err: string; curl: string; argv: string } => {
     const dir = mkdtempSync(join(tmpdir(), 'riff-launch-'));
+    // It answers `compose port` as a running stack would (STUB_PORT, or 4173),
+    // and says nothing is published when STUB_STACK_DOWN is set.
     writeFileSync(join(dir, 'docker'),
-      `#!/bin/sh\nprintf '%s\\n' "$*" > ${dir}/argv\n`, { mode: 0o755 });
+      `#!/bin/sh\n`
+      + `case "$*" in *" port ingress 4173"*)\n`
+      + `  [ -n "$STUB_STACK_DOWN" ] && exit 1\n`
+      + `  echo "127.0.0.1:\${STUB_PORT:-4173}"; exit 0 ;;\nesac\n`
+      + `printf '%s\\n' "$*" > ${dir}/argv\n`, { mode: 0o755 });
     // A stub `curl`, because the launcher asks a running server to drain its
     // companies before recreating the container. Unstubbed, this suite would
     // reach 127.0.0.1:4173 and pause the operator's real work. It answers a
@@ -279,6 +287,8 @@ describe('the example env file describes this container, not an imagined one', (
     // acts and terminates.
     writeFileSync(join(dir, 'curl'),
       `#!/bin/sh\nprintf '%s\\n' "$*" >> ${dir}/curl.log\n`
+      // STUB_CURL_DOWN: no server listening, as curl -f reports it.
+      + `[ -n "$STUB_CURL_DOWN" ] && exit 7\n`
       + `case "$*" in\n`
       + `  *"-X POST"*) exit 0 ;;\n`
       + `esac\n`
@@ -296,11 +306,12 @@ describe('the example env file describes this container, not an imagined one', (
       + `fi\n`, { mode: 0o755 });
     const r = spawnSync('sh', ['docker/up.sh', ...args], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}`, RIFF_ENV: '' },
+      env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}`, RIFF_ENV: '', ...env },
     });
     assert.equal(r.status, 0, `up.sh ${args.join(' ')} failed: ${r.stderr}`);
     return {
       out: r.stdout,
+      err: r.stderr,
       curl: existsSync(join(dir, 'curl.log')) ? readFileSync(join(dir, 'curl.log'), 'utf8') : '',
       argv: existsSync(join(dir, 'argv')) ? readFileSync(join(dir, 'argv'), 'utf8') : '',
     };
@@ -330,14 +341,30 @@ describe('the example env file describes this container, not an imagined one', (
   });
 
   test('the launcher never reaches a server on the operator\'s own port by accident', () => {
-    // Every request the drain makes has to go through $PORT, so a test can
-    // point it somewhere harmless. A hardcoded 4173 would make this suite
-    // pause the operator's real companies.
+    // The drain asks compose where the stack is published, which a stub on
+    // PATH answers — so this suite never reaches the operator's real server. A
+    // hardcoded 4173 would bypass that and pause their real companies.
     const src = readFileSync('docker/up.sh', 'utf8');
     const drain = src.slice(src.indexOf('drain() {'), src.indexOf('run_compose "$@"'));
-    assert.ok(drain.includes('${PORT:-4173}'), 'the port must come from the environment');
-    assert.ok(!/127\.0\.0\.1:4173/.test(drain.replace('${PORT:-4173}', '')),
-      'no hardcoded port in the drain');
+    assert.ok(!/127\.0\.0\.1:4173/.test(drain), 'no hardcoded port in the drain');
+  });
+
+  test('the drain asks the running stack where it is published, not the environment', () => {
+    // It read $PORT from the environment alone, so a PORT set in an env file —
+    // where .env.example says to set it — sent the listing to 4173, found
+    // nobody, and the rebuild went ahead under whatever was working.
+    const r = launch(['up'], { STUB_PORT: '5917', PORT: '4173' });
+    assert.match(r.curl, /127\.0\.0\.1:5917\/api\/companies/);
+    assert.match(r.out, /draining testco/);
+  });
+
+  test('no stack is nothing to drain, and a silent server is said out loud', () => {
+    const down = launch(['up'], { STUB_STACK_DOWN: '1' });
+    assert.equal(down.curl, '');
+    assert.equal(down.err, '');
+    const silent = launch(['up'], { STUB_CURL_DOWN: '1' });
+    assert.match(silent.err, /stack is up on 127\.0\.0\.1:4173 but its server did not answer; nothing was drained/);
+    assert.match(silent.argv, /up/, 'it still starts the stack');
   });
 
   test('check validates the compose wiring and starts nothing', () => {
@@ -628,7 +655,8 @@ describe('one company cannot read another', () => {
     // Everything outside allowWrite is read-only inside the sandbox, so a
     // missing home directory turns `npm install` into EROFS. Marlow hit this
     // on the first shift under the sandbox.
-    assert.match(staff, /allowWrite: \[dirname\(worldRoot\), worldRoot, home\('\.npm'\), home\('\.cache'\)/);
+    const { allowWrite } = sandboxFilesystem('/data/companies/co/world');
+    for (const d of ['.npm', '.cache', '.undo']) assert.ok(allowWrite.includes(join(homedir(), d)), d);
   });
 
   test('the container ships what the Linux sandbox needs', () => {

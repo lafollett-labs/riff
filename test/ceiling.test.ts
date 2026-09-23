@@ -56,7 +56,12 @@ describe('a shift that spends its last turn and then dies was truncated', () => 
 describe('a shift that dies for some other reason says what the CLI said', () => {
   test('stderr is captured, because the SDK error alone is four words', () => {
     const src = staff();
-    assert.match(src, /stderr: \(data: string\) => \{ noise = \(noise \+ data\)\.slice\(-STDERR_KEPT\); \}/);
+    assert.match(src, /const keepNoise = \(data: string\) => \{ noise = \(noise \+ data\)\.slice\(-STDERR_KEPT\); \};/);
+    assert.match(src, /stderr: keepNoise,/);
+    // The SDK feeds `stderr` only on its own spawn path; the confined one must
+    // read the pipe itself or a crash is four words again.
+    assert.match(src, /confinedSpawn\(dirname\(world\.root\), keepNoise\)/);
+    assert.match(src, /child\.stderr\.on\('data', onStderr\);/);
     assert.match(src, /stderr: withoutSecrets\(noise\)\.trim\(\)/);
   });
 
@@ -408,7 +413,7 @@ describe('a shift that is stuck rather than slow', () => {
     assert.match(src, /ledger\.emit\(agent\.id, 'shift\.overran'/);
     // Checked before every other reading of the abort it caused.
     const c = src.indexOf('} catch (err) {');
-    assert.ok(src.indexOf('if (overran)', c) < src.indexOf('LOST_SESSION.test(error)', c),
+    assert.ok(src.indexOf('if (overran)', c) < src.indexOf('LOST_SESSION.test(`${error}\\n${noise}`)', c),
       'the ceiling is why the error happened, so it is read first');
   });
 

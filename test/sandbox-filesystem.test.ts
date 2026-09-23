@@ -1,6 +1,9 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { sandboxFilesystem } from '../src/runtime/staff.ts';
+import { sandboxFilesystem, cliConfinement, confinedSpawn } from '../src/runtime/staff.ts';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { homedir } from 'node:os';
 import { installRoot } from '../src/core/config.ts';
 
 /**
@@ -99,5 +102,105 @@ describe('a shift may build beside its world but not rewrite what governs it', (
     const { allowWrite } = sandboxFilesystem(world);
     assert.ok(allowWrite.includes('/data/companies/shipit'));
     assert.ok(allowWrite.includes(world));
+  });
+});
+
+describe('the CLI itself sees only its company, so a file tool cannot follow a link out', () => {
+  // The gate vets a file tool's path in the factory, then the CLI opens it; a
+  // parallel shell could swap a directory for a link in between (R3-1). Measured
+  // in the factory with a real shift through this view: master.key absent, a
+  // Read aimed at it "File does not exist", a Write to config.json refused.
+  const home = '/data/companies/shipit';
+  beforeEach(() => { process.env['RIFF_ROOT'] = '/data'; });
+  afterEach(() => { delete process.env['RIFF_ROOT']; });
+
+  /** Index of a flag followed by its operands, or -1. */
+  const at = (args: string[], ...seq: string[]): number =>
+    args.findIndex((_, i) => seq.every((s, j) => args[i + j] === s));
+
+  test('the installation root is emptied before the company home is put back', () => {
+    // bubblewrap applies mounts in order: the other way round, the tmpfs would
+    // bury the company's own home too, or the root would stay in view.
+    const a = cliConfinement(home);
+    const root = at(a, '--tmpfs', '/data');
+    const own = at(a, '--bind', home, home);
+    assert.ok(root >= 0 && own > root);
+  });
+
+  test('the control files are read-only over the writable home, and a missing one fails closed', () => {
+    const a = cliConfinement(home);
+    const own = at(a, '--bind', home, home);
+    for (const f of ['config.json', 'ledger.db', 'transcript.db']) {
+      const p = `${home}/${f}`;
+      assert.ok(at(a, '--ro-bind', p, p) > own, f);
+    }
+    // Only the WAL sidecars come and go with the database being open.
+    for (const f of ['ledger.db-wal', 'ledger.db-shm', 'transcript.db-wal', 'transcript.db-shm']) {
+      const p = `${home}/${f}`;
+      assert.ok(at(a, '--ro-bind-try', p, p) > own, f);
+    }
+  });
+
+  test('nothing under the installation root is mounted but the home and its control files', () => {
+    // A stray bind of secrets/ or master.key would pass every ordering test.
+    const a = cliConfinement(home);
+    const binds = new Set(['--bind', '--bind-try', '--ro-bind', '--ro-bind-try', '--dev-bind', '--dev-bind-try']);
+    const allowed = new Set([home, ...['config.json', 'ledger.db', 'ledger.db-wal', 'ledger.db-shm',
+      'transcript.db', 'transcript.db-wal', 'transcript.db-shm'].map((f) => `${home}/${f}`)]);
+    a.forEach((x, i) => {
+      if (!binds.has(x)) return;
+      const src = a[i + 1]!;
+      if (src === '/data' || src.startsWith('/data/')) assert.ok(allowed.has(src), `${x} ${src}`);
+    });
+    // And the home goes back in only after every tmpfs, or one would bury it.
+    const own = at(a, '--bind', home, home);
+    a.forEach((x, i) => { if (x === '--tmpfs') assert.ok(i < own, `tmpfs ${a[i + 1]} after the home`); });
+  });
+
+  test('every tmpfs is sized, so a runaway build fails with ENOSPC instead of the gateway', () => {
+    const a = cliConfinement(home);
+    a.forEach((x, i) => {
+      if (x === '--tmpfs') assert.equal(a[i - 2], '--size', `unsized tmpfs ${a[i + 1]}`);
+    });
+  });
+
+  test('the shell\'s own caches exist in the fresh home, so they stay writable', () => {
+    // The shell's sandbox skips an allowWrite path that does not exist.
+    const a = cliConfinement(home);
+    for (const d of ['.npm', '.cache', '.undo']) assert.ok(at(a, '--dir', `${homedir()}/${d}`) >= 0, d);
+  });
+
+  test('a home that is not a company under companies/ is refused, not half-confined', () => {
+    for (const bad of ['/data', '/data/companies', '/data/world', '/elsewhere/co',
+                       '/data/companies/../x', '/data/companies/co/deeper']) {
+      assert.throws(() => cliConfinement(bad), /refusing to confine/, bad);
+    }
+  });
+
+  test('the CLI is started inside the view, its stderr read, and a missing bwrap named', () => {
+    const calls: Array<{ cmd: string; argv: string[] }> = [];
+    const said: string[] = [];
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+      stderr: new PassThrough() });
+    const fake = ((cmd: string, argv: string[]) => { calls.push({ cmd, argv }); return child; }) as never;
+    confinedSpawn(home, (s) => said.push(s), fake)(
+      { command: '/app/claude', args: ['--print'], cwd: `${home}/world`, env: {}, signal: new AbortController().signal });
+    assert.equal(calls[0]!.cmd, 'bwrap');
+    const argv = calls[0]!.argv;
+    assert.deepEqual(argv.slice(argv.indexOf('--')), ['--', '/app/claude', '--print']);
+    assert.deepEqual(argv.slice(0, argv.indexOf('--')), cliConfinement(home));
+    child.stderr.write('No conversation found\n');
+    child.emit('error', new Error('spawn bwrap ENOENT'));
+    assert.deepEqual(said, ['No conversation found\n', 'bwrap: spawn bwrap ENOENT\n']);
+  });
+
+  test('the shared home and /tmp are fresh, and the view dies with the gateway', () => {
+    const a = cliConfinement(home);
+    assert.ok(at(a, '--tmpfs', homedir()) >= 0);
+    assert.ok(at(a, '--tmpfs', '/tmp') >= 0);
+    assert.ok(a.includes('--die-with-parent'));
+    // Everything else read-only: the rootfs already is, and nothing else is bound writable.
+    assert.equal(at(a, '--ro-bind', '/', '/'), 0);
+    assert.equal(a.filter((x) => x === '--bind').length, 2); // /proc and the home
   });
 });

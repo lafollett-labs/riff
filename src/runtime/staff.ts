@@ -1,7 +1,9 @@
-import { dirname, join } from 'node:path';
+import { dirname, join, sep, relative, resolve, isAbsolute } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
-import { query, type CanUseTool, type ModelUsage, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'node:child_process';
+import { query, type CanUseTool, type ModelUsage, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage,
+  type SpawnOptions, type SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
 import { DEFAULT_STAFF, mindOf, type Effort, type StaffDefaults } from '../core/models.ts';
 import type { Ledger } from '../ledger/ledger.ts';
@@ -10,7 +12,7 @@ import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import { createTools, TOOL_NAMESPACE } from './tools.ts';
 import { makeCanUseTool, shellIsContained } from './permissions.ts';
-import { DEFAULT_POLICY, installRoot, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
+import { DEFAULT_POLICY, installRoot, companiesDir, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
 import { mintScopedToken } from '../core/proxytoken.ts';
 import type { TranscriptSink } from '../ledger/transcript.ts';
 import { worstWindow, isWeekly, windowsFromUsage, limitsReadable, mergeWindow,
@@ -54,6 +56,9 @@ export const transcriptExists = (id: string, store = sessionStore()): boolean =>
   try { dirs = readdirSync(store); } catch { return false; }
   return dirs.some((d) => existsSync(join(store, d, `${id}.jsonl`)));
 };
+
+/** Caches kept under $HOME that the shell may write. See sandboxFilesystem. */
+const HOME_CACHES = ['.npm', '.cache', '.undo'];
 
 /**
  * The read/write map handed to Claude Code's Bash sandbox — the kernel boundary
@@ -106,13 +111,90 @@ export const sandboxFilesystem = (worldRoot: string, configDir?: string): {
   // mounts in the working directory. world/ is listed on its own as well, so it
   // is a mount of its own and cannot be renamed out from under the gateway;
   // measured refused, both with and without this line.
-  allowWrite: [dirname(worldRoot), worldRoot, home('.npm'), home('.cache'), home('.undo')],
+  allowWrite: [dirname(worldRoot), worldRoot, ...HOME_CACHES.map(home)],
   // Not the files the gateway governs the company by. Measured in a contained
   // probe: before, each took a write and config.json took a rename; with these,
   // each answers `Read-only file system`.
   denyWrite: companyControlFiles(dirname(worldRoot)),
 });
 
+
+/**
+ * The mount namespace the whole CLI runs in when contained — bubblewrap
+ * arguments up to, not including, the command.
+ *
+ * The gate checks a file tool's path in the factory and the CLI then opens it
+ * itself, outside the Bash sandbox and with the factory's full view. A shell
+ * running in parallel could swap a directory below world/ for a link in
+ * between, and Read/Write/Edit would follow it into another company or the
+ * secrets store — R3-1 in docs/code-reviews/shift-write-boundary-code-review.md.
+ * The race cannot be closed at the gate, which never holds the file open, so
+ * it is made harmless below it: inside this view every path resolves within
+ * the company, whatever a link says. Measured in the factory: /data lists
+ * empty, master.key and a link planted to it are absent, the control files
+ * answer `Read-only file system` and refuse a rename, and the Bash sandbox
+ * still nests inside. /proc stays the container's, the concession
+ * enableWeakerNestedSandbox already makes; from inside, 0 of its processes'
+ * /proc/<pid>/root reached master.key.
+ *
+ * $HOME and /tmp are fresh per shift. Outside, each is one tmpfs shared by
+ * every company, and the CLI keeps nothing in either that it needs back:
+ * CLAUDE_CONFIG_DIR puts its store in the company's own home.
+ *
+ * bubblewrap does not forward signals, so an aborted shift's CLI is killed
+ * outright when bwrap goes (--die-with-parent) rather than asked to stop, and
+ * a signal death reads as exit 128+N. A shift that ends normally is unaffected:
+ * the CLI exits by itself when the SDK closes its input.
+ */
+export const cliConfinement = (companyHome: string): string[] => {
+  // Bound back in over an emptied root, a home that is not strictly below
+  // companies/ would put the root itself — master.key, the vaults, every
+  // company — back in view. A shift that cannot be confined does not run.
+  const rel = relative(companiesDir(), resolve(companyHome));
+  if (!rel || rel.startsWith('..') || isAbsolute(rel) || rel.includes(sep)) {
+    throw new Error(`refusing to confine a shift to ${companyHome}: not a company under ${companiesDir()}`);
+  }
+  return [
+    '--ro-bind', '/', '/',
+    '--dev', '/dev',
+    '--bind', '/proc', '/proc',
+    // Sized as compose sizes the shared ones: an unsized tmpfs is half the
+    // machine's memory each, and a runaway build filled the factory's cgroup
+    // instead of failing with ENOSPC — the OOM killer then picks the gateway.
+    '--size', String(1 << 20), '--tmpfs', installRoot(),
+    '--size', String(256 << 20), '--tmpfs', homedir(),
+    // The shell's own allowWrite skips a path that does not exist, and a
+    // fresh home has none: ~/.undo went read-only and undo.mjs died on it once.
+    ...HOME_CACHES.flatMap((d) => ['--dir', home(d)]),
+    '--size', String(512 << 20), '--tmpfs', '/tmp',
+    '--bind', companyHome, companyHome,
+    // The databases and config always exist while the company is open, so a
+    // missing one fails the shift rather than leaving it writable. Only the
+    // WAL sidecars come and go.
+    ...companyControlFiles(companyHome).flatMap((f) =>
+      [/-(?:wal|shm)$/.test(f) ? '--ro-bind-try' : '--ro-bind', f, f]),
+    '--die-with-parent',
+  ];
+};
+
+/**
+ * Spawn the CLI inside cliConfinement.
+ *
+ * The SDK drains stderr only on its own spawn path; a custom spawner that
+ * leaves it unread lets the pipe fill and stalls the CLI mid-shift, so it is
+ * read here and handed to the same sink the shift's `stderr` option feeds.
+ */
+export const confinedSpawn = (companyHome: string, onStderr: (s: string) => void, spawner = spawn) =>
+  ({ command, args, cwd, env, signal }: SpawnOptions): SpawnedProcess => {
+    const child = spawner('bwrap', [...cliConfinement(companyHome), '--', command, ...args],
+      { cwd, env, signal, stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stderr.setEncoding('utf8');
+    child.stderr.on('data', onStderr);
+    // The SDK reports a missing executable as the CLI's binary not found,
+    // which sends the operator looking for the wrong program.
+    child.on('error', (e) => onStderr(`bwrap: ${e.message}\n`));
+    return child;
+  };
 
 /**
  * What the gateway governs a company by, and so what its staff must not write.
@@ -1336,6 +1418,7 @@ export const tick = async (
   timeout?.unref();
   /** The tail of what the CLI said on its way out, kept only for a failure. */
   let noise = '';
+  const keepNoise = (data: string) => { noise = (noise + data).slice(-STDERR_KEPT); };
   /**
    * This leg has already taken every turn it was allowed.
    *
@@ -1570,7 +1653,10 @@ export const tick = async (
         // The CLI's own account of a death. Without it the ledger records
         // `exited with code 1` and nothing else, and the reason has to be
         // reconstructed from transcript files inside the container.
-        stderr: (data: string) => { noise = (noise + data).slice(-STDERR_KEPT); },
+        stderr: keepNoise,
+        // The whole CLI, not only its shell, sees just this company. See
+        // cliConfinement. Its stderr is read there, since the SDK stops.
+        ...(shellIsContained() ? { spawnClaudeCodeProcess: confinedSpawn(dirname(world.root), keepNoise) } : {}),
 
         // ---- limits ----
         maxTurns,
@@ -1872,7 +1958,9 @@ export const tick = async (
       // Checked BEFORE anything is recorded as a failure, because a shift
       // that recovers did not fail, and saying so puts a red line in the
       // console for something nobody needs to act on.
-      if (session && LOST_SESSION.test(error)) {
+      // noise too: under the confined spawn the SDK no longer appends the
+      // CLI's stderr to its own error, and this can arrive only there.
+      if (session && LOST_SESSION.test(`${error}\n${noise}`)) {
         ledger.setMeta(`session:${agent.id}`, '');
         ledger.emit(agent.id, 'session.reset', null, { was: session });
         session = null;
@@ -1949,6 +2037,18 @@ export const tick = async (
     world.appendJournal(agent.id, journalEntry(account, turns, truncated));
   }
   world.git.commitAs({ id: agent.id, name: agent.name }, `${agent.id}: ${firstLine(account)}`);
+  // Housekeeping the shift cannot do from inside its sandbox (see
+  // pruneWorktrees), run inside the company's own view. Off the container there
+  // is no shell, so no staff worktree to forget. A failure is not the shift's,
+  // but a refusal is worth seeing: the vet refuses a planted link here.
+  if (shellIsContained()) {
+    try {
+      world.git.pruneWorktrees(cliConfinement(dirname(world.root)));
+    } catch (e) {
+      ledger.emit(agent.id, 'world.prune_refused', null,
+        { error: (e instanceof Error ? e.message : String(e)).slice(0, 500) });
+    }
+  }
 
   ledger.emit(agent.id, 'agent.slept', null, {
     turns, costUsd, ceiling,

@@ -445,7 +445,7 @@ export const readRuntimeCredential = (raw: unknown): RuntimeCredential | undefin
  * its tests build the exact same route.
  */
 export const RUNTIME_UPSTREAM = 'https://api.anthropic.com';
-export const CLAUDE_CODE_UA = 'claude-code/2.1.280';
+export const CLAUDE_CODE_UA = 'claude-code/2.1.281';
 export const ANTHROPIC_VERSION = '2023-06-01';
 /**
  * Where a shift's Agent SDK is pointed (`ANTHROPIC_BASE_URL`): the keyproxy's

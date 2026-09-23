@@ -141,7 +141,7 @@ Not every call reaches it: the CLI approves some calls itself and never asks.
 Those are sent to the same function from a PreToolUse hook
 (`makePreToolCheck`), which the CLI resolves before its own approval. The hook
 only adds refusals and records; it never grants. Measured against CLI 2.1.280 in
-throwaway companies on 2026-09-23:
+throwaway companies on 2026-09-23, and re-measured on 2.1.281 the same day:
 
 | Call | Asked by the CLI | Crosses the gate | Bounded by |
 | - | - | - | - |

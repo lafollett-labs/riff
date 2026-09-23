@@ -1794,6 +1794,69 @@ test('a secret is set by name, shown by name, and never shown by value', async (
   await expect(page.locator('.item').filter({ hasText: 'OPENROUTER_API_KEY' })).toHaveCount(0);
 });
 
+test('how stale the plan usage may get is an installation setting', async ({ page }) => {
+  // The windows used to be posted from a host poller reading the operator's
+  // login. They come off the runtime credential's own responses now; this is
+  // the one knob: how old an idle reading may get before a one-token refresh.
+  await page.locator('.switcher').click();
+  await page.getByRole('button', { name: /Riff settings/ }).click();
+  const usage = page.locator('section.usage');
+  await expect(usage.getByRole('heading', { name: 'Plan usage' })).toBeVisible();
+  // No keyproxy in this test installation, so nothing has been read yet — and it says so.
+  await expect(usage).toContainText('No reading yet');
+
+  const field = page.getByLabel('Refresh an idle reading after (minutes)');
+  await expect(field).toHaveValue('10');
+  const save = usage.getByRole('button', { name: 'Save usage refresh' });
+  await expect(save).toBeDisabled();
+  await field.fill('0');
+  await save.click();
+  await expect(usage.getByRole('status').last()).toHaveText('Saved.');
+
+  await page.reload();
+  await page.locator('.switcher').click();
+  await page.getByRole('button', { name: /Riff settings/ }).click();
+  await expect(page.getByLabel('Refresh an idle reading after (minutes)')).toHaveValue('0');
+
+  // Put it back for the rest of the suite.
+  await page.getByLabel('Refresh an idle reading after (minutes)').fill('10');
+  await page.locator('section.usage').getByRole('button', { name: 'Save usage refresh' }).click();
+  await expect(page.locator('section.usage').getByRole('status').last()).toHaveText('Saved.');
+});
+
+test('the plan reading says how old it is, keeps counting, and says so when it cannot be read', async ({ page }) => {
+  // The section exists to tell the operator the truth about a figure that ages.
+  const t0 = new Date('2026-09-22T12:00:00Z');
+  await page.clock.install({ time: t0 });
+  const reading = { at: new Date(t0.getTime() - 3 * 60_000).toISOString(), windows: [
+    { kind: 'five_hour', utilization: 0.42, resetsAt: null },
+    { kind: 'seven_day', utilization: 0.61, resetsAt: null },
+    { kind: 'seven_day_opus', utilization: 0.9, resetsAt: null },
+  ] };
+  let fail = false;
+  await page.route('**/api/usage', (r) => fail
+    ? r.fulfill({ status: 500, body: '{}' })
+    : r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(reading) }));
+  await page.goto('/');
+  await page.locator('.switcher').click();
+  await page.getByRole('button', { name: /Riff settings/ }).click();
+  const usage = page.locator('section.usage');
+  await expect(usage.locator('.reading')).toContainText('42%');
+  await expect(usage.locator('.reading')).toContainText('7-day Opus', { useInnerText: true });
+  await expect(usage.locator('.when')).toHaveText('read 3 min ago');
+
+  // Left open, the age keeps counting rather than freezing at "3 min ago".
+  await page.clock.fastForward(2 * 60_000);
+  await expect(usage.locator('.when')).toHaveText('read 5 min ago');
+
+  // A reading that cannot be fetched is an error, not "no reading yet".
+  fail = true;
+  await page.reload();
+  await page.locator('.switcher').click();
+  await page.getByRole('button', { name: /Riff settings/ }).click();
+  await expect(page.locator('section.usage').getByRole('alert')).toHaveText('Could not read plan usage.');
+});
+
 test('the installation default runtime credential is write-only, and can be set and removed', async ({ page }) => {
   await page.locator('.switcher').click();
   await page.getByRole('button', { name: /Riff settings/ }).click();

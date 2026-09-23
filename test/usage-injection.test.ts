@@ -8,10 +8,10 @@ import type { Gate } from '../src/policy/gate.ts';
 import type { World } from '../src/worldfs/world.ts';
 import type { Clock } from '../src/core/clock.ts';
 
-// The /api/oauth/usage response verbatim (trimmed): each window is a TOP-LEVEL
-// key, alongside fields that are not windows. The gateway wraps this as the
-// `rate_limits` map windowsFromUsage reads, and that function's "skip anything
-// without a numeric utilization" rule is what drops the non-window fields.
+// The /api/oauth/usage shape (trimmed): each window is a TOP-LEVEL key,
+// alongside fields that are not windows. windowsFromUsage reads it as a
+// `rate_limits` map, and its "skip anything without a numeric utilization" rule
+// is what drops the non-window fields.
 const USAGE_RESPONSE = {
   five_hour: { utilization: 4.0, resets_at: '2026-09-12T02:49:59.974768+00:00', limit_dollars: null },
   seven_day: { utilization: 21.0, resets_at: '2026-09-17T00:59:59.974789+00:00' },

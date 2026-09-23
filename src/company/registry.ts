@@ -60,7 +60,7 @@ const mergeServices = (
 export class Registry {
   readonly #clock: Clock;
   readonly #open = new Map<string, Company>();
-  /** The latest subscription-wide usage windows, injected via POST /api/usage. */
+  /** The latest subscription-wide usage windows, from the keyproxy's reading (see usageFeed). */
   #usage: { windows: Array<readonly [string, SDKRateLimitInfo]>; at: number } | null = null;
 
   constructor(clock: Clock) { this.#clock = clock; }
@@ -73,9 +73,18 @@ export class Registry {
    * company started after the reading arrives is seeded with it rather than
    * pacing blind until the next poll.
    */
-  injectUsage(windows: Array<readonly [string, SDKRateLimitInfo]>): void {
-    this.#usage = { windows, at: this.#clock.now().getTime() };
-    for (const c of this.#open.values()) c.scheduler.applyUsage(windows);
+  injectUsage(windows: Array<readonly [string, SDKRateLimitInfo]>, at = this.#clock.now().getTime()): void {
+    this.#usage = { windows, at };
+    for (const c of this.#open.values()) this.#seed(c);
+  }
+
+  /**
+   * Hand a company the installation plan's windows — unless it runs on its own
+   * credential, which is another account whose windows these are not. Those
+   * companies pace off what their own shifts report.
+   */
+  #seed(c: Company): void {
+    if (this.#usage && !c.cfg.runtimeCredential) c.scheduler.applyUsage(this.#usage.windows, this.#usage.at);
   }
 
   /** The last injected usage reading, for the console and the usage MCP tool. */
@@ -124,7 +133,7 @@ export class Registry {
       c.scheduler.start(bounds);
       // Seed the fresh scheduler with the plan's current windows, so it paces
       // correctly from its first round instead of blind until the next poll.
-      if (this.#usage) c.scheduler.applyUsage(this.#usage.windows);
+      this.#seed(c);
     } else if (opts?.drain) {
       // Answer now, finish later. A drain waits out a whole shift — up to ten
       // minutes at 30 turns — and a request held open that long is a request
@@ -153,7 +162,7 @@ export class Registry {
       const c = this.get(ref.slug);
       if (!c) continue;
       c.scheduler.start();
-      if (this.#usage) c.scheduler.applyUsage(this.#usage.windows);
+      this.#seed(c);
       back.push(ref.slug);
     }
     return back;

@@ -393,6 +393,30 @@ and the residual is a company spending against another's key up to that key's
 own cap, not reading it. The real key is unaffected: it is in the proxy, which
 no shift's `/proc` reaches.
 
+### The plan's usage is read from inside the stack
+
+The five-hour and seven-day windows the throttle paces on used to arrive from
+outside: a host process read the operator's own interactive Claude login from
+the Keychain, called `/api/oauth/usage`, and posted the result to an
+unauthenticated gateway endpoint. That process, its daemon and the endpoint are
+gone. The windows now come off the runtime credential's own responses —
+Anthropic answers every inference call with them in `anthropic-ratelimit-unified-*`
+headers — which the keyproxy, already on that path, reads and keeps:
+
+- only for calls billed to the **installation's** credential; a company on its own
+  credential is another account and is not the plan the operator paces by;
+- served on the keyproxy's `GET /usage` to a scoped token for the reserved
+  `_install` audience, which only the gateway can mint (the signing secret is
+  outside every world) and which `slugId()` can never produce — so a company's
+  own token cannot read the installation's plan; the same audience reaches no
+  company service;
+- percentages and reset times only, never a credential.
+
+While shifts run, the reading refreshes itself. While nothing does, the gateway
+sends one Haiku call with a one-token answer once the reading is older than the
+interval in Riff Settings (default ten minutes, 0 off) — measured at 9 input
+tokens and 1 output — and at most once per interval whatever comes back.
+
 ### One writer per installation
 
 The host and the container mount the same `~/.riff` on purpose. Two servers

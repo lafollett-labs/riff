@@ -10,7 +10,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { RiffClient, normalizeBase, type RiffResponse } from './client.ts';
-import { startUsagePolling } from './usagePoll.ts';
 
 const BASE = normalizeBase(process.env['RIFF_API']);
 const client = new RiffClient(BASE);
@@ -54,7 +53,7 @@ server.registerTool('riff_companies', {
 
 server.registerTool('riff_usage', {
   title: 'Riff: subscription usage',
-  description: 'The plan\'s own five-hour and seven-day windows (utilization and reset time), last injected from /api/oauth/usage. This is what the throttle paces on; report percentages, never dollars. Empty until the usage poller has posted a reading.',
+  description: 'The plan\'s own five-hour and seven-day windows (utilization and reset time), as the keyproxy last read them off the runtime credential\'s own responses (`at` is when). This is what the throttle paces on; report percentages, never dollars. Empty until the first call on the installation\'s credential after a restart.',
   inputSchema: {},
 }, () => run(() => client.usage()));
 
@@ -296,17 +295,6 @@ server.registerTool('riff_delete_service', {
   description: 'Delete one service route by name. Reports whether it existed. Does not touch the vault secret it named.',
   inputSchema: { company, name: z.string().describe('service name to delete') },
 }, ({ company: c, name }) => run(() => client.deleteService(c, name)));
-
-// The window feed. Only an interactive login can read the plan's rate-limit
-// windows (a setup-token cannot), and that login is on the host — where this
-// server runs. So while a session holds this MCP, keep the throttle fed with
-// real windows. It is unref'd and fail-silent; `RIFF_USAGE_POLL=off` disables
-// it (e.g. when the standalone daemon in usage-daemon.ts owns the feed) and
-// `RIFF_USAGE_POLL_MS` tunes the cadence. See usagePoll.ts.
-if (process.env['RIFF_USAGE_POLL'] !== 'off') {
-  startUsagePolling(client, process.env['RIFF_USAGE_POLL_MS']
-    ? { intervalMs: Number(process.env['RIFF_USAGE_POLL_MS']) } : {});
-}
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

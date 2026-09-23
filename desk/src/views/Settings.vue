@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue';
-import { api, type RuntimeCredential, type RuntimeCredentialType } from '../api';
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
+import { api, type PlanUsage, type RuntimeCredential, type RuntimeCredentialType } from '../api';
 
 /**
  * Installation-level settings — Riff itself, not any one company. Today just the
@@ -40,11 +40,74 @@ watch(value, (v) => { if (v) { justSaved.value = false; confirmRemove.value = fa
 const label = (t: RuntimeCredentialType): string =>
   t === 'subscription' ? 'Subscription token' : 'API key';
 
+// ------------------------------------------------------------- plan usage
+/**
+ * The plan's windows, and how stale they may get. They are read off the
+ * runtime credential's own responses — every shift refreshes them for free —
+ * and while nothing runs, a one-token call refreshes them once the reading is
+ * older than this. Figures are account-wide, so they include your own use.
+ */
+const usage = ref<PlanUsage | null>(null);
+const usageErr = ref(false);
+// null until the server's value arrives: a literal here would show a default
+// as though it were saved, and an edit made during the load would be lost.
+const pollMinutes = ref<number | null>(null);
+const savedMinutes = ref<number | null>(null);
+const pollMax = ref(25);
+const pollSaving = ref(false);
+const pollSaved = ref(false);
+const pollErr = ref('');
+const pollDirty = computed(() => pollMinutes.value !== savedMinutes.value);
+watch(pollDirty, (d) => { if (d) pollSaved.value = false; });
+watch(pollMinutes, () => { pollErr.value = ''; });
+
+// Per-model weeks too: when one of them binds, the plain seven-day figure is
+// the comfortable-looking number that is not the limit.
+const WINDOW_NAMES: Record<string, string> = {
+  five_hour: '5-hour', seven_day: '7-day', seven_day_opus: '7-day Opus', seven_day_sonnet: '7-day Sonnet',
+};
+const shown = computed(() => (usage.value?.windows ?? [])
+  .filter((w) => w.utilization != null && WINDOW_NAMES[w.kind])
+  .map((w) => ({ name: WINDOW_NAMES[w.kind]!, pct: Math.round((w.utilization ?? 0) * 100) })));
+// A ticking clock, so "read 3 min ago" keeps telling the truth while the page
+// is open; the same tick fetches the reading again.
+const now = ref(Date.now());
+const age = computed(() => {
+  if (!usage.value?.at) return '';
+  const min = Math.round((now.value - Date.parse(usage.value.at)) / 60_000);
+  return min < 1 ? 'just now' : min < 90 ? `${min} min ago` : `${Math.round(min / 60)} h ago`;
+});
+const readUsage = async (): Promise<void> => {
+  try { usage.value = await api.usage(); usageErr.value = false; }
+  catch { usageErr.value = true; }
+};
+let tick: ReturnType<typeof setInterval> | undefined;
+onMounted(() => {
+  tick = setInterval(() => { now.value = Date.now(); void readUsage(); }, 60_000);
+});
+onBeforeUnmount(() => clearInterval(tick));
+
+const savePoll = async (): Promise<void> => {
+  const m = pollMinutes.value;
+  if (typeof m !== 'number' || !Number.isFinite(m)) { pollErr.value = 'Enter a number of minutes.'; return; }
+  pollSaving.value = true;
+  try {
+    const r = await api.putUsagePoll(m);
+    pollMinutes.value = savedMinutes.value = r.usagePollMinutes;
+    pollSaved.value = true;
+    pollErr.value = '';
+  } catch (e) { pollErr.value = msg(e); }
+  finally { pollSaving.value = false; }
+};
+
 const load = async (): Promise<void> => {
   try {
     const s = await api.settings();
     loaded.value = s.runtimeCredential;
     valueSet.value = s.runtimeCredentialSet;
+    pollMinutes.value = savedMinutes.value = s.usagePollMinutes ?? 10;
+    if (s.usagePollMax != null) pollMax.value = s.usagePollMax;
+    await readUsage();
     if (s.runtimeCredential) type.value = s.runtimeCredential.type;
     err.value = '';
   } catch (e) { err.value = msg(e); }
@@ -164,6 +227,46 @@ onMounted(load);
         <p v-else-if="justSaved" class="ok" role="status">Saved.</p>
       </template>
     </section>
+
+    <section class="usage">
+      <h2>Plan usage</h2>
+      <p class="muted note">
+        Read off the runtime credential's own responses, so every shift keeps it
+        current at no cost. The figures are for the whole account, your own use
+        included. While nothing is running, one tiny call (Haiku, one output token)
+        refreshes it once the reading is older than the interval below.
+      </p>
+      <p v-if="loadedType === 'apiKey'" class="faint note">
+        The installation's default is an API key, and plan windows exist only for a
+        subscription token — so there is no reading, and no refresh is sent.
+      </p>
+      <template v-else>
+        <p v-if="shown.length" class="reading" role="status">
+          <span v-for="w in shown" :key="w.name" class="win">
+            <b>{{ w.pct }}%</b> <span class="muted">{{ w.name }}</span>
+          </span>
+          <span class="faint when">read {{ age }}</span>
+        </p>
+        <p v-else-if="usageErr" class="err" role="alert">Could not read plan usage.</p>
+        <p v-else-if="!loading" class="faint note">No reading yet: it arrives with the first call on the installation's credential.</p>
+      </template>
+
+      <p v-if="loading" class="muted note">Loading…</p>
+      <template v-else-if="pollMinutes !== null">
+        <label class="fld-l" for="usage-poll">Refresh an idle reading after (minutes)</label>
+        <input id="usage-poll" class="fld mins" v-model.number="pollMinutes" type="number"
+               min="0" :max="pollMax" step="1" aria-describedby="usage-poll-why" @keydown.enter="savePoll" />
+        <p id="usage-poll-why" class="hint faint">Up to {{ pollMax }}; 0 turns the refresh off, and the reading then updates only while shifts run.</p>
+        <div class="row">
+          <button class="save" :disabled="pollSaving || !pollDirty" :aria-busy="pollSaving"
+                  aria-label="Save usage refresh" @click="savePoll">
+            {{ pollSaving ? 'Saving…' : 'Save' }}
+          </button>
+        </div>
+        <p v-if="pollErr" class="err" role="alert">{{ pollErr }}</p>
+        <p v-else-if="pollSaved" class="ok" role="status">Saved.</p>
+      </template>
+    </section>
   </div>
 </template>
 
@@ -212,4 +315,10 @@ section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line)
 .confirm p { font-size: 13px; line-height: 1.55; margin: 0 0 12px; }
 .err { color: var(--alert); font-size: 12px; margin-top: 10px; }
 .ok { color: var(--gold); font-size: 12px; margin-top: 10px; }
+.fld.mins { display: block; width: 110px; margin-bottom: 8px; }
+.reading { display: flex; flex-wrap: wrap; align-items: baseline; gap: 18px; margin: 0 0 18px;
+  font-variant-numeric: tabular-nums; }
+.reading .win b { font-size: 20px; color: var(--ink); font-weight: 600; }
+.reading .win span { font-size: 12px; }
+.reading .when { font-size: 12px; }
 </style>

@@ -84,6 +84,16 @@ export type { CompanyPolicy };
 export type RuntimeCredentialState = {
   runtimeCredential: RuntimeCredential | null;
   runtimeCredentialSet: boolean;
+  /** Minutes the plan's usage reading may age before a one-token refresh; 0 is off. */
+  usagePollMinutes?: number;
+  /** The most that setting may be — the server's, so the field cannot disagree with it. */
+  usagePollMax?: number;
+};
+
+/** The plan's windows as last read, installation-wide. `at` is when (ISO), null before the first. */
+export type PlanUsage = {
+  at: string | null;
+  windows: Array<{ kind: string; utilization: number | null; resetsAt: string | null }>;
 };
 
 export type State = {
@@ -264,6 +274,21 @@ export const api = {
     const data = await r.json().catch(() => ({})) as
       { ok: boolean } & RuntimeCredentialState & { error?: string };
     if (!r.ok) throw new Error(data.error ?? `/api/settings → ${r.status}`);
+    return data;
+  },
+  /** The plan's windows, read off the runtime credential's own responses. */
+  usage: async (): Promise<PlanUsage> => {
+    const r = await fetch('/api/usage');
+    if (!r.ok) throw new Error(`/api/usage → ${r.status}`);
+    return r.json() as Promise<PlanUsage>;
+  },
+  putUsagePoll: async (usagePollMinutes: number): Promise<{ usagePollMinutes: number }> => {
+    const r = await fetch('/api/settings/usage', {
+      method: 'PUT', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ usagePollMinutes }),
+    });
+    const data = await r.json().catch(() => ({})) as { usagePollMinutes: number; error?: string };
+    if (!r.ok) throw new Error(data.error ?? `/api/settings/usage → ${r.status}`);
     return data;
   },
   /** Clear the installation default — drops both the type and the vault value. */

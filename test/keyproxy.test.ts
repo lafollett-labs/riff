@@ -223,6 +223,26 @@ describe('the real key reaches the upstream and the scoped token does not', () =
 });
 
 describe('nothing gets through without a valid, scoped, declared route', () => {
+  test('the plan reading takes the install scope, which a company token is not', async () => {
+    const { INSTALL_SCOPE } = await import('../src/core/usage.ts');
+    const usage = (token?: string) => fetch(`http://127.0.0.1:${port(proxy)}/usage`,
+      token ? { headers: { authorization: `Bearer ${token}` } } : {});
+    assert.equal((await usage()).status, 401);
+    assert.equal((await usage(proxytoken.mintScopedToken('acme', 60))).status, 401,
+      'a company token cannot read the installation plan');
+    const r = await usage(proxytoken.mintScopedToken(INSTALL_SCOPE, 60));
+    assert.equal(r.status, 200);
+    assert.deepEqual(await r.json(), { at: null, windows: [] }, 'nothing read yet');
+  });
+
+  test('the install scope reaches no company service', async () => {
+    const { INSTALL_SCOPE } = await import('../src/core/usage.ts');
+    const r = await fetch(`http://127.0.0.1:${port(proxy)}/svc/openrouter/v1/models`,
+      { headers: { authorization: `Bearer ${proxytoken.mintScopedToken(INSTALL_SCOPE, 60)}` } });
+    assert.equal(r.status, 404);
+    assert.equal(seen, null, 'and never touched an upstream');
+  });
+
   test('no token is 401 and never touches the upstream', async () => {
     const r = await fetch(`http://127.0.0.1:${port(proxy)}/svc/openrouter/x`);
     assert.equal(r.status, 401);

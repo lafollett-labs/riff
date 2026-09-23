@@ -244,13 +244,6 @@ export class RiffClient {
     return this.#req('GET', '/api/usage');
   }
 
-  /** Inject a subscription usage reading. `body` is the `/api/oauth/usage`
-   *  response verbatim (its rate_limits map); the gateway folds it into every
-   *  running company's throttle. See src/mcp/usagePoll.ts. */
-  postUsage(body: unknown): Promise<RiffResponse> {
-    return this.#req('POST', '/api/usage', body);
-  }
-
   /**
    * Live state of one company. `lean` shapes the reply client-side (see
    * shapeState), dropping the founding charter and each agent's mandate prose

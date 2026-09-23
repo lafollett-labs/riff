@@ -210,7 +210,7 @@ export class Scheduler {
    * company has no windows until the poller feeds it — so the first fresh
    * reading announces itself once (pacing_restored) and a feed that later dies
    * announces itself once (pacing_blind), rather than either being silent. See
-   * pacing() and usagePoll.ts.
+   * pacing() and usageFeed.ts.
    */
   #pacingBlind = true;
   #lastRateLimit: SDKRateLimitInfo | null = null;
@@ -347,9 +347,10 @@ export class Scheduler {
 
   /**
    * Fold an out-of-band usage reading into the same pacing the shift-reported
-   * signal drives. The windows come from `/api/oauth/usage`, read with a
-   * `user:profile` credential and injected through the gateway, because the
-   * spend credential can be a `setup-token` that cannot read them itself.
+   * signal drives. The windows come from the runtime credential's own response
+   * headers, which the keyproxy keeps and the gateway feeds here (usageFeed.ts)
+   * — the long-lived token cannot call /api/oauth/usage, but every call it makes
+   * is answered with the plan's windows.
    *
    * They are the subscription's windows, not this company's, so every running
    * company is paced off them: a plan at 85% must slow all of them, not only
@@ -357,12 +358,16 @@ export class Scheduler {
    * This is the steady source that signal never was — 15 of 155 shifts carried
    * one in one run, none at all across a whole night in another (see limits.ts).
    */
-  applyUsage(windows: Iterable<readonly [string, SDKRateLimitInfo]>): void {
-    const now = Date.now();
+  applyUsage(windows: Iterable<readonly [string, SDKRateLimitInfo]>, at = Date.now()): void {
     let any = false;
     for (const [kind, info] of windows) {
+      // An older reading never replaces a newer one — a shift's own
+      // rate-limit event can be fresher than the feed's last reading.
+      if ((this.#readAt.get(kind) ?? 0) > at) continue;
       this.#windows.set(kind, info);
-      this.#readAt.set(kind, now);
+      // When it was read, not when it arrived here: a reading passed along
+      // again later must still age, or a stale all-clear looks fresh.
+      this.#readAt.set(kind, at);
       any = true;
     }
     if (!any) return;
@@ -554,7 +559,7 @@ export class Scheduler {
       // Announce once when the window feed goes stale or comes back: the
       // throttle is then flying on a frozen reading, and the company is really
       // governed by its spend and session-time caps until fresh windows return.
-      // Silent otherwise. See usagePoll.ts for the feed this depends on.
+      // Silent otherwise. See usageFeed.ts for the feed this depends on.
       const pace = this.pacing();
       if (pace.blind !== this.#pacingBlind) {
         this.#pacingBlind = pace.blind;

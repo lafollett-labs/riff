@@ -63,8 +63,7 @@ env: { ...process.env, HOME: tmp, RIFF_ROOT: join(tmp, '.riff'),
 Every operator action is an HTTP endpoint in `src/gateway/server.ts`, and
 everything else is a client of it: the console, the `riff_*` MCP tools, and
 whatever you write. `scripts/` holds build and dev utilities only —
-`check-sfc-types.mjs`, `usage-poller.sh` (host-side, POSTs the plan's rate-limit
-windows to the gateway), and whatever a git hook needs.
+`check-sfc-types.mjs`, and whatever a git hook needs.
 
 ```
 if a thing an operator does has no endpoint:

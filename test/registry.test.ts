@@ -1433,9 +1433,12 @@ describe('subscription usage is injected across companies', () => {
     // so the first round paces correctly. Asserted at the source because
     // starting a real scheduler here would spawn shifts.
     const src = readFileSync(new URL('../src/company/registry.ts', import.meta.url), 'utf8');
-    assert.match(src, /if \(this\.#usage\) c\.scheduler\.applyUsage\(this\.#usage\.windows\);/);
+    // With the time it was read, so a reading handed on late still ages — and
+    // only to a company on the installation's credential: one on its own is
+    // another account, and these are not its windows.
+    assert.match(src, /if \(this\.#usage && !c\.cfg\.runtimeCredential\) c\.scheduler\.applyUsage\(this\.#usage\.windows, this\.#usage\.at\);/);
     // And both start paths get it: setRunning(true) and boot resume().
-    assert.equal((src.match(/c\.scheduler\.applyUsage\(this\.#usage\.windows\)/g) ?? []).length, 2,
+    assert.equal((src.match(/^\s+this\.#seed\(c\);$/gm) ?? []).length, 2,
       'both setRunning and resume seed the fresh scheduler');
   });
 });

@@ -6,7 +6,6 @@ import {
 } from '../core/config.ts';
 import { Registry, type Company } from '../company/registry.ts';
 import { runtimeCredentialHealth } from '../runtime/credential.ts';
-import { windowsFromUsage } from '../runtime/limits.ts';
 import { renameAgent } from '../company/rename.ts';
 import { redefineAgent } from '../company/redefine.ts';
 import { modelCatalog } from '../runtime/models.ts';
@@ -19,7 +18,10 @@ import {
   putSecret, listSecretNames, deleteSecret, hasSecret,
   putInstallSecret, hasInstallSecret, deleteInstallSecret,
 } from '../core/secrets.ts';
-import { readSettings, setDefaultRuntimeCredentialType, clearDefaultRuntimeCredential } from '../core/settings.ts';
+import { readSettings, setDefaultRuntimeCredentialType, clearDefaultRuntimeCredential,
+         setUsagePollMinutes, DEFAULT_USAGE_POLL_MINUTES, MAX_USAGE_POLL_MINUTES } from '../core/settings.ts';
+import { startUsageFeed } from '../runtime/usageFeed.ts';
+import { shellIsContained } from '../runtime/permissions.ts';
 import { readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
 import { pipeline } from 'node:stream/promises';
@@ -271,25 +273,9 @@ const server = createServer(async (req, res) => {
       return json(res, { companies: registry.list(), active: resolveSlug() });
     }
 
-    // Subscription usage, injected from outside. A `setup-token` spends the
-    // plan but cannot read what is left of it (no `user:profile`), so the
-    // windows are polled with an interactive credential elsewhere and posted
-    // here. The body is the `/api/oauth/usage` response verbatim; every running
-    // company is then paced off the plan's real windows rather than the sparse
-    // rate_limit_event a shift occasionally carries.
-    if (p === '/api/usage' && method === 'POST') {
-      const b = await readBody(req);
-      // windowsFromUsage reads a `rate_limits` map and skips any entry without a
-      // numeric utilization, so wrapping the response as that map drops the
-      // non-window fields (spend, limits, extra_usage) without naming them here.
-      const windows = windowsFromUsage({
-        rate_limits_available: true,
-        rate_limits: b as Record<string, { utilization: number | null; resets_at: string | null } | null>,
-      });
-      registry.injectUsage(windows);
-      return json(res, { accepted: windows.length });
-    }
-
+    // The plan's windows, as the keyproxy last read them off the runtime
+    // credential's own responses (see src/runtime/usageFeed.ts). Nothing posts
+    // them any more: the host poller that did is gone.
     if (p === '/api/usage' && method === 'GET') {
       const u = registry.usage;
       if (!u) return json(res, { at: null, windows: [] });
@@ -317,7 +303,21 @@ const server = createServer(async (req, res) => {
       return json(res, {
         runtimeCredential: readSettings().runtimeCredential ?? null,
         runtimeCredentialSet: hasInstallSecret(RUNTIME_SECRET_NAME),
+        usagePollMinutes: readSettings().usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES,
+        usagePollMax: MAX_USAGE_POLL_MINUTES,
       });
+    }
+    // How stale the usage reading may get before a one-token refresh. Its own
+    // route: the credential PUT below moves a type and a token together, and
+    // this has nothing to do with either.
+    if (p === '/api/settings/usage' && method === 'PUT') {
+      const b = await readBody(req);
+      const m = b['usagePollMinutes'];
+      if (typeof m !== 'number' || !Number.isFinite(m) || m < 0 || m > MAX_USAGE_POLL_MINUTES) {
+        return json(res, { error: `usagePollMinutes must be a number of minutes from 0 (off) to ${MAX_USAGE_POLL_MINUTES}` }, 400);
+      }
+      setUsagePollMinutes(m);
+      return json(res, { usagePollMinutes: readSettings().usagePollMinutes ?? DEFAULT_USAGE_POLL_MINUTES });
     }
     if (p === '/api/settings' && method === 'PUT') {
       const b = await readBody(req);
@@ -1163,6 +1163,12 @@ const server = createServer(async (req, res) => {
 
 server.listen(PORT, () => {
   if (migrated) console.log(`\n  Moved ${migrated.moved} into companies/`);
+
+  // The plan's windows, from the keyproxy. Only where there is one: a gateway
+  // run on a host has no keyproxy beside it, and its companies cannot shift.
+  if (shellIsContained()) {
+    startUsageFeed({ inject: (windows, at) => registry.injectUsage(windows, at) });
+  }
 
   // A scheduler lives in a process; the operator's intent does not. Anything
   // left running goes back to work rather than quietly stopping on a restart.

@@ -105,8 +105,6 @@ describe('the model catalog is the CLI’s own list', () => {
       new URL('../node_modules/@anthropic-ai/claude-agent-sdk/package.json', import.meta.url), 'utf8')) as
       { claudeCodeVersion: string };
     assert.equal(CLAUDE_CODE_UA, `claude-code/${pkg.claudeCodeVersion}`);
-    const poll = readFileSync(new URL('../src/mcp/usagePoll.ts', import.meta.url), 'utf8');
-    assert.ok(poll.includes(`'claude-code/${pkg.claudeCodeVersion}'`), 'and so does the usage poller');
   });
 });
 

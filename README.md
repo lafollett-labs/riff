@@ -202,9 +202,7 @@ The tool surface is two files: `src/mcp/client.ts` is a typed client and the
 only thing that knows an endpoint's shape; `src/mcp/server.ts` is thin wiring
 over it. Because every tool is a call into that one client, the MCP surface
 cannot become a second implementation that drifts from the API — the same
-reason the console is a client and not a shortcut. (`usagePoll.ts` beside them
-feeds the plan's rate-limit windows to the gateway while a session holds the
-MCP — see *Vitals* below.)
+reason the console is a client and not a shortcut.
 
 ---
 

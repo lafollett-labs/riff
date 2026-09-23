@@ -8,6 +8,7 @@ import {
 import { getSecret, getInstallSecret } from '../core/secrets.ts';
 import { readSettings } from '../core/settings.ts';
 import { verifyScopedToken } from '../core/proxytoken.ts';
+import { INSTALL_SCOPE, unifiedWindows, type UsageSnapshot } from '../core/usage.ts';
 
 /**
  * The key-injecting proxy: the one process that holds a company's real keys, and
@@ -73,8 +74,10 @@ const readBody = (req: IncomingMessage): Promise<Buffer> =>
  * closed with a message naming where to set the credential.
  */
 const runtimeRoute = (company: string):
-  { route: ServiceRoute; key: string } | { status: number; msg: string } => {
-  const own = resolveConfig(process.cwd(), company).runtimeCredential;
+  { route: ServiceRoute; key: string; install: boolean } | { status: number; msg: string } => {
+  // The installation's own scope is not a company and has no config to read:
+  // it is always the install default. See INSTALL_SCOPE.
+  const own = company === INSTALL_SCOPE ? undefined : resolveConfig(process.cwd(), company).runtimeCredential;
   const type = own?.type ?? readSettings().runtimeCredential?.type ?? 'subscription';
   const key = own ? getSecret(company, RUNTIME_SECRET_NAME) : getInstallSecret(RUNTIME_SECRET_NAME);
   if (key == null) {
@@ -86,8 +89,18 @@ const runtimeRoute = (company: string):
   return {
     route: { upstream: RUNTIME_UPSTREAM, secret: RUNTIME_SECRET_NAME, header, scheme, headers: runtimeRouteHeaders(type) },
     key,
+    install: !own,
   };
 };
+
+/**
+ * The plan's windows, as the last runtime response on the installation's own
+ * credential reported them. Only that credential: a company on its own is a
+ * different account, and its figures are not the plan the operator paces by.
+ * In memory — a restart forgets it until the next call, and the gateway's feed
+ * asks for one when a reading is stale.
+ */
+let installUsage: UsageSnapshot | null = null;
 
 const routeFor = (company: string, service: string): ServiceRoute | null => {
   // resolveConfig with an explicit slug reads exactly that company's config;
@@ -121,6 +134,18 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
 
   if (url.pathname === '/healthz') { res.writeHead(200); res.end('ok'); return; }
 
+  // The plan's windows, for the gateway only. Percentages and reset times, no
+  // secret — but a company's own token must not read the installation's plan,
+  // so it takes the install scope, which only the gateway can mint.
+  if (url.pathname === '/usage' && req.method === 'GET') {
+    const auth = req.headers['authorization'];
+    const scope = typeof auth === 'string' && auth.startsWith('Bearer ') ? verifyScopedToken(auth.slice(7)) : null;
+    if (scope?.company !== INSTALL_SCOPE) return send(res, 401, 'the usage reading takes the install scope');
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(installUsage ?? { at: null, windows: [] }));
+    return;
+  }
+
   // /svc/<service>/<rest...>
   const m = /^\/svc\/([^/]+)(\/.*)?$/.exec(url.pathname);
   if (!m) return send(res, 404, 'not a /svc/<service> request');
@@ -136,11 +161,16 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
   // other service is a declared route whose secret the vault holds.
   let route: ServiceRoute;
   let key: string;
+  let readsPlan = false;
   if (service === RUNTIME_SERVICE_NAME) {
     const rt = runtimeRoute(scope.company);
     if ('status' in rt) return send(res, rt.status, rt.msg);
     route = rt.route;
     key = rt.key;
+    readsPlan = rt.install;
+  } else if (scope.company === INSTALL_SCOPE) {
+    // The install scope exists to reach the runtime route and the usage reading.
+    return send(res, 404, `no service '${service}' for this company`);
   } else {
     const declared = routeFor(scope.company, service);
     // A service the company has not declared gets nothing — same answer whether
@@ -256,6 +286,10 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
         }
         // One audit line, and the key is not in it.
         console.log(`keyproxy ${scope.company} ${service} -> ${target.host} ${status}`);
+        if (readsPlan) {
+          const windows = unifiedWindows(up.headers);
+          if (windows.length) installUsage = { at: Date.now(), windows };
+        }
         const outHeaders: OutgoingHttpHeaders = {};
         for (const [k, v] of Object.entries(up.headers)) {
           if (v == null || HOP_BY_HOP.has(k.toLowerCase())) continue;

@@ -823,6 +823,10 @@ export const scopedSecretEnv = (
   // product services — so this mints one whenever there is a company, declared
   // services or not.
   if (!companySlug) return env;
+  // A leading underscore is a reserved audience (`_install`, the gateway's own),
+  // never a company: slugId cannot produce one. A folder named that way under
+  // companies/ gets no token, so its shifts cannot speak as the installation.
+  if (companySlug.startsWith('_')) return env;
   const ttlSeconds = Math.ceil((shiftTimeoutMs ?? 45 * 60_000) / 1000) + 300;
   const token = mintScopedToken(companySlug, ttlSeconds);
   // Product services share the scoped token under each declared secret name.

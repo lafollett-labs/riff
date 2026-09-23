@@ -422,7 +422,7 @@ export const readRuntimeCredential = (raw: unknown): RuntimeCredential | undefin
  * install default's) credential TYPE. The upstream is always Anthropic; the shape
  * differs by type. A subscription (OAuth) token authenticates as a Bearer and the
  * upstream requires the beta flag + a claude-code user-agent (the pair the Agent
- * SDK adds, and what the usage poller already sends successfully); an API key
+ * SDK adds); an API key
  * authenticates as `x-api-key`. Both carry `anthropic-version`, which every
  * `/v1/messages` request requires: injecting it here rather than trusting the
  * caller means a subscription shift is not one dropped SDK header from a silent

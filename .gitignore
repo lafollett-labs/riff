@@ -28,3 +28,6 @@ docker/.env
 # Operator-specific egress hosts. Never committed: one installation is not
 # another, and a host you opened is not a host anyone else agreed to.
 docker/proxy/denylist.local.conf
+
+# Context handoff files (session state, not committed)
+.context/

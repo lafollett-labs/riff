@@ -106,7 +106,8 @@ transcript is read through the API or from inside the container, never by host
 holds the handles open, read from inside.
 
 Stop a company before `docker/up.sh up --build` or `restart`, for the same
-reason: recreating the container kills a shift mid-write.
+reason: recreating the container kills a shift mid-write, and `up.sh`'s drain
+is not a guarantee (see Docker).
 
 ## The gate is the security boundary
 
@@ -131,13 +132,17 @@ holds and injects a company's real keys), or anything under `docker/`.
 
 ## Docker
 
-Use `docker/up.sh`, never raw `docker compose` — compose interpolates the token
-variable on every subcommand, so plain `docker compose logs` fails before it
-prints a line.
+Use `docker/up.sh`, never raw `docker compose`. It layers `docker/.env` under
+`$RIFF_ENV`, and drains running companies before `up`/`restart`/`down`/`stop`/
+`create` — best-effort: it skips silently when the API does not answer on
+`$PORT` and proceeds after 1800s, so the stop rule above still applies.
 
-`docker/.env` holds `RIFF_TOKEN_CMD`, a command that prints the token. It must
-never hold the token itself, and nothing may write the resolved value to disk
-or to a log.
+Docker passes the factory no credential: no compose variable, no env var,
+nothing `up.sh` resolves (`test/container.test.ts` fails if `up.sh` names
+`RIFF_TOKEN_CMD`, `RIFF_CREDENTIALS_CMD` or `CLAUDE_CODE_OAUTH_TOKEN`). Neither
+`docker/.env` nor `$RIFF_ENV` may hold one. The runtime token is set in Riff
+Settings and sealed under `master.key` — both on the factory's `/data` mount,
+kept from shifts by `sandboxFilesystem`, not by Docker.
 
 ## House style
 

@@ -457,6 +457,20 @@ describe('the egress proxy refuses the data drops and logs the rest', () => {
     }
   });
 
+  test('the CLI\'s own log shipping is refused, and the model API is not', () => {
+    // Measured 2026-09-23: 30 connections in a half hour of ShipIt to the
+    // Datadog intake, from the CLI itself. The shift env turns that off; this
+    // is the net under it. The keyproxy reaches the model API the same way.
+    const rules = compile();
+    assert.ok(rules.includes(rule('http-intake.logs.us5.datadoghq.com')));
+    assert.ok(!rules.includes(rule('api.anthropic.com')));
+  });
+
+  test('the shift env turns the CLI\'s non-essential traffic off', () => {
+    assert.match(readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8'),
+      /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',\n\s*\.\.\.secretEnv,/);
+  });
+
   test('the denylist does not claim to be a containment boundary', () => {
     // It said the proxy was what kept a readable token from being sent
     // anywhere. That was retired with the flip, and SECURITY.md has to say so

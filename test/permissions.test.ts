@@ -381,4 +381,9 @@ describe('what the CLI approves by itself still crosses the gate', () => {
     const r = denied(await pre()('Agent', { description: 'look', prompt: 'read', isolation: 'remote' }, 't2'));
     assert.match(r.message, /remote isolation is not available/);
   });
+
+  test('a subagent runs on its seat\'s model, not one it names', async () => {
+    const r = denied(await pre()('Agent', { description: 'look', prompt: 'read', model: 'opus' }, 't1'));
+    assert.match(r.message, /the board chose for your seat/);
+  });
 });

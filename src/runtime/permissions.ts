@@ -290,6 +290,14 @@ export const makePreToolCheck = (deps: PermissionDeps) => {
         return deny('Subagents run inside this company\'s container; remote isolation is not available. ' +
           'Spawn it without `isolation`.');
       }
+      // The board chooses each seat's model; a subagent runs on its seat's.
+      // Measured: without the parameter, an Explore subagent ran on the seat's
+      // own model. None of ShipIt's 25 spawns to 2026-09-23 set one.
+      if (input['model'] !== undefined) {
+        deps.onDecision?.(toolName, 'deny', 'model override');
+        return deny('Subagents run on your own model, which the board chose for your seat. ' +
+          'Spawn it without `model`.');
+      }
     }
     if (toolName === 'Grep' || toolName === 'Glob') {
       // No path is the working directory: world/, every colleague's files in it.

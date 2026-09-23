@@ -984,6 +984,11 @@ const shiftChildEnv = (
     ...process.env,
     ...(cacheDir ? cacheEnv(cacheDir) : {}),
     ...(configDir ? { CLAUDE_CONFIG_DIR: configDir } : {}),
+    // The CLI's own traffic — telemetry, error reporting, update checks — went
+    // out through the egress proxy on every shift, around the keyproxy: in a
+    // half hour of ShipIt, 21 direct connections to api.anthropic.com and 30 to
+    // http-intake.logs.us5.datadoghq.com. The model probe already set this.
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     ...secretEnv,
   };
   delete env['CLAUDE_CODE_OAUTH_TOKEN'];

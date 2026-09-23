@@ -151,7 +151,7 @@ throwaway companies on 2026-09-23:
 | `Read` of a colleague's file | no | yes, from the hook: recorded as `world.read_other` | the CLI's confined view |
 | `Glob`/`Grep` over the world, `staff/`, a colleague's folder, or with a pattern that climbs out (`..`) | no | yes, from the hook: one `world.read_other` for the search. CLI 2.1.280 ships neither tool; a search runs as `rg` or `grep` in the shell, and is recorded as that command | the CLI's confined view |
 | `Read`/`Glob`/`Grep` kept inside your own folder or the commons | no | no, deliberately: every read on the record would bury the ledger | the CLI's confined view |
-| spawning a subagent (`Agent`) | no | yes, from the hook; `isolation: "remote"` is refused | each thing the subagent does is gated as above |
+| spawning a subagent (`Agent`) | no | yes, from the hook; `isolation: "remote"` is refused, and so is any `model` parameter: a subagent runs on its seat's model | each thing the subagent does is gated as above |
 
 Before these, a subagent's `echo hi > staff/tess/…` wrote with no `gate.allow`,
 a built-in `Read` of a colleague's memory was silent despite
@@ -208,6 +208,17 @@ Verified against a live stack, and worth re-running if you change anything:
 | Any host, ignoring the proxy | no route |
 | Shell inside the container | works |
 | Same shell reaching the host | shut |
+
+### The CLI does not phone home from a shift
+
+The Claude CLI in each shift sent its own telemetry and log shipping out
+through the egress proxy, around the keyproxy: in a half hour of ShipIt on
+2026-09-23, 21 direct connections to `api.anthropic.com` and 30 to
+`http-intake.logs.us5.datadoghq.com`. Shifts now run with
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`; a probe shift made 2 direct
+connections before it and none after, with its model calls unchanged through the
+keyproxy. The Datadog intake is on the egress denylist as the net under that
+setting. `api.anthropic.com` cannot be: the keyproxy's own requests need it.
 
 ### Your data is outside the box
 

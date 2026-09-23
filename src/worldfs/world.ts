@@ -1,8 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { join, resolve, sep, dirname, relative } from 'node:path';
 import { parse, stringify, field, type Doc, type Frontmatter } from './frontmatter.ts';
 import { WorldGit } from './git.ts';
+import { inside, lexists, readWithin, unlinkWithin, writeWithin } from './within.ts';
 import { slug } from '../core/ids.ts';
 import { systemClock, type Clock } from '../core/clock.ts';
 import type { AgentId } from '../core/types.ts';
@@ -38,9 +40,13 @@ export class World {
   #clock: Clock;
   git: WorldGit;
 
-  constructor(root: string, clock: Clock = systemClock) {
+  /** The company's own bubblewrap view, when there is one; see removeProject. */
+  #confine: (() => string[]) | undefined;
+
+  constructor(root: string, clock: Clock = systemClock, confine?: () => string[]) {
     this.#root = resolve(root);
     this.#clock = clock;
+    this.#confine = confine;
     this.git = new WorldGit(this.#root, clock, () => this.#assertRoot());
   }
 
@@ -85,27 +91,43 @@ export class World {
     // 2. Symlink check — a link planted INSIDE world/ resolves textually
     //    clean but lands outside. Walk up to the deepest ancestor that
     //    actually exists (the target itself may be a file we are about to
-    //    create) and compare real paths.
+    //    create) and compare real paths. "Exists" is lstat's answer: a link
+    //    to a file not made yet is not there to existsSync, so the walk used
+    //    to step past it and vet the parent — and the write then followed it
+    //    into another company. A link that resolves to nothing is refused.
     let probe = abs;
-    while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
-    const real = realpathSync(probe);
-    const realRoot = realpathSync(this.root);
-    if (real !== realRoot && !real.startsWith(realRoot + sep)) {
+    while (!lexists(probe) && dirname(probe) !== probe) probe = dirname(probe);
+    let real: string;
+    try { real = realpathSync(probe); } catch { throw new Error(`path escapes the world via symlink: ${rel}`); }
+    if (!inside(realpathSync(this.root), real)) {
       throw new Error(`path escapes the world via symlink: ${rel}`);
     }
     return abs;
   }
 
+  /**
+   * A folder to list, or null. A listing that starts at a link lists whatever
+   * it names: commons/ linked to a neighbour's gave its document names to
+   * commons_index, and projects/ its project names to portfolio.
+   */
+  #dirAt(rel: string): string | null {
+    let abs: string;
+    try { abs = this.path(rel); } catch { return null; }
+    return lexists(abs) && lstatSync(abs).isDirectory() ? abs : null;
+  }
+
   ensure(): void {
+    mkdirSync(this.root, { recursive: true });
     for (const d of ['staff', 'commons', 'commons/bulletin']) {
-      mkdirSync(join(this.root, d), { recursive: true });
+      mkdirSync(this.path(d), { recursive: true });
     }
     this.git.init();
   }
 
   ensureStaff(id: AgentId): void {
+    mkdirSync(this.root, { recursive: true });
     for (const d of ['journal', 'notes', 'drafts']) {
-      mkdirSync(join(this.root, 'staff', slug(id), d), { recursive: true });
+      mkdirSync(this.path(join('staff', slug(id), d)), { recursive: true });
     }
   }
 
@@ -113,9 +135,8 @@ export class World {
   exists(rel: string): boolean { return existsSync(this.path(rel)); }
 
   readDoc(rel: string): Doc | null {
-    const abs = this.path(rel);
-    if (!existsSync(abs) || !statSync(abs).isFile()) return null;
-    return parse(readFileSync(abs, 'utf8'));
+    const text = readWithin(this.root, this.path(rel));
+    return text === null ? null : parse(text);
   }
 
   /**
@@ -129,19 +150,17 @@ export class World {
    */
   writeDoc(rel: string, doc: Doc): void {
     const abs = this.path(rel);
-    mkdirSync(dirname(abs), { recursive: true });
 
     const inner = parse(doc.body);
     const merged: Doc = Object.keys(inner.data).length
       ? { data: { ...inner.data, ...doc.data }, body: inner.body }
       : doc;
 
-    writeFileSync(abs, stringify(merged), 'utf8');
+    writeWithin(this.root, abs, stringify(merged));
   }
 
   readText(rel: string): string | null {
-    const abs = this.path(rel);
-    return existsSync(abs) && statSync(abs).isFile() ? readFileSync(abs, 'utf8') : null;
+    return readWithin(this.root, this.path(rel));
   }
 
   // ----------------------------------------------------------- staff files
@@ -203,16 +222,19 @@ export class World {
   reindexNotes(ledger: Ledger): number {
     ledger.clearNoteIndex();
     let n = 0;
-    const staffDir = join(this.root, 'staff');
-    if (!existsSync(staffDir)) return 0;
+    const staffDir = this.#dirAt('staff');
+    if (!staffDir) return 0;
 
     for (const who of readdirSync(staffDir)) {
+      // A staff folder that is a link would index another company's notes.
+      if (!lstatSync(join(staffDir, who)).isDirectory()) continue;
       const notes = join(staffDir, who, 'notes');
-      if (!existsSync(notes)) continue;
+      if (!existsSync(notes) || !lstatSync(notes).isDirectory()) continue;
       for (const f of readdirSync(notes)) {
         if (!f.endsWith('.md')) continue;
         const abs = join(notes, f);
-        const doc = parse(readFileSync(abs, 'utf8'));
+        const doc = this.readDoc(relative(this.root, abs));
+        if (!doc) continue;
         ledger.indexNote({
           path: relative(this.root, abs),
           author: field(doc.data, 'author') ?? who,
@@ -235,13 +257,14 @@ export class World {
   }
 
   listCommons(): string[] {
-    const dir = join(this.root, 'commons');
-    if (!existsSync(dir)) return [];
+    const dir = this.#dirAt('commons');
+    if (!dir) return [];
     const out: string[] = [];
     const walk = (d: string) => {
       for (const f of readdirSync(d)) {
         const abs = join(d, f);
-        if (statSync(abs).isDirectory()) walk(abs);
+        // lstat: a folder that is a link would walk another company's tree.
+        if (lstatSync(abs).isDirectory()) walk(abs);
         else if (f.endsWith('.md')) out.push(relative(this.root, abs));
       }
     };
@@ -252,8 +275,7 @@ export class World {
   /** Delete a document. The counterpart to R6: a ceiling with no way to
    *  remove would just be a wall. */
   remove(rel: string): void {
-    const abs = this.path(rel);
-    if (existsSync(abs)) rmSync(abs, { force: true });
+    unlinkWithin(this.root, this.path(rel));
   }
 
   commonsCount(): number { return this.listCommons().length; }
@@ -267,10 +289,10 @@ export class World {
    * scratch `.work-mut-*` never counts as work.
    */
   listProjects(): string[] {
-    const dir = join(this.root, 'projects');
-    if (!existsSync(dir)) return [];
+    const dir = this.#dirAt('projects');
+    if (!dir) return [];
     return readdirSync(dir)
-      .filter((f) => !f.startsWith('.') && statSync(join(dir, f)).isDirectory())
+      .filter((f) => !f.startsWith('.') && lstatSync(join(dir, f)).isDirectory())
       .sort();
   }
 
@@ -287,9 +309,19 @@ export class World {
     // Never let a name climb out of projects/. The gate classifies paths, but
     // this is reachable from a tool argument and must not depend on that.
     if (!name || name.startsWith('.') || name.includes('/') || name.includes('\\')) return false;
-    const abs = join(this.root, 'projects', name);
+    // Through path(), or a projects/ that is a link takes the recursive
+    // delete into whatever it points at.
+    const abs = this.path(`projects/${name}`);
     if (!existsSync(abs)) return false;
-    rmSync(abs, { recursive: true, force: true });
+    // A check is a moment old by the time a tree is walked, and the CEO seat
+    // retires projects in its own shift, so it picks the moment: projects/
+    // swapped for a link to /data/companies/<other> after the check, and a
+    // project named "world", deletes a neighbour's world. Inside the
+    // company's own view every link resolves within the company, whatever it
+    // says. Off the container there is no view and no shell to race.
+    const confine = this.#confine?.();
+    if (confine) execFileSync('bwrap', [...confine, '--', 'rm', '-rf', '--', abs], { stdio: ['ignore', 'ignore', 'pipe'] });
+    else rmSync(abs, { recursive: true, force: true });
     return true;
   }
 
@@ -308,15 +340,13 @@ export class World {
   writeAttachment(bytes: Buffer, ext: string): string {
     this.git.ignore('attachments/');
     const rel = `attachments/${this.#clock.day()}-${randomBytes(6).toString('hex')}.${ext}`;
-    const abs = this.path(rel);
-    mkdirSync(dirname(abs), { recursive: true });
-    writeFileSync(abs, bytes);
+    writeWithin(this.root, this.path(rel), bytes);
     return rel;
   }
 
   listDrafts(id: AgentId): string[] {
-    const dir = join(this.root, 'staff', slug(id), 'drafts');
-    if (!existsSync(dir)) return [];
+    const dir = this.#dirAt(join('staff', slug(id), 'drafts'));
+    if (!dir) return [];
     return readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => `staff/${slug(id)}/drafts/${f}`);
   }
 }

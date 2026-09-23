@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
-import { realpathSync, existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { realpathSync, existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
+import { lexists, readNoFollow, writeWithin } from './within.ts';
 import { join } from 'node:path';
 import { systemClock, type Clock } from '../core/clock.ts';
 
@@ -232,8 +233,8 @@ export class WorldGit {
    */
   #ignoreDroppings(): void {
     const path = join(this.#dir, '.gitignore');
-    if (existsSync(path)) return;
-    writeFileSync(path, ['.DS_Store', 'Thumbs.db', 'desktop.ini', ''].join('\n'), 'utf8');
+    if (lexists(path)) return;
+    writeWithin(this.#dir, path, ['.DS_Store', 'Thumbs.db', 'desktop.ini', ''].join('\n'));
     // Committed here rather than left in the tree: an uncommitted file is
     // swept up by whoever commits next, and infrastructure must not land in a
     // staff member's name or count toward what they made.
@@ -288,9 +289,11 @@ export class WorldGit {
    */
   ignore(pattern: string): void {
     const path = join(this.#dir, '.gitignore');
-    const cur = existsSync(path) ? readFileSync(path, 'utf8') : '';
+    // A shift can make .gitignore a link to another company's config.json;
+    // read through it and the append below would be written there.
+    const cur = lexists(path) ? readNoFollow(path) : '';
     if (cur.split('\n').some((l) => l.trim() === pattern)) return;
-    writeFileSync(path, (cur && !cur.endsWith('\n') ? cur + '\n' : cur) + pattern + '\n', 'utf8');
+    writeWithin(this.#dir, path, (cur && !cur.endsWith('\n') ? cur + '\n' : cur) + pattern + '\n');
     this.#git(['add', '.gitignore']);   // works whether it is new or already tracked
     this.#git([
       '-c', 'user.name=Riff', '-c', 'user.email=riff@localhost',

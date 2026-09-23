@@ -24,6 +24,7 @@ import { startUsageFeed } from '../runtime/usageFeed.ts';
 import { shellIsContained } from '../runtime/permissions.ts';
 import { readFile } from 'node:fs/promises';
 import { createReadStream, createWriteStream, mkdirSync, mkdtempSync, rmSync, statSync } from 'node:fs';
+import { openWithin } from '../worldfs/within.ts';
 import { pipeline } from 'node:stream/promises';
 import { extname, join, resolve, sep } from 'node:path';
 
@@ -919,8 +920,9 @@ const server = createServer(async (req, res) => {
         const type = IMAGE_TYPES[extname(rel).toLowerCase()];
         if (!type) return json(res, { error: 'not an image' }, 415);
         try {
-          const abs = world.path(rel);
-          if (!statSync(abs).isFile()) return json(res, { error: 'not found' }, 404);
+          // By descriptor: a name checked and then streamed by path could be a
+          // link or a FIFO by the time the stream opened it.
+          const fd = openWithin(world.root, world.path(rel));
           res.writeHead(200, {
             'content-type': type,
             // Everything here is local and the console re-reads on navigation;
@@ -931,7 +933,9 @@ const server = createServer(async (req, res) => {
             'x-content-type-options': 'nosniff',
             'content-security-policy': "default-src 'none'; sandbox",
           });
-          createReadStream(abs).pipe(res);
+          // pipeline, not pipe: a client that goes away mid-image would
+          // otherwise leave the descriptor open.
+          void pipeline(createReadStream('', { fd }), res).catch(() => {});
           return;
         } catch {
           // Missing, or a path trying to leave the world.

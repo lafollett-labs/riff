@@ -81,8 +81,9 @@ export const renameAgent = (
   }
 
   if (oldId !== newId) {
-    const from = join(world.root, 'staff', oldId);
-    const to = join(world.root, 'staff', newId);
+    // Through path(): a staff/ that is a link would move folders next door.
+    const from = world.path(join('staff', oldId));
+    const to = world.path(join('staff', newId));
     if (existsSync(from) && !existsSync(to)) renameSync(from, to);
   }
 

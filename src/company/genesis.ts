@@ -4,7 +4,9 @@ import { Ledger } from '../ledger/ledger.ts';
 import { TranscriptStore } from '../ledger/transcript.ts';
 import { World } from '../worldfs/world.ts';
 import { constitutionFor, RULES_TEXT } from '../policy/rules.ts';
-import { scaffoldConfig, type RiffConfig } from '../core/config.ts';
+import { isCompanyHome, scaffoldConfig, type RiffConfig } from '../core/config.ts';
+import { shellIsContained } from '../runtime/permissions.ts';
+import { cliConfinement } from '../runtime/staff.ts';
 import type { Clock } from '../core/clock.ts';
 import { INHERIT } from '../core/models.ts';
 
@@ -24,7 +26,10 @@ export const found = (cfg: RiffConfig, clock: Clock): {
   const firstRun = !existsSync(cfg.ledgerPath);
   scaffoldConfig(cfg);
 
-  const world = new World(cfg.worldDir, clock);
+  // Contained, a project is removed inside the company's own view (see
+  // World.removeProject); evaluated then, when the control files exist.
+  const world = new World(cfg.worldDir, clock,
+    shellIsContained() && isCompanyHome(cfg.home) ? () => cliConfinement(cfg.home) : undefined);
   const ledger = new Ledger(cfg.ledgerPath, clock);
   // Beside the ledger, its own file — see TranscriptStore for why not a table.
   const transcript = new TranscriptStore(join(cfg.home, 'transcript.db'), clock);

@@ -314,6 +314,49 @@ The claim is between companies, not within one.
 A fresh `$HOME` also ends the one writable directory every company's shell
 shared: `~/.cache`, `~/.npm` and `~/.undo` exist for each shift and go with it.
 
+### The gateway's own writes do not follow a link out of a world
+
+The confinement covers the CLI; the gateway is outside it and writes into
+worlds on a shift's behalf — a draft named after the shift's own summary, a
+memory, a journal, an attachment, the `.gitignore` an attachment extends. A
+shift's shell can plant a link at any of those names first. Before this, five
+routes worked, each reproduced in `test/world-links.test.ts` against the old
+code:
+
+| Route | Before |
+| - | - |
+| a link to a file not made yet (`World.path` walked past it with `existsSync`) | written in the other company |
+| `projects/` a link, then retire a project | recursive delete in the other company |
+| `staff/<id>` a link, then `ensureStaff` | folders made in the other company |
+| `.gitignore` a link, then an attachment | appended to the other company's file |
+| a FIFO at a draft's name | the synchronous open held the whole gateway |
+
+`World.path` now walks with `lstat` and refuses a link that resolves to
+nothing, and nothing after it trusts the path it returned
+(`src/worldfs/within.ts`). The directory is opened and pinned first; on Linux,
+where the shells are, `/proc/self/fd` says where it really is, and only if that
+is inside the world is the file looked up — through
+`/proc/self/fd/<dir>/<name>`, from the pinned directory, as `openat` would. A
+directory swapped for a link after the check is caught before anything is
+created, read or unlinked through it. The file itself is opened `O_NOFOLLOW`
+and `O_NONBLOCK` and used only if it is a regular file, so a FIFO reads as
+nothing and a write to one is refused. Reads (`readDoc`, `readText`,
+`/api/file`) go the same way, and listings do not walk a folder that is a link.
+
+A project is a tree, and a tree cannot be pinned a file at a time: the CEO seat
+retires one in its own shift, so it picks the moment, and `projects/` swapped
+for a link to `/data/companies/<other>` with a project named `world` deleted a
+neighbour's world. Contained, `removeProject` runs `rm -rf` inside the
+company's own view, where every link resolves within the company.
+
+What is left: `mkdir -p` before a write, which a racing swap can have make
+empty folders next door (nothing is written into them); a listing, checked and
+then read by path, which a swap in between points at a neighbour's names (never
+their contents); and renaming a seat,
+which moves `staff/<old>` by path after checking it, so a shell swapping
+`staff/` in that moment would have a neighbour's folder moved. An operator's
+rename is the only trigger, so the moment is not the shift's to pick.
+
 ### The gateway runs nothing a world's repository says to
 
 Every shift's work is committed by the gateway, outside the sandbox, with git

@@ -1,7 +1,8 @@
-import { dirname, join, sep, relative, resolve, isAbsolute } from 'node:path';
+import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import type { Writable } from 'node:stream';
 import { query, type CanUseTool, type ModelUsage, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage,
   type SpawnOptions, type SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
@@ -12,7 +13,7 @@ import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import { createTools, TOOL_NAMESPACE } from './tools.ts';
 import { makeCanUseTool, shellIsContained } from './permissions.ts';
-import { DEFAULT_POLICY, installRoot, companiesDir, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
+import { DEFAULT_POLICY, installRoot, companiesDir, isCompanyHome, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
 import { mintScopedToken } from '../core/proxytoken.ts';
 import type { TranscriptSink } from '../ledger/transcript.ts';
 import { worstWindow, isWeekly, windowsFromUsage, limitsReadable, mergeWindow,
@@ -150,8 +151,7 @@ export const cliConfinement = (companyHome: string): string[] => {
   // Bound back in over an emptied root, a home that is not strictly below
   // companies/ would put the root itself — master.key, the vaults, every
   // company — back in view. A shift that cannot be confined does not run.
-  const rel = relative(companiesDir(), resolve(companyHome));
-  if (!rel || rel.startsWith('..') || isAbsolute(rel) || rel.includes(sep)) {
+  if (!isCompanyHome(companyHome)) {
     throw new Error(`refusing to confine a shift to ${companyHome}: not a company under ${companiesDir()}`);
   }
   return [
@@ -178,21 +178,59 @@ export const cliConfinement = (companyHome: string): string[] => {
 };
 
 /**
+ * Where a confined CLI reads its MCP servers from: a file that exists only
+ * inside its own view, under the emptied installation root the shell's
+ * sandbox denies.
+ */
+export const confinedMcpConfig = (): string => join(installRoot(), 'mcp.json');
+
+/**
  * Spawn the CLI inside cliConfinement.
  *
  * The SDK drains stderr only on its own spawn path; a custom spawner that
  * leaves it unread lets the pipe fill and stalls the CLI mid-shift, so it is
  * read here and handed to the same sink the shift's `stderr` option feeds.
+ *
+ * The SDK hands the CLI a company's connectors as `--mcp-config <json>`,
+ * headers and all (the in-process server goes over the control channel), and
+ * a process's arguments are the one thing in /proc the confinement leaves
+ * readable to every other company's shell. The JSON goes to bubblewrap down
+ * fd 3 instead, and the CLI is pointed at the file it becomes. Measured in the
+ * factory with a marker header: 0 matches in either process's arguments, and
+ * the file refused through /proc from a neighbour's view. What this keeps the JSON from is other companies: the
+ * company's own shell can read its config.json, headers and all. The SDK's
+ * debug log (DEBUG_CLAUDE_AGENT_SDK) still records the original arguments, on
+ * the gateway's side of the wall.
+ *
+ * Any other shape of the flag refuses the shift: `--mcp-config=<json>` from a
+ * later SDK would otherwise pass through with the headers still in it.
  */
 export const confinedSpawn = (companyHome: string, onStderr: (s: string) => void, spawner = spawn) =>
   ({ command, args, cwd, env, signal }: SpawnOptions): SpawnedProcess => {
-    const child = spawner('bwrap', [...cliConfinement(companyHome), '--', command, ...args],
-      { cwd, env, signal, stdio: ['pipe', 'pipe', 'pipe'] });
+    const at = args.indexOf('--mcp-config');
+    const mcp = at < 0 ? undefined : args[at + 1];
+    if ((mcp !== undefined && !mcp.startsWith('{')) || args.some((a) => a.startsWith('--mcp-config='))
+        || args.indexOf('--mcp-config', at + 1) > at) {
+      throw new Error('refusing to start a shift: the SDK passed --mcp-config in a shape it cannot be kept out of argv in');
+    }
+    const argv = mcp === undefined ? args : args.with(at + 1, confinedMcpConfig());
+    const child = spawner('bwrap', [
+      ...cliConfinement(companyHome),
+      ...(mcp === undefined ? [] : ['--ro-bind-data', '3', confinedMcpConfig()]),
+      '--', command, ...argv,
+    ], { cwd, env, signal, stdio: ['pipe', 'pipe', 'pipe', ...(mcp === undefined ? [] : ['pipe' as const])] });
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', onStderr);
     // The SDK reports a missing executable as the CLI's binary not found,
     // which sends the operator looking for the wrong program.
     child.on('error', (e) => onStderr(`bwrap: ${e.message}\n`));
+    if (mcp !== undefined) {
+      const feed = child.stdio[3] as Writable;
+      // A bwrap that never started closes the pipe: EPIPE, unhandled, would
+      // take the gateway down with the one shift.
+      feed.on('error', (e) => onStderr(`bwrap: mcp config: ${e.message}\n`));
+      feed.end(mcp);
+    }
     return child;
   };
 

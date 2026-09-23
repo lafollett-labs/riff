@@ -1,4 +1,5 @@
 import { writeFileSync, renameSync, unlinkSync, chmodSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 
 /**
  * Write a whole file so a concurrent reader can never catch it half-written.
@@ -14,12 +15,17 @@ import { writeFileSync, renameSync, unlinkSync, chmodSync } from 'node:fs';
  * `rename` is atomic on a single filesystem: a reader sees the whole old file or
  * the whole new one, never a torn one. The temp is created in the SAME directory
  * as the target so the rename never crosses a filesystem (which would fall back
- * to a non-atomic copy). `mode`, when given, is forced with chmod before the
+ * to a non-atomic copy) — unless `stageIn` names another directory on the same
+ * filesystem, for a target whose own directory someone else can write (see
+ * `writeConfigFile`); across filesystems the rename fails with EXDEV rather
+ * than copying. `mode`, when given, is forced with chmod before the
  * rename so the file is never briefly readable at wider-than-intended perms —
  * mkdir/writeFile honour a mode only masked by the umask.
  */
-export const atomicWriteFileSync = (path: string, contents: string, mode?: number): void => {
-  const tmp = `${path}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+export const atomicWriteFileSync = (
+  path: string, contents: string, mode?: number, stageIn = dirname(path),
+): void => {
+  const tmp = `${join(stageIn, basename(path))}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   try {
     // Create the temp at the target mode from the start, so vault ciphertext or
     // a raw key is never briefly readable at a wider (umask-default) mode; the

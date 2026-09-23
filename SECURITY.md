@@ -284,11 +284,27 @@ a throwaway company:
 | the gateway's `environ`, `root`, `map_files`, from inside | denied |
 | a neighbouring confined process's `environ` | denied from inside; readable from a factory shell |
 | any process's `cmdline` | readable — world-readable by design |
+| a connector's header in a neighbour's bwrap and CLI `cmdline` | 0 matches; `--mcp-config /data/mcp.json` |
+| a neighbour CLI's `/proc/<pid>/root/data/mcp.json`, its bwrap's `fd/3` | refused |
 
 The `/proc` refusals come from the user namespace bubblewrap creates: the same
 reads succeed from a plain shell in the factory, under the same uid, and fail
 from inside the view (`/proc/self/ns/user` differs). `cmdline` is not guarded
-by it, so nothing secret belongs in a process's arguments.
+by it, so nothing secret belongs in a process's arguments. When a company has
+connectors, the SDK passes them as `--mcp-config <json>`, headers included (the
+in-process `riff` server goes over the control channel, so without connectors
+there is no flag at all); `confinedSpawn` moves that JSON down a descriptor into
+`<root>/mcp.json`, a file only the CLI's own view has, and the CLI's arguments
+name the path; any other shape of the flag refuses the shift. The last two rows
+above were measured with a connector carrying a marker header. The claim is between companies: the
+company's own shell can read the same headers in its `config.json`. Off the
+container there is no shell to read `/proc`, and the JSON stays in the
+arguments.
+
+The gateway writes a company's `config.json` by write-then-rename, and the
+temp is staged in `<root>/.staging`, not beside the file: the company home is
+bound writable into the shift's view, and a temp there could be opened between
+the write and the rename and written through once it became `config.json`.
 
 A link can still point anywhere. Wherever it points, it resolves inside the
 company — and inside the company it reaches whatever the CLI can write, which

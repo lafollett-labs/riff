@@ -203,4 +203,77 @@ describe('the CLI itself sees only its company, so a file tool cannot follow a l
     assert.equal(at(a, '--ro-bind', '/', '/'), 0);
     assert.equal(a.filter((x) => x === '--bind').length, 2); // /proc and the home
   });
+
+  test('connector headers reach the CLI through a file in its view, never its arguments', async () => {
+    const calls: Array<{ argv: string[]; stdio: unknown[] }> = [];
+    const said: string[] = [];
+    const fd3 = new PassThrough();
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+      stderr: new PassThrough() });
+    Object.assign(child, { stdio: [child.stdin, child.stdout, child.stderr, fd3] });
+    const fake = ((_: string, argv: string[], o: { stdio: unknown[] }) => {
+      calls.push({ argv, stdio: o.stdio }); return child;
+    }) as never;
+    const json = JSON.stringify({ mcpServers: { mail: { type: 'http', url: 'https://x', headers: { Authorization: 'Bearer SEKRIT' } } } });
+    confinedSpawn(home, (s) => said.push(s), fake)({ command: '/app/claude',
+      args: ['--print', '--mcp-config', json, '--strict-mcp-config'],
+      cwd: `${home}/world`, env: {}, signal: new AbortController().signal });
+    const { argv, stdio } = calls[0]!;
+    assert.ok(!argv.join(' ').includes('SEKRIT'));
+    assert.deepEqual(argv.slice(argv.indexOf('--')),
+      ['--', '/app/claude', '--print', '--mcp-config', '/data/mcp.json', '--strict-mcp-config']);
+    // After the root is emptied, or the tmpfs would bury it. What keeps it from
+    // another company is the view's own namespace; the company's own shell can
+    // read the same headers in its config.json anyway.
+    const data = at(argv, '--ro-bind-data', '3', '/data/mcp.json');
+    assert.ok(data > at(argv, '--tmpfs', '/data'));
+    assert.equal(stdio.length, 4);
+    assert.equal(await new Promise<string>((r) => { let b = ''; fd3.on('data', (c) => { b += c; }).on('end', () => r(b)); }), json);
+    // A bwrap that never read it must not crash the gateway.
+    fd3.emit('error', new Error('write EPIPE'));
+    assert.deepEqual(said, ['bwrap: mcp config: write EPIPE\n']);
+  });
+
+  test('an --mcp-config it cannot move out of argv refuses the shift', () => {
+    let spawned = 0;
+    const fake = (() => { spawned++; return {}; }) as never;
+    const start = confinedSpawn(home, () => {}, fake);
+    const opts = { command: '/app/claude', cwd: `${home}/world`, env: {}, signal: new AbortController().signal };
+    for (const args of [['--mcp-config={"mcpServers":{}}'], ['--mcp-config', '/elsewhere.json'],
+                        ['--mcp-config', '{}', '--mcp-config', '{}']]) {
+      assert.throws(() => start({ ...opts, args }), /refusing to start a shift/, args.join(' '));
+    }
+    assert.equal(spawned, 0);
+  });
+
+  test('the SDK this repo runs hands over connector headers in no argument', async () => {
+    // Pinned against the real SDK, not a hand-built argv: an upgrade that
+    // changes how it passes MCP servers trips here rather than in production.
+    const { query } = await import('@anthropic-ai/claude-agent-sdk');
+    let argv: string[] = [];
+    const real = (await import('node:child_process')).spawn;
+    const fake = ((_: string, a: string[], o: object) => { argv = a; return real('true', [], o); }) as never;
+    const q = query({ prompt: 'hi', options: {
+      settingSources: [], strictMcpConfig: true,
+      mcpServers: { mail: { type: 'http', url: 'https://mail.invalid/mcp', headers: { Authorization: 'Bearer SEKRIT' } } },
+      spawnClaudeCodeProcess: confinedSpawn(home, () => {}, fake),
+    } });
+    // `true` exits at once; however the SDK takes that, the argv is what counts.
+    try { for await (const _ of q) { /* nothing arrives */ } } catch { /* expected */ }
+    assert.ok(argv.includes('--ro-bind-data'), argv.join(' '));
+    assert.ok(!argv.join(' ').includes('SEKRIT'));
+  });
+
+  test('a CLI with no MCP servers gets no extra descriptor', () => {
+    const calls: Array<{ argv: string[]; stdio: unknown[] }> = [];
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), stdout: new PassThrough(),
+      stderr: new PassThrough() });
+    const fake = ((_: string, argv: string[], o: { stdio: unknown[] }) => {
+      calls.push({ argv, stdio: o.stdio }); return child;
+    }) as never;
+    confinedSpawn(home, () => {}, fake)({ command: '/app/claude', args: ['--print'],
+      cwd: `${home}/world`, env: {}, signal: new AbortController().signal });
+    assert.ok(!calls[0]!.argv.includes('--ro-bind-data'));
+    assert.equal(calls[0]!.stdio.length, 3);
+  });
 });

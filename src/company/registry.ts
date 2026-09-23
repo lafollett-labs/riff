@@ -7,14 +7,13 @@ import { Scheduler } from '../runtime/scheduler.ts';
 import { found } from './genesis.ts';
 import {
   archiveDir, companyHome, DEFAULT_POLICY, listCompanies, persisted, readPolicy,
-  resolveConfig, scaffoldConfig, setRunningFlag, slugId,
+  resolveConfig, scaffoldConfig, setRunningFlag, slugId, writeConfigFile,
   type CompanyPolicy, type CompanyRef, type RiffConfig, type RuntimeCredential, type ServiceRoute,
 } from '../core/config.ts';
 import type { Clock } from '../core/clock.ts';
 import { DEFAULT_STAFF, readStaffDefaults, type StaffDefaults } from '../core/models.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
-import { atomicWriteFileSync } from '../core/atomicwrite.ts';
 import { dropVault } from '../core/secrets.ts';
 import { join } from 'node:path';
 
@@ -423,7 +422,7 @@ export class Registry {
     // undefined = leave as-is; null = revert to the install default.
     if (patch.runtimeCredential === null) delete next.runtimeCredential;
     // Where it lives is the directory's job to say, not the file's.
-    atomicWriteFileSync(path, JSON.stringify(persisted(next), null, 2) + '\n');
+    writeConfigFile(path, persisted(next));
     if (structural) {
       if (wasRunning) await this.setRunning(wanted, true);
     } else {

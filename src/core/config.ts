@@ -1,6 +1,6 @@
 import { homedir } from 'node:os';
-import { join, resolve, isAbsolute, sep } from 'node:path';
-import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, statSync } from 'node:fs';
+import { join, resolve, isAbsolute, sep, dirname, relative } from 'node:path';
+import { existsSync, readFileSync, mkdirSync, readdirSync, renameSync, statSync, chmodSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { userInfo } from 'node:os';
 import { atomicWriteFileSync } from './atomicwrite.ts';
@@ -589,6 +589,39 @@ export const archiveDir = (env = process.env): string => join(installRoot(env), 
 /** Where one company lives. Self-contained: world, ledger, config. */
 export const companyHome = (slug: string): string => join(companiesDir(), slug);
 
+/**
+ * Write a config.json whole, staged where no shift can reach the temp.
+ *
+ * Staged beside itself, a company's config.json was written first as
+ * `config.json.tmp-*` in the company home, which a shift's view binds writable:
+ * the shift could open the temp between the write and the rename and keep
+ * writing to what became config.json (SB-12 in
+ * docs/code-reviews/cli-confinement-code-review.md). A company's temp goes in
+ * `<root>/.staging` instead — outside every shift's view, and on the same
+ * filesystem as the company, so the rename stays atomic. A home anywhere else
+ * is no shift's, and stays staged beside itself.
+ */
+export const writeConfigFile = (path: string, value: unknown): void => {
+  const company = isCompanyHome(dirname(path));
+  const staging = join(installRoot(), '.staging');
+  if (company) {
+    mkdirSync(staging, { recursive: true });
+    // mkdir's mode applies only to a directory it creates.
+    chmodSync(staging, 0o700);
+  }
+  atomicWriteFileSync(path, JSON.stringify(value, null, 2) + '\n', undefined, company ? staging : undefined);
+};
+
+/**
+ * Whether a directory is a company's home: exactly one level below
+ * companies/. The shift confinement and the config staging must agree on it —
+ * a home one confines is a home whose config the other stages off-home.
+ */
+export const isCompanyHome = (dir: string): boolean => {
+  const rel = relative(companiesDir(), resolve(dir));
+  return !!rel && !rel.startsWith('..') && !isAbsolute(rel) && !rel.includes(sep);
+};
+
 export type CompanyRef = {
   slug: string;
   name: string;
@@ -660,9 +693,9 @@ export const migrateLegacyLayout = (): { moved: string } | null => {
   // The stored config records absolute paths from the old location.
   const moved = readConfigFile(join(target, CONFIG_NAME));
   if (moved) {
-    atomicWriteFileSync(join(target, CONFIG_NAME), JSON.stringify({
+    writeConfigFile(join(target, CONFIG_NAME), {
       ...moved, home: target, worldDir: join(target, 'world'), ledgerPath: join(target, 'ledger.db'),
-    }, null, 2) + '\n');
+    });
   }
   return { moved: slug };
 };
@@ -819,7 +852,7 @@ export const setRunningFlag = (home: string, running: boolean): void => {
   const cfg = readConfigFile(path);
   if (!cfg) return;
   const { home: _h, worldDir: _w, ledgerPath: _l, ...rest } = cfg;
-  atomicWriteFileSync(path, JSON.stringify({ ...rest, running }, null, 2) + '\n');
+  writeConfigFile(path, { ...rest, running });
 };
 
 /** Create the company's home and write the config. Idempotent. */
@@ -831,7 +864,7 @@ export const scaffoldConfig = (cfg: RiffConfig): { created: boolean; path: strin
   const path = join(cfg.home, CONFIG_NAME);
   if (existsSync(path)) return { created: false, path };
 
-  atomicWriteFileSync(path, JSON.stringify(persisted(cfg), null, 2) + '\n');
+  writeConfigFile(path, persisted(cfg));
   return { created: true, path };
 };
 

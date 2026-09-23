@@ -303,10 +303,13 @@ export class Registry {
       onBoundReached: () => { setRunningFlag(cfg.home, false); },
       ...(Object.keys(cfg.connectors ?? {}).length ? { connectors: cfg.connectors } : {}),
       ...(cfg.release === 'bundle' ? { release: 'bundle' as const } : {}),
-      // The company and its declared services travel with the scheduler so each
-      // shift can mint a scoped token for the key-injecting proxy. Only when
-      // there is a service to reach — a company with none pays nothing for this.
-      ...(Object.keys(cfg.services ?? {}).length ? { companySlug: slug, services: cfg.services } : {}),
+      // The company travels with the scheduler so each shift can mint a scoped
+      // token for the key-injecting proxy — always, since the agents' own
+      // inference goes through it. Gated on declared services, a company with
+      // none got no token, and its every shift failed "Not logged in" without
+      // a request reaching the proxy.
+      companySlug: slug,
+      ...(Object.keys(cfg.services ?? {}).length ? { services: cfg.services } : {}),
     });
     const company: Company = { slug, cfg, ledger, transcript, world, gate, constitution, scheduler };
     this.#open.set(slug, company);

@@ -127,7 +127,8 @@ type Deps = {
   connectors?: Record<string, { type: 'http' | 'sse'; url: string; headers?: Record<string, string> }>;
   release?: 'none' | 'bundle';
   /** This company, and the services its product may reach through the
-   *  key-injecting proxy — passed to each shift so it can mint a scoped token. */
+   *  key-injecting proxy — passed to each shift so it can mint a scoped token,
+   *  which its own inference needs whether or not it declares a service. */
   companySlug?: string;
   services?: Record<string, ServiceRoute>;
   options?: Partial<SchedulerOptions>;
@@ -655,8 +656,8 @@ export class Scheduler {
         ...(this.#d.transcript ? { transcript: this.#d.transcript } : {}),
         ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
         ...(this.#d.release ? { release: this.#d.release } : {}),
-        ...(this.#d.companySlug && this.#d.services && Object.keys(this.#d.services).length
-          ? { companySlug: this.#d.companySlug, services: this.#d.services } : {}),
+        ...(this.#d.companySlug ? { companySlug: this.#d.companySlug } : {}),
+        ...(this.#d.services && Object.keys(this.#d.services).length ? { services: this.#d.services } : {}),
         signal: this.#abort.signal,
       });
       this.#spentToday += r.costUsd;

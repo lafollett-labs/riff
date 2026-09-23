@@ -47,6 +47,18 @@ describe('a shift routes its own Claude inference through the keyproxy', () => {
     assert.ok(env['ANTHROPIC_AUTH_TOKEN']);
   });
 
+  test('a company that declares no services still hands its shifts the company to mint for', () => {
+    // scopedSecretEnv did its part, but the registry and scheduler passed the
+    // slug on only alongside declared services: every newly founded company's
+    // shift failed "Not logged in" with no request reaching the proxy. The
+    // scheduler calls its shift directly, so the wiring is read from source.
+    const registry = readFileSync(new URL('../src/company/registry.ts', import.meta.url), 'utf8');
+    const scheduler = readFileSync(new URL('../src/runtime/scheduler.ts', import.meta.url), 'utf8');
+    assert.match(registry, /^\s*companySlug: slug,$/m);
+    assert.match(scheduler, /\.\.\.\(this\.#d\.companySlug \? \{ companySlug: this\.#d\.companySlug \} : \{\}\),/);
+    assert.doesNotMatch(scheduler, /companySlug && this\.#d\.services/);
+  });
+
   test('no company means no env at all — nothing is minted for a shift that reaches nothing', () => {
     assert.deepEqual(scopedSecretEnv(undefined, { anthropic: route('X') }, 60_000), {});
   });

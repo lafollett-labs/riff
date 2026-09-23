@@ -6,7 +6,7 @@
 | Review type | generic security review with adversarial and mutation passes, four rounds; live measurements in the factory against throwaway companies (`link-probe`, `link-probe-b`) |
 | Base SHA | e19519c |
 | Files | `src/core/{atomicwrite,config}.ts`, `src/runtime/{staff,scheduler,permissions}.ts`, `src/worldfs/{within,world,git}.ts`, `src/company/{genesis,registry,rename,transfer}.ts`, `src/policy/{gate,rules}.ts`, `src/gateway/server.ts`, `SECURITY.md`, `test/{atomicwrite,sandbox-filesystem,world-links,world-git-trust,shift-env,transfer,gate,permissions,registry}.test.ts` |
-| Verdict | ✅ APPROVED (round 7) |
+| Verdict | ✅ APPROVED (round 9) |
 
 ## Origin
 
@@ -107,10 +107,30 @@ runtime-token test reading source.
     - one asserted the laptop's container marker;
     - one gateway inherited `RIFF_CONTAINED=1` and refused for want of a
       credential.
-- **R7-1 LOW (follow-up)**: clearing a stall means reopening the company,
-  and no endpoint does that alone.
-- **R7-2 LOW (follow-up)**: a legitimately slow add past 10s would trip the
-  breaker; measure a worst-case add.
+- **R7-1 LOW (fixed in round 8)**: clearing a stall meant reopening the
+  company, and no endpoint did that alone.
+- **R7-2 LOW (fixed in round 8)**: a legitimately slow add past 10s would
+  trip the breaker; measure a worst-case add.
 
 ✅ **APPROVED (round 7).** `npm run check` is clean. `npm test` passes
 722 of 722 on the host, and 722 of 722 in the factory image.
+
+## Rounds 8–9 — the follow-ups
+
+Base SHA b0003fd.
+
+- **R7-2 (fixed, measured)**: a 400MB drop (5,003 new files) on the
+  factory's volume took 14.4s to add. `add` is now bounded at 120s, and every
+  other call stays at 10s.
+- **R7-1 (fixed)**: `POST /api/companies/<slug>/git/clear` clears a stall and
+  records `world.git_cleared`.
+- **R8-1 MEDIUM (fixed)**: the longer add bound made a FIFO planted anywhere in
+  the working tree, such as `sub/.gitignore`, a 120s stall of every company.
+  `worldTree`, the walk that already finds nested repositories before each add,
+  status and diff, now refuses a special file before git runs.
+- **R9-1 LOW (accepted, named in SECURITY.md)**: a colleague's shell can
+  plant one between the walk and git's open. That costs at most one add bound
+  before the breaker trips.
+
+✅ **APPROVED (round 9).** `npm run check` is clean. `npm test` passes
+724 of 724 on the host and 724 of 724 in the factory image.

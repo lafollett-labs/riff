@@ -230,6 +230,7 @@ export const vitals = (
   let turns = 0;
   let costUsd = 0;
   let truncated = 0;
+  let outOfTime = 0;
   let barren = 0;
   let deliveries = 0;
   const posted: Array<{ path: string; at: string }> = [];
@@ -245,7 +246,8 @@ export const vitals = (
       slept++;
       turns += t;
       costUsd += c;
-      if (dj['truncated'] === true) truncated++;
+      if (dj['landed'] === 'time') outOfTime++;
+      else if (dj['truncated'] === true) truncated++;
       turnsBy.set(e.actor, (turnsBy.get(e.actor) ?? 0) + t);
       costBy.set(e.actor, (costBy.get(e.actor) ?? 0) + c);
       // A shift whose waking fell before the window is not evidence of
@@ -281,6 +283,7 @@ export const vitals = (
     failed,
     overran,
     truncated,
+    outOfTime,
     rotated: n('session.rotated'),
     rotateFailed: n('session.rotate_failed'),
     compacted: n('session.compacted'),

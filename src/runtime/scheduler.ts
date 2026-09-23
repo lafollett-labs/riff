@@ -107,9 +107,8 @@ export const DEFAULT_SCHEDULE: SchedulerOptions = {
   until: null,
   throttleAboveUtilization: 0.7,
   pauseAboveUtilization: 0.92,
-  // Read a file, edit it, run the tests, read the failure, fix it: five turns
-  // before anything works. At 24 every shift of a coding company was cut.
-  maxTurns: 60,
+  // A runaway net over the time budget. See CompanyPolicy.maxTurns.
+  maxTurns: 200,
   rotateAtContextPct: 50,
   rotateAtSessionTurns: 600,
   cacheDir: '',

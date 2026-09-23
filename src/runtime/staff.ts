@@ -3,7 +3,7 @@ import { homedir } from 'node:os';
 import { existsSync, readdirSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import type { Writable } from 'node:stream';
-import { query, type CanUseTool, type ModelUsage, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage,
+import { query, type CanUseTool, type HookCallback, type ModelUsage, type SDKMessage, type SDKRateLimitInfo, type SDKUserMessage,
   type SpawnOptions, type SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
 import type { Agent } from '../core/types.ts';
 import { DEFAULT_STAFF, mindOf, type Effort, type StaffDefaults } from '../core/models.ts';
@@ -308,6 +308,12 @@ export type TickDeps = {
    *  was allowed or refused, for diagnosing a shift. */
   trace?: (line: string) => void;
   signal?: AbortSignal;
+  /** The SDK's query, a parameter so a test can drive a whole shift on
+   *  scripted messages. Absent is the real one. */
+  query?: typeof query;
+  /** Wall-clock milliseconds for the shift's time budget. The company clock
+   *  is not: a budget of real minutes is kept on real time. Absent is Date.now. */
+  now?: () => number;
 };
 
 /**
@@ -861,7 +867,7 @@ export const awaitToolsConnected = async (
  * operator reading that would go looking for the operator who did it.
  */
 const overranBy = (ms: number): string =>
-  `the shift ran past its ${Math.round(ms / 60_000)}-minute ceiling and was stopped. `
+  `the shift ran ${Math.round(LANDING_GRACE_MS / 60_000)} minutes past its ${Math.round(ms / 60_000)}-minute ceiling inside one tool call and was stopped. `
   + 'Turns, context and spend all stand still while a shift waits on something, so this is '
   + 'the only bound that catches one that is stuck rather than slow.';
 
@@ -1139,8 +1145,15 @@ export const shouldRotate = (s: {
   /** Turns still inside the shift's ceiling. */
   turnsLeft: number;
   rotations: number;
+  /** Time spent and the shift's budget; a timeout of 0 has none. */
+  elapsedMs?: number;
+  timeoutMs?: number;
 }): boolean => {
   if (s.rotations >= MAX_ROTATIONS) return false;
+  // Past three quarters of its time a shift is landing: a hand-over and a cold
+  // start would spend what is left and be stopped at the deadline, and the
+  // conversation kept instead resumes next shift.
+  if (s.timeoutMs && (s.elapsedMs ?? 0) >= 0.75 * s.timeoutMs) return false;
   // Room to hand over AND to do something afterwards. Rotating with four turns
   // left spends them all on note-taking for a shift that then ends.
   if (s.turnsLeft < HANDOVER_TURNS * 2) return false;
@@ -1184,6 +1197,63 @@ const RESUMED_PROMPT = [
   'Read your memory and your own files, pick the work back up where the note',
   'says you left it, and finish something.',
 ].join('\n');
+
+/**
+ * How long a tool still running at the shift's deadline is given to finish
+ * before the shift is killed. Past the deadline the agent is stopped at its
+ * next pause between tool calls; only a call that is itself stuck — a hung
+ * command, a server that never answers — reaches this, and ShipIt's test runs
+ * are bounded at 120s by their own `timeout`.
+ */
+export const LANDING_GRACE_MS = 3 * 60_000;
+
+/** Where a shift is against its limits after a batch of tool calls. */
+export type Landing = { stop: 'time' | 'turns' } | { say: string; mark: string } | null;
+
+/**
+ * Whether to stop the shift, or what to tell the agent, after a batch of tool
+ * calls.
+ *
+ * A limit the agent cannot see is a cliff. The turn ceiling cut 6 of 109
+ * ShipIt shifts mid-task, and the agent never knew it was close; the time limit
+ * killed the process outright, losing its record. Time is the budget that
+ * tracks the operator's window, so the agent is told at 75% and at 90%, and at
+ * the deadline it is stopped between tool calls rather than during one.
+ *
+ * The turn ceiling stays as the company set it, as a runaway net, and is
+ * enforced here rather than trusted to the CLI: Lynn's shift of 2026-09-23 ran
+ * 92 tool calls in one leg under a ceiling of 75 and the CLI reported success.
+ * `told` holds the marks already said, so each notice is given once a leg.
+ */
+export const landing = (s: {
+  elapsedMs: number;
+  /** The shift's time budget; 0 has none. */
+  timeoutMs: number;
+  /** Tool-using turns this leg, and the leg's ceiling. */
+  turns: number;
+  maxTurns: number;
+  told: ReadonlySet<string>;
+}): Landing => {
+  if (s.timeoutMs > 0 && s.elapsedMs >= s.timeoutMs) return { stop: 'time' };
+  if (s.turns >= s.maxTurns) return { stop: 'turns' };
+  const minutes = Math.max(1, Math.ceil((s.timeoutMs - s.elapsedMs) / 60_000));
+  const tell = (mark: string, say: string): Landing => (s.told.has(mark) ? null : { say, mark });
+  if (s.timeoutMs > 0 && s.elapsedMs >= 0.9 * s.timeoutMs) {
+    const t = tell('time-90', `About ${minutes} minute${minutes === 1 ? '' : 's'} of this shift remain. ` +
+      'Start nothing new: finish the step in hand, write down where you are and what comes next, and end the shift.');
+    if (t) return t;
+  } else if (s.timeoutMs > 0 && s.elapsedMs >= 0.75 * s.timeoutMs) {
+    const t = tell('time-75', `About ${minutes} minute${minutes === 1 ? '' : 's'} of this shift remain. ` +
+      'Bring the current task to a point you can leave it at; do not begin anything large.');
+    if (t) return t;
+  }
+  const left = s.maxTurns - s.turns;
+  if (left <= Math.max(3, Math.ceil(0.1 * s.maxTurns))) {
+    return tell('turns', `${left} tool turn${left === 1 ? '' : 's'} remain in this shift. ` +
+      'Finish the step in hand and write down where you are.');
+  }
+  return null;
+};
 
 export const tick = async (
   d: TickDeps,
@@ -1445,12 +1515,18 @@ export const tick = async (
    * shift that rotates twice is still one shift and gets one ceiling.
    */
   let overran = false;
+  // Wall clock, as the timer below is. The deadline itself is kept by
+  // `landing` between tool calls; this is only for a call stuck past it.
+  const now = d.now ?? Date.now;
+  const shiftStarted = now();
+  /** Why the shift was stopped between tool calls, if it was. */
+  let landed: 'time' | 'turns' | null = null;
   const timeout = d.shiftTimeoutMs && d.shiftTimeoutMs > 0
     ? setTimeout(() => {
       overran = true;
-      ledger.emit(agent.id, 'shift.overran', null, { after: d.shiftTimeoutMs });
+      ledger.emit(agent.id, 'shift.overran', null, { after: d.shiftTimeoutMs, graceMs: LANDING_GRACE_MS });
       stop.abort();
-    }, d.shiftTimeoutMs)
+    }, d.shiftTimeoutMs + LANDING_GRACE_MS)
     : null;
   // Nothing may be held open by a shift that has already ended.
   timeout?.unref();
@@ -1497,7 +1573,8 @@ export const tick = async (
   // The scoped proxy tokens this shift's product carries, keyed by each
   // service's secret env var. See scopedSecretEnv — extracted so the wiring is
   // tested directly. Merged into the shift's child-process env below.
-  const secretEnv = scopedSecretEnv(d.companySlug, d.services, d.shiftTimeoutMs);
+  const secretEnv = scopedSecretEnv(d.companySlug, d.services,
+    d.shiftTimeoutMs ? d.shiftTimeoutMs + LANDING_GRACE_MS : d.shiftTimeoutMs);
 
   /**
    * Ask what is left of the subscription, rather than waiting to be told.
@@ -1539,6 +1616,38 @@ export const tick = async (
   const runLeg = async (prompt: string, maxTurns: number, handover = false): Promise<void> => {
     atCeiling = false;
     let toolTurns = 0;
+    let batches = 0;
+    let interrupted = false;
+    /** The response whose tool calls were last counted as a turn. */
+    let lastTurnId: string | null = null;
+    const told = new Set<string>();
+    // After every batch of tool calls, before the next model request: the one
+    // point where the agent can be told what is left, or stopped without
+    // cutting a tool off part-way.
+    const onBatch: HookCallback = async (input) => {
+      // A subagent's batches are its own: counting them spent the leg's turns
+      // and handed the one-time notice to the subagent instead of the agent.
+      // The time stop reaches the main thread at its own next batch.
+      if ('agent_id' in input && input.agent_id) return {};
+      const at = landing({
+        elapsedMs: now() - shiftStarted, timeoutMs: d.shiftTimeoutMs ?? 0,
+        turns: ++batches, maxTurns, told,
+      });
+      if (!at) return {};
+      if ('stop' in at) {
+        // A hand-over spending its few turns is the hand-over working, not the
+        // shift being cut; only its running out of time lands the shift.
+        if (!(handover && at.stop === 'turns')) landed ??= at.stop;
+        trace(`landing: out of ${at.stop}${handover ? ' (hand-over)' : ''}`);
+        return { continue: false, stopReason: `The shift is out of ${at.stop}.` };
+      }
+      // A hand-over's few turns are note-taking already; a notice would only
+      // compete with the prompt that asked for it.
+      if (handover) return {};
+      told.add(at.mark);
+      trace(`landing: told ${at.mark}`);
+      return { hookSpecificOutput: { hookEventName: 'PostToolBatch', additionalContext: at.say } };
+    };
     // Per leg: a mid-leg stream death belongs to the leg that saw it. A leg that
     // set it and then threw would otherwise carry the flag into the next leg and
     // retire a healthy conversation.
@@ -1595,7 +1704,7 @@ export const tick = async (
       await inputOpen;
     }
 
-    const q = query({
+    const q = (d.query ?? query)({
       prompt: onePrompt(),
       options: {
         cwd: world.root,
@@ -1697,7 +1806,10 @@ export const tick = async (
         ...(shellIsContained() ? { spawnClaudeCodeProcess: confinedSpawn(dirname(world.root), keepNoise) } : {}),
 
         // ---- limits ----
+        // The CLI's own ceiling stays as a second net under `landing`, which
+        // stops the leg one batch before the CLI would.
         maxTurns,
+        hooks: { PostToolBatch: [{ hooks: [onBatch] }] },
         ...(d.maxBudgetUsd != null ? { maxBudgetUsd: d.maxBudgetUsd } : {}),
         effort: mind.effort,
         thinking: { type: 'adaptive' },
@@ -1728,8 +1840,23 @@ export const tick = async (
         // Every tool-using turn, not only the gated ones — this is the count
         // the ceiling is measured against. Confirmed at 30 of 30 in both the
         // shift that died and the one that returned cleanly.
-        if (m.message.content.some((b) => b.type === 'tool_use') && ++toolTurns >= maxTurns) {
+        //
+        // One response is one turn: the CLI emits a message per content block,
+        // so parallel calls share a message.id, and a subagent's messages carry
+        // parent_tool_use_id and are not the agent's turns at all.
+        const turnStarts = m.parent_tool_use_id == null && (!m.message.id || m.message.id !== lastTurnId)
+          && m.message.content.some((b) => b.type === 'tool_use');
+        if (turnStarts) lastTurnId = m.message.id;
+        if (turnStarts && ++toolTurns >= maxTurns) {
           atCeiling = true;
+          // Past the point where both `landing` and the CLI should have
+          // stopped it. Lynn's leg of 2026-09-23 did get here, to 92 of 75.
+          if (toolTurns > maxTurns + 1 && !interrupted) {
+            interrupted = true;
+            landed ??= 'turns';
+            trace(`landing: interrupt at ${toolTurns} of ${maxTurns}`);
+            void q.interrupt().catch(() => {});
+          }
         }
         if (tracing) {
           const toolNames: string[] = [];
@@ -1891,7 +2018,10 @@ export const tick = async (
         // "ended: error_max_turns" was going into the journal and the commit
         // message — an error code standing in for the agent's own account of
         // its shift. Their last words are a truer record than the subtype.
-        summary = m.subtype === 'success' ? m.result : (said || `ended: ${m.subtype}`);
+        // A leg landed by `landing` answers with an empty result: the model was
+        // stopped before it could say anything, so its last words stand in.
+        summary = (m.subtype === 'success' ? m.result : '') || said
+          || (landed ? `stopped at its ${landed === 'time' ? 'time' : 'turn'} limit` : `ended: ${m.subtype}`);
         await readUsage(q);
         // The leg's one turn is done. Release the held input AFTER the usage
         // read (which needs a live stdin), so streamInput completes, closes
@@ -1962,6 +2092,9 @@ export const tick = async (
       // Leaving the message loop is a normal return, so this never reaches
       // the catch below on its own.
       if (overran) { failure = overranBy(d.shiftTimeoutMs ?? 0); break; }
+      // Stopped between tool calls at a limit: a shift ending, not failing, and
+      // not one to hand over and carry on with.
+      if (landed) { truncated = true; break; }
       if (staleSession) { if (recoverStaleSession()) continue; failure = STALE_SESSION; break; }
       // The leg kept its work; now drop the session whose control stream died
       // under it, so the next leg comes up cold with a live gate instead of
@@ -2009,7 +2142,7 @@ export const tick = async (
       // worked, spent real money and usually wrote something down; it simply
       // hit the ceiling before it chose to stop. Recording that as a failure
       // made a busy company look broken and buried the errors that matter.
-      if (OUT_OF_TURNS.test(error) || atCeiling) { truncated = true; break; }
+      if (OUT_OF_TURNS.test(error) || atCeiling || landed) { truncated = true; break; }
 
       if (staleSession) { if (recoverStaleSession()) continue; failure = STALE_SESSION; break; }
 
@@ -2021,6 +2154,7 @@ export const tick = async (
       contextTokens, contextWindow, rotateAtPct: rotateAt,
       sessionTurns: sessionTurns(), maxSessionTurns,
       turnsLeft: ceiling - turns, rotations,
+      elapsedMs: now() - shiftStarted, timeoutMs: d.shiftTimeoutMs ?? 0,
     })) break;
 
     // Captured before the hand-over runs: those turns are spent against the
@@ -2031,6 +2165,10 @@ export const tick = async (
     // The hand-over runs on the OLD conversation, while it still remembers.
     try {
       await runLeg(HANDOVER_PROMPT, Math.min(HANDOVER_TURNS, ceiling - turns), true);
+      // Out of time mid-hand-over: keep the conversation whose notes were cut
+      // off, for the next shift to resume, rather than drop it and start a
+      // cold leg past the deadline.
+      if (landed) { truncated = true; break; }
     } catch (err) {
       // Failing to hand over is not worth failing the shift over — but it is
       // worth not rotating afterwards. Dropping a conversation that nobody
@@ -2072,7 +2210,8 @@ export const tick = async (
   // Their own account of the shift, in their own hand, in the world's git log.
   const account = summary || said;
   if (account) {
-    world.appendJournal(agent.id, journalEntry(account, turns, truncated));
+    world.appendJournal(agent.id, journalEntry(account, turns, truncated,
+      landed === 'time' ? Math.round((d.shiftTimeoutMs ?? 0) / 60_000) : undefined));
   }
   world.git.commitAs({ id: agent.id, name: agent.name }, `${agent.id}: ${firstLine(account)}`);
   // Housekeeping the shift cannot do from inside its sandbox (see
@@ -2091,6 +2230,7 @@ export const tick = async (
   ledger.emit(agent.id, 'agent.slept', null, {
     turns, costUsd, ceiling,
     ...(truncated ? { truncated: true } : {}),
+    ...(landed ? { landed } : {}),
     ...(rotations ? { rotations } : {}),
     // Only when the shift did something the single number cannot explain: more
     // than one leg ran, or the total passed the ceiling. A shift that took its
@@ -2122,8 +2262,12 @@ const firstLine = (s: string): string =>
  */
 export const JOURNAL_CHARS = 1200;
 
-export const journalEntry = (account: string, turns: number, truncated: boolean): string => {
-  const ceiling = truncated ? `\n\n_Cut at the turn ceiling (${turns}). Resumes next shift._` : '';
+export const journalEntry = (account: string, turns: number, truncated: boolean, outOfMinutes?: number): string => {
+  // The agent reads this next shift; a time limit called a turn ceiling would
+  // have it rationing turns it was never short of.
+  const ceiling = !truncated ? ''
+    : outOfMinutes ? `\n\n_Stopped at its ${outOfMinutes}-minute limit. Resumes next shift._`
+    : `\n\n_Cut at the turn ceiling (${turns}). Resumes next shift._`;
   if (account.length <= JOURNAL_CHARS) return account + ceiling;
 
   const head = account.slice(0, JOURNAL_CHARS);

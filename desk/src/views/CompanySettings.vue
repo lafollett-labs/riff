@@ -78,7 +78,7 @@ const saveMind = async (e?: UIEvent) => {
  */
 const DIALS = [
   { key: 'maxTurns', label: 'Turns a shift',
-    hint: 'A tool call and its result is one turn. Coding burns five before anything works.',
+    hint: 'A safety net, not the budget: stops a shift looping on something fast. The agent is told when a few remain. Time is the budget.',
     min: 1, max: 400, step: 1 },
   { key: 'concurrency', label: 'Working at once',
     hint: 'How many staff may be awake together.', min: 1, max: 16, step: 1 },
@@ -97,7 +97,7 @@ const DIALS = [
     hint: 'Rule 7. Continuing is always cheaper than starting, so without a cap a company ships point releases of its first idea forever. 0 turns the rule off.',
     min: 0, max: 200, step: 1 },
   { key: 'shiftTimeoutMinutes', label: 'Minutes a shift may run',
-    hint: 'Wall clock before a stuck shift is stopped. Turns and money never advance while a shift waits on something that never answers, and it holds a slot the whole time. 0 disables it.',
+    hint: 'The shift\'s budget. The agent is told at 75% and 90%; at the limit it stops after the tool call in hand, and one still running 3 minutes later is killed. 0 disables it.',
     min: 0, max: 1440, step: 5 },
   { key: 'maxSessionHours', label: 'Max runtime (hours)',
     hint: 'The ceiling on a whole run, over any deadline a start asks for. 0 never stops — the safety net for a company left running unattended.',

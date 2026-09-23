@@ -32,12 +32,16 @@ describe('a shift that spends its last turn and then dies was truncated', () => 
     // The ceiling counts turns, and the gate sees a subset of them: Read,
     // Glob and Grep never reach it. Counting gated turns would undercount a
     // research-heavy shift and miss the ceiling it actually hit.
+    // What starts a turn: one response with a tool call in it, whether or not
+    // the call reaches the gate. (test/shift-landing.test.ts drives the count:
+    // parallel calls and a subagent's are not turns.)
     const src = staff();
-    const at = src.indexOf('++toolTurns');
-    const line = src.slice(src.lastIndexOf('\n', at) + 1, src.indexOf('\n', at));
-    assert.doesNotMatch(line, /reachesGate/,
+    const at = src.indexOf('const turnStarts');
+    const def = src.slice(at, src.indexOf(';', at));
+    assert.doesNotMatch(def, /reachesGate/,
       'the ceiling is measured against all tool turns');
-    assert.match(line, /b\.type === 'tool_use'/);
+    assert.match(def, /b\.type === 'tool_use'/);
+    assert.match(src, /if \(turnStarts && \+\+toolTurns >= maxTurns\)/);
   });
 
   test('the count is per leg, so a second leg does not inherit the first one', () => {
@@ -49,7 +53,7 @@ describe('a shift that spends its last turn and then dies was truncated', () => 
   test('a death at the ceiling ends the shift as truncated, not as a failure', () => {
     // Truncated shifts journal, commit, and say "resumes next shift".
     // Failures do none of that, and the work stays uncommitted.
-    assert.match(staff(), /if \(OUT_OF_TURNS\.test\(error\) \|\| atCeiling\) \{ truncated = true; break; \}/);
+    assert.match(staff(), /if \(OUT_OF_TURNS\.test\(error\) \|\| atCeiling \|\| landed\) \{ truncated = true; break; \}/);
   });
 });
 
@@ -194,9 +198,9 @@ describe('the permission channel is kept alive by streaming the prompt, not pass
     // stdin, so the generator must not return while the leg is live.
     assert.match(src, /async function\* onePrompt\(\)/);
     assert.match(src, /await inputOpen;/);
-    assert.match(src, /query\(\{\s*prompt: onePrompt\(\),/);
+    assert.match(src, /query\)\(\{\s*prompt: onePrompt\(\),/);
     // A bare string straight into query is the stream-closing shape, and the bug.
-    assert.doesNotMatch(src, /query\(\{\s*prompt,/);
+    assert.doesNotMatch(src, /query\)?\(\{\s*prompt,/);
   });
 
   test('the shift trace is gated on the flag and rides the failure events', () => {

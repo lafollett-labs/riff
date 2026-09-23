@@ -49,7 +49,16 @@ import { DEFAULT_STAFF, readStaffDefaults, type StaffDefaults } from './models.t
  * on the outside world, which has nothing to do with what the model costs.
  */
 export type CompanyPolicy = {
-  /** Model responses in one shift. A tool call and its result is one. */
+  /**
+   * Tool-using turns one shift may take: a runaway net, not the budget.
+   * A turn is one model response and the tool calls it asked for.
+   *
+   * It was the budget, and it cut 6 of ShipIt's 109 shifts from 09-16 to
+   * 09-23 mid-task with no warning, while the cost it stood for tracks
+   * context size far more than turns — a 2-turn shift over a 469K-token
+   * conversation cost what a 20-turn one does. Time is the budget now (see
+   * shiftTimeoutMinutes); this catches a shift looping on something fast.
+   */
   maxTurns: number;
   /** How many staff may be awake at once. */
   concurrency: number;
@@ -123,6 +132,11 @@ export type CompanyPolicy = {
    * minutes, p99 is 16.1, and the longest that ever finished is 27.7 — so
    * this is 1.6x the worst real shift and cannot cut off work that is
    * happening. 0 disables it.
+   *
+   * It is also the shift's budget, which the turn ceiling was: the agent is
+   * told at 75% and 90%, and at the limit it is stopped between tool calls
+   * (`landing` in src/runtime/staff.ts). A call still running LANDING_GRACE_MS
+   * later is what gets killed.
    */
   shiftTimeoutMinutes: number;
   /**
@@ -160,7 +174,8 @@ export type CompanyPolicy = {
  * before anything works.
  */
 export const DEFAULT_POLICY: CompanyPolicy = {
-  maxTurns: 60,
+  // A net over time, not a budget. ShipIt's p90 is 66 and its longest 93.
+  maxTurns: 200,
   concurrency: 3,
   baseIntervalMinutes: 5,
   throttleAboveUtilization: 0.7,

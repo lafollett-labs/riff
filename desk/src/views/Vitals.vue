@@ -398,7 +398,7 @@ const tiles = computed(() => {
             <dd v-if="v.money.cents">{{ usd(v.money.cents / 100) }}</dd>
             <dt>rotated · compacted</dt>
             <dd>{{ v.shifts.rotated }} · {{ v.shifts.compacted }}</dd>
-            <dt>cut at the ceiling</dt><dd>{{ v.shifts.truncated }}</dd>
+            <dt>cut at turns · time</dt><dd>{{ v.shifts.truncated }} · {{ v.shifts.outOfTime }}</dd>
             <dt>failed · overran</dt>
             <dd :class="{ hot: v.shifts.overran > 0 }">{{ v.shifts.failed }} · {{ v.shifts.overran }}</dd>
           </dl>

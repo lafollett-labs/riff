@@ -35,6 +35,9 @@ export type ShiftVitals = {
   overran: number;
   /** Shifts cut at the turn ceiling with work still in hand. */
   truncated: number;
+  /** Shifts stopped between tool calls at their time budget: landed, where
+   *  `overran` was killed inside one. See `landing` in src/runtime/staff.ts. */
+  outOfTime: number;
   rotated: number;
   rotateFailed: number;
   compacted: number;

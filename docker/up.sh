@@ -68,6 +68,55 @@ if [ "$subcommand" = check ]; then
   exit 0
 fi
 
+# Claude Code as each release ships: a rebuild is the upgrade. The newest Agent
+# SDK carries its CLI version for version (0.3.281 is 2.1.281), and the image
+# installs whatever this names. The SDK's API may break across its minor line,
+# which Riff's code has to be moved across by hand, so a release past the line
+# package.json names is announced, and the newest release inside it is taken.
+#
+#   CLAUDE_SDK_VERSION=0.3.279 docker/up.sh up --build    roll back to one
+#
+# A pin set in docker/.env or $RIFF_ENV holds too: it is left for compose to
+# read, where an export from here would have overridden it.
+resolve_sdk() {
+  [ -n "${CLAUDE_SDK_VERSION:-}" ] && return 0
+  for f in "$local_env" "$outside_env"; do
+    [ -n "$f" ] && [ -f "$f" ] && grep -Eq '^[[:space:]]*(export[[:space:]]+)?CLAUDE_SDK_VERSION=["'"'"']?[0-9]' "$f" && {
+      echo "riff: building on the Agent SDK pinned in $f"; return 0; }
+  done
+  line=$(sed -n 's/.*"@anthropic-ai\/claude-agent-sdk": *"[^0-9]*\([0-9]*\.[0-9]*\)\..*/\1/p' "$here/../package.json")
+  # The abbreviated packument: every version and the dist-tags, in one request.
+  doc=$(curl -sf -m 20 -H 'Accept: application/vnd.npm.install-v1+json' \
+    'https://registry.npmjs.org/@anthropic-ai%2fclaude-agent-sdk' 2>/dev/null) || doc=
+  if [ -z "$doc" ]; then
+    # Said as what it is: the lockfile's release can be well behind the one
+    # the running image was built on, so this can be a downgrade.
+    echo "riff: npm registry did not answer; building on the lockfile's Agent SDK," >&2
+    echo "  which may be OLDER than the running image's. ^C and set CLAUDE_SDK_VERSION to hold it." >&2
+    return 0
+  fi
+  latest=$(printf '%s' "$doc" | tr ',' '\n' | sed -n 's/.*"latest":"\([0-9][0-9.]*\)".*/\1/p' | head -1)
+  case $latest in
+    "$line".*) pick=$latest ;;
+    *)
+      # Newest stable in the line: a prerelease has a `-` where this wants `"`.
+      pick=$(printf '%s' "$doc" | grep -o "\"$line\.[0-9]*\":{" | tr -d '":{' | sort -t. -k3,3n | tail -1)
+      [ -n "$latest" ] && echo "riff: Agent SDK $latest is out, past the $line line Riff is written against" >&2 ;;
+  esac
+  if [ -z "$pick" ]; then
+    echo "riff: no Agent SDK release in the $line line found; building on the lockfile's" >&2
+    return 0
+  fi
+  CLAUDE_SDK_VERSION=$pick
+  export CLAUDE_SDK_VERSION
+  echo "riff: building on Agent SDK $pick"
+}
+
+case $subcommand in
+  build) resolve_sdk ;;
+  up|create) for a in "$@"; do [ "$a" = --build ] && { resolve_sdk; break; }; done ;;
+esac
+
 # Recreating the container kills whoever is mid-shift.
 #
 # Compose sends SIGTERM and waits ten seconds; a shift runs for minutes, so the

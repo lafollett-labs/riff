@@ -137,10 +137,14 @@ The Agent SDK routes tool calls through `canUseTool`, which is wired to the
 company's rules, and an unrecognised tool is **refused**, so adding a tool to
 the SDK later cannot silently widen what the staff can do.
 
-Not every call reaches it: the CLI approves some calls itself and never asks.
-Those are sent to the same function from a PreToolUse hook
-(`makePreToolCheck`), which the CLI resolves before its own approval. The hook
-only adds refusals and records; it never grants. Measured against CLI 2.1.280 in
+Not every call reaches it: the CLI approves some calls itself and never asks,
+and which ones changes from release to release. Riff builds on each release as
+it ships (`docker/up.sh` resolves the newest Agent SDK, which carries its CLI),
+so the gate cannot depend on which calls a release asks about. **Every** call is
+sent to the same function from a PreToolUse hook (`makePreToolCheck`) with no
+matcher, which the CLI resolves before its own approval, and a tool the gate
+does not know is refused there whatever the CLI would have done. The hook only
+adds refusals and records; it never grants. Measured against CLI 2.1.280 in
 throwaway companies on 2026-09-23, and re-measured on 2.1.281 the same day:
 
 | Call | Asked by the CLI | Crosses the gate | Bounded by |
@@ -152,20 +156,38 @@ throwaway companies on 2026-09-23, and re-measured on 2.1.281 the same day:
 | `Glob`/`Grep` over the world, `staff/`, a colleague's folder, or with a pattern that climbs out (`..`) | no | yes, from the hook: one `world.read_other` for the search. CLI 2.1.280 ships neither tool; a search runs as `rg` or `grep` in the shell, and is recorded as that command | the CLI's confined view |
 | `Read`/`Glob`/`Grep` kept inside your own folder or the commons | no | no, deliberately: every read on the record would bury the ledger | the CLI's confined view |
 | spawning a subagent (`Agent`) | no | yes, from the hook; `isolation: "remote"` is refused, and so is any `model` parameter: a subagent runs on its seat's model | each thing the subagent does is gated as above |
+| `Monitor` with a `command`, run in the background | no | yes, from the hook, as `shell` with its command | the gate, then the kernel sandbox |
+| `Monitor` with `ws`, a WebSocket the CLI opens itself | no | yes, from the hook, as `external.read` with its url | the gate, then the egress proxy |
+| `SendMessage` | no | yes, from the hook: allowed only `to` a subagent this shift spawned and the gate let run, by the `name` it asked for or the id in the CLI's launch receipt — never its description or a report's text, both the model's own; refused otherwise, and always for a peer-shaped address (`uds:`, `bridge:`, a socket path), since the same tool reaches peer sessions. A name stops being an address when its subagent ends, and shifts run with `CLAUDE_CODE_HARBOR_KITE=0`, which turns the CLI's cross-session messaging off beneath this | the gate |
+| `ToolSearch`, and stopping or reading the shift's own background work (`TaskStop`, `TaskOutput`, `BashOutput`, `KillShell`) | no | yes, from the hook: allowed, unrecorded; none runs anything | nothing to bound |
+| any other tool: `ListAgents`, `RemoteTrigger`, `CronCreate`, `PushNotification`, `Workflow`, `EnterWorktree`, … | no | refused from the hook, and named on `agent.slept.unknownTools` | the gate |
 
 Before these, a subagent's `echo hi > staff/tess/…` wrote with no `gate.allow`,
 a built-in `Read` of a colleague's memory was silent despite
 `transparency.read_is_loud`, and a spawn with `isolation: "remote"` was
 accepted (it ran as a background agent; nothing left the container that does
-not on every shift). A call the hook has decided is answered from that decision
-if the CLI then asks canUseTool too, so it is recorded once. The hook's matcher
-is anchored, so `TaskStop` or `BashOutput` are not taken for `Task` or `Bash`,
+not on every shift). While the hook ran for a list of the tools measured to
+skip canUseTool, the list went stale in the other direction: `Monitor` runs a
+shell command, the CLI never asked about it, and ShipIt's four on 2026-09-15 and
+-17 — one polling api.github.com — left no gate event. `SendMessage`, `ListAgents`, `TaskStop` and
+61 `ToolSearch` calls went the same way. A call the hook has decided is answered
+from that decision if the CLI then asks canUseTool too, so it is recorded once,
 and a hook that cannot reach the gate refuses the call rather than let the CLI
-approve it.
+approve it. A canUseTool ask with no hook before it runs the hook's rules first,
+so a release that skipped the hook for a tool still meets its refusals.
 
-What is still not gated: any tool a future CLI adds and approves by itself. The
-tool set is whatever the pinned CLI ships; pinning it with the SDK's `tools`
-option is tracked follow-up work.
+What the gate still depends on the CLI for is running the hook and honouring
+its answer. Both are checked on every shift rather than trusted: a result for a
+call the hook never saw (`how: "ran"`, or `"failed"` for one that ran and
+exited non-zero), or a success for one it refused (`"ignored"`), is recorded as
+`gate.bypassed` (the first per tool) and counted on `agent.slept.ungated`. A
+call the CLI turned away itself — its errors come tagged `<tool_use_error>`,
+and its checks before any hook say anything, as SendMessage's "Cross-session
+messaging is not available" did in a probe — is not;
+one the CLI skipped the hook for but canUseTool then decided by the hook's rules
+is recorded as `"unhooked"`. Each shift records the release it
+ran on as `agent.slept.cli`, so a change in behaviour reads against the version
+that showed it.
 
 A subagent's run is on the record: `subagent.started` (with any `model` it asked
 for over the seat's own, and `background`) and `subagent.finished` (with `gated`,
@@ -219,6 +241,34 @@ through the egress proxy, around the keyproxy: in a half hour of ShipIt on
 connections before it and none after, with its model calls unchanged through the
 keyproxy. The Datadog intake is on the egress denylist as the net under that
 setting. `api.anthropic.com` cannot be: the keyproxy's own requests need it.
+
+### Riff runs the Agent SDK at npm's newest
+
+`docker/up.sh` builds on the newest Agent SDK release in the line
+`package.json` names, the day it ships, and the image installs it over the
+lockfile's. That SDK's JavaScript runs in the gateway process, which holds
+`master.key` and opens every company's vault; its bundled CLI runs in each
+shift. So a bad publish reaches the whole installation on the next
+`up --build`, with no soak time and nothing but npm's own integrity check
+between the registry and the keys. The host's tests run against the lockfile's
+release, not the one the image took. This is the operator's choice, made to have
+each release's features as they ship; the controls are the gate not depending
+on the release (above), `agent.slept.cli` naming the release each shift ran on,
+and `CLAUDE_SDK_VERSION=<version>` — exported, or in `docker/.env` or
+`$RIFF_ENV` — pinning one to roll back.
+
+### `claude` on a shift's PATH is not gated
+
+The factory image has one Claude Code: the binary the Agent SDK drives, linked
+at `/usr/local/bin/claude` (until 2026-09-23 it was a second, separate `@latest`
+install, 2.1.270 beside an SDK on 2.1.281). The staff's products run it —
+ShipIt's agent runner execs that path — and a `claude` started from a shift's
+shell is a nested agent this gate does not see: its tool calls are not asked
+here, and it may name any model. What bounds it is what bounds the shell that
+started it: the gate asks for the command that launches it, the kernel sandbox
+confines it, and its model calls go out through the keyproxy on the shift's
+scoped token. Removing the binary would not close this, since the SDK's copy is
+readable from the shell and npm can fetch another.
 
 ### Your data is outside the box
 

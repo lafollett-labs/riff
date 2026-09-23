@@ -24,6 +24,9 @@ services:
       # Explicit — keyproxy is the last stage, and an untargeted build takes the
       # last one, which would boot the proxy here instead of the gateway.
       target: runtime
+      # The Claude Code release to build on; docker/up.sh sets it to the newest.
+      args:
+        CLAUDE_SDK_VERSION: ${CLAUDE_SDK_VERSION:-}
     # keyproxy gated on health so a shift never races a proxy that is not yet
     # listening; egress only needs to have started.
     depends_on:
@@ -166,6 +169,9 @@ services:
       # image: the one container that can decrypt every company's keys does not
       # also carry bash, a compiler, a browser, or the Claude CLI.
       target: keyproxy
+      # Carries the SDK's package.json from the runtime stage; the same release.
+      args:
+        CLAUDE_SDK_VERSION: ${CLAUDE_SDK_VERSION:-}
     # Docker's own init as PID 1 for signal handling; the minimal image ships no
     # tini and the proxy spawns no children to reap.
     init: true

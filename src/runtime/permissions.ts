@@ -37,7 +37,14 @@ import { TOOL_PREFIX } from './tools.ts';
  * container, including ones built for something else entirely. Fail closed:
  * if either is missing, there is no shell.
  */
-const SHELL_TOOLS = new Set(['Bash', 'BashOutput', 'KillShell', 'KillTask']);
+/**
+ * `Monitor` is a shell: it runs `command` in the background and streams its
+ * lines back. The CLI ran it without asking, and ShipIt's four on 2026-09-15
+ * and -17 — one polling api.github.com — left no gate event at all. Its other
+ * form opens a WebSocket from the CLI itself, which is a read of the outside,
+ * not a shell; see `monitorWs`.
+ */
+export const SHELL_TOOLS = new Set(['Bash', 'Monitor']);
 
 const containerMarked = (): boolean => existsSync('/.dockerenv') || existsSync('/run/.containerenv');
 
@@ -49,11 +56,15 @@ const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead']);
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
 /**
  * Harmless scratch space and delegation. `Agent` spawns a subagent (it was
- * `Task` before CLI 2.1, and this list still said so): CLI 2.1.280 does not
- * ask about the spawn at all, measured as `gated: false` on subagent.finished,
- * and the subagent's own writes and shell each cross this gate in turn.
+ * `Task` before CLI 2.1, and this list still said so), whose own writes and
+ * shell each cross this gate in turn. ToolSearch loads a tool's schema, which
+ * grants nothing: the tool it loads is decided here when it is called.
+ * TaskStop and TaskOutput stop and read the shift's own background work.
  */
-const FREE_TOOLS = new Set(['TodoWrite', 'Agent', 'Skill', 'ExitPlanMode']);
+const FREE_TOOLS = new Set(['TodoWrite', 'Agent', 'Skill', 'ExitPlanMode', 'ToolSearch',
+  'TaskStop', 'TaskOutput', 'BashOutput', 'KillShell', 'KillTask']);
+/** The detail a refusal of a tool this gate does not know carries. */
+export const UNKNOWN_TOOL = 'unknown tool';
 const OUTSIDE_READ = new Set(['WebFetch', 'WebSearch']);
 
 type Where = { kind: 'own' } | { kind: 'other'; who: string } | { kind: 'commons' } | { kind: 'outside' };
@@ -154,6 +165,9 @@ export type PermissionDeps = {
   toolCapabilities: Record<string, Capability>;
   /** Overridable so the decision can be tested without being in a container. */
   contained?: boolean;
+  /** Whether a SendMessage `to` names a subagent this shift spawned. Absent,
+   *  none does, and every SendMessage is refused. */
+  isOwnSubagent?: (to: string) => boolean;
 };
 
 export const makeCanUseTool = (deps: PermissionDeps): CanUseTool => {
@@ -166,6 +180,16 @@ export const makeCanUseTool = (deps: PermissionDeps): CanUseTool => {
     askGate(gate, actor, capability, summary, target);
 
   return async (toolName, input) => {
+    // A WebSocket opened by the CLI itself, to wherever the url says: the url
+    // is what goes on the record, and the only bound is the egress proxy.
+    const ws = toolName === 'Monitor' ? input['ws'] : undefined;
+    if (ws !== undefined) {
+      const url = typeof ws === 'object' && ws !== null && typeof (ws as { url?: unknown }).url === 'string'
+        ? String((ws as { url: string }).url) : '';
+      if (!url || input['command'] !== undefined) return deny('Monitor takes one of `command` or `ws.url`.');
+      return ask('external.read', `Monitor websocket: ${url}`.slice(0, 200), url.slice(0, 200));
+    }
+
     if (SHELL_TOOLS.has(toolName)) {
       if (!contained) {
         note(toolName, 'deny', 'no shell outside the container');
@@ -175,8 +199,23 @@ export const makeCanUseTool = (deps: PermissionDeps): CanUseTool => {
           `Read/Write within your own files. Running in the container gives you a shell.`
         );
       }
-      const cmd = typeof input['command'] === 'string' ? String(input['command']) : toolName;
-      return ask('shell', cmd.slice(0, 200), null);
+      if (typeof input['command'] !== 'string' || !input['command']) return deny(`${toolName} needs a command.`);
+      return ask('shell', String(input['command']).slice(0, 200), null);
+    }
+
+    // Steering a subagent this shift spawned — "wrap up and give me what you
+    // have" — as Carver did three times on 2026-09-17. The same tool reaches
+    // peer sessions, other machines through Remote Control included, so it is
+    // held to the shift's own spawns, by the name or id each was given.
+    if (toolName === 'SendMessage') {
+      const to = typeof input['to'] === 'string' ? input['to'] : '';
+      // The CLI reads `uds:`, `bridge:`, a socket path and the like as a peer
+      // session, whatever the list below holds.
+      const peerShaped = /[:/\\]/.test(to);
+      if (to && !peerShaped && deps.isOwnSubagent?.(to)) { note(toolName, 'allow', 'own subagent'); return allow(); }
+      note(toolName, 'deny', 'not a subagent of this shift');
+      return deny(`SendMessage reaches only a subagent you spawned this shift, by its name or id; ` +
+        `'${to.slice(0, 64)}' is not one.`);
     }
 
     if (FREE_TOOLS.has(toolName)) { note(toolName, 'allow', 'free'); return allow(); }
@@ -225,17 +264,10 @@ export const makeCanUseTool = (deps: PermissionDeps): CanUseTool => {
     }
 
     // Default-deny. New SDK tools do not become staff powers by accident.
-    note(toolName, 'deny', 'unknown tool');
+    note(toolName, 'deny', UNKNOWN_TOOL);
     return deny(`'${toolName}' is not one of this company's tools.`);
   };
 };
-
-/**
- * The tools the CLI can run without asking canUseTool, which the pre-check asks
- * about. Anchored: read as a substring match, `Task` would take in TaskStop and
- * TaskOutput and `Bash` BashOutput, which the gate does not know and would refuse.
- */
-export const PRE_CHECKED = '^(?:Agent|Task|Read|Glob|Grep|NotebookRead|Bash)$';
 
 /**
  * Whether a Grep or Glob stays inside your own folder or the commons. A search
@@ -272,6 +304,12 @@ const searchScoped = (world: World, actor: AgentId, toolName: string, input: Rec
  * Read of a colleague's memory was silent despite `transparency.read_is_loud`,
  * and a spawn could ask for `isolation: "remote"` with nothing to refuse it.
  * Measured against CLI 2.1.280 on 2026-09-23.
+ *
+ * Which calls the CLI approves by itself changes from one release to the next,
+ * and Riff takes each release as it ships. So this runs for EVERY tool, not a
+ * list of the ones measured to skip canUseTool: a list went stale the moment
+ * the CLI shipped Monitor, a shell it never asked about. A tool this gate does
+ * not know is refused here whatever the CLI would have done.
  *
  * Run from a PreToolUse hook, which the CLI resolves before its own approval.
  * Returns the decision, or null where there is nothing to decide: reading your

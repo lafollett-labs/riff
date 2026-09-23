@@ -28,6 +28,8 @@ services:
       # The working tree, live. node_modules stays the container's own — the
       # host's may hold binaries built for a different platform.
       - ..:/app
+      # Kept across recreates: after a dependency change or a new Claude Code
+      # release, `--renew-anon-volumes` or this still holds the old ones.
       - /app/node_modules
     # Vite writes a dependency cache and node --watch needs a writable tree.
     read_only: false

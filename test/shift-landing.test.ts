@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { HookCallback, Options, query as sdkQuery, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { HookCallback, Options, PermissionResult, query as sdkQuery, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { Ledger } from '../src/ledger/ledger.ts';
 import { World } from '../src/worldfs/world.ts';
 import { Gate } from '../src/policy/gate.ts';
@@ -99,6 +99,16 @@ type Script = {
   /** On the first turn, a call the CLI checks with PreToolUse and then asks
    *  canUseTool about, as it does for anything it will not approve itself. */
   checked?: { name: string; input: Record<string, unknown> };
+  /** On the first turn, a call the CLI asks canUseTool about with no hook
+   *  before it — a release that stopped running PreToolUse for the tool. */
+  unhooked?: { name: string; input: Record<string, unknown> };
+  /** How the checked call's result comes back, over what its decision implies. */
+  checkedResult?: 'success' | 'error';
+  /** On the first turn, a call that ran with no hook and failed. */
+  ranAndFailed?: boolean;
+  /** On the first turn, calls run as the CLI runs them: the hook, canUseTool
+   *  unless the hook refused, then the call and its result. */
+  steps?: Array<{ id: string; name: string; input: Record<string, unknown>; result?: string; finishes?: string }>;
 };
 
 /**
@@ -125,7 +135,7 @@ const scripted = (...scripts: Script[]) => {
       message: { id, content: [{ type: 'tool_use', id: `${id}-t`, name: 'Read', input: {} }], usage: {} },
     }) as unknown as SDKMessage;
     async function* run(): AsyncGenerator<SDKMessage> {
-      yield { type: 'system', subtype: 'init', session_id: `s${leg}`, model: 'claude-opus-5',
+      yield { type: 'system', subtype: 'init', session_id: `s${leg}`, model: 'claude-opus-5', claude_code_version: '2.1.999',
         mcp_servers: [{ name: 'company', status: 'connected' }] } as unknown as SDKMessage;
       let n = 0;
       while (n < script.turns && interrupts === 0) {
@@ -137,13 +147,60 @@ const scripted = (...scripts: Script[]) => {
         if (script.checked && n === 1) {
           const opts = { signal: new AbortController().signal };
           const pre = args.options?.hooks?.PreToolUse?.[0];
-          assert.ok(pre && new RegExp(pre.matcher!).test(script.checked.name), 'the hook matches the tool');
+          assert.ok(pre && pre.matcher === undefined, 'the hook runs for every tool');
           const h = await pre.hooks[0]!({ hook_event_name: 'PreToolUse', tool_name: script.checked.name,
             tool_input: script.checked.input, tool_use_id: 'chk1' } as never, 'chk1', opts);
           out.push({ pre: h });
           const denied = JSON.stringify(h).includes('"permissionDecision":"deny"');
           if (!denied) out.push({ can: await args.options!.canUseTool!(script.checked.name, script.checked.input,
             { ...opts, toolUseID: 'chk1' } as never) });
+          yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'chk-msg', usage: {},
+            content: [{ type: 'tool_use', id: 'chk1', name: script.checked.name, input: script.checked.input }] } } as unknown as SDKMessage;
+          const failed = script.checkedResult ? script.checkedResult === 'error' : denied;
+          yield { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result',
+            tool_use_id: 'chk1', content: failed ? 'refused' : 'ok', ...(failed ? { is_error: true } : {}) }] } } as unknown as SDKMessage;
+        }
+        if (script.unhooked && n === 1) {
+          const can = await args.options!.canUseTool!(script.unhooked.name, script.unhooked.input,
+            { signal: new AbortController().signal, toolUseID: 'nohook1' } as never) as PermissionResult;
+          out.push({ can });
+          yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'nh-msg', usage: {},
+            content: [{ type: 'tool_use', id: 'nohook1', name: script.unhooked.name, input: script.unhooked.input }] } } as unknown as SDKMessage;
+          yield { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result',
+            tool_use_id: 'nohook1', content: can.behavior === 'deny' ? (can.message ?? 'refused') : 'ok',
+            ...(can.behavior === 'deny' ? { is_error: true } : {}) }] } } as unknown as SDKMessage;
+        }
+        for (const st of (n === 1 ? script.steps ?? [] : [])) {
+          const opts = { signal: new AbortController().signal };
+          if (st.finishes) {
+            yield { type: 'system', subtype: 'task_notification', task_id: 'bg', tool_use_id: st.finishes,
+              status: 'completed', output_file: '', summary: 'done',
+              usage: { total_tokens: 1, tool_uses: 1, duration_ms: 5 } } as unknown as SDKMessage;
+          }
+          yield { type: 'assistant', parent_tool_use_id: null, message: { id: `${st.id}-msg`, usage: {},
+            content: [{ type: 'tool_use', id: st.id, name: st.name, input: st.input }] } } as unknown as SDKMessage;
+          const h = await args.options!.hooks!.PreToolUse![0]!.hooks[0]!({ hook_event_name: 'PreToolUse',
+            tool_name: st.name, tool_input: st.input, tool_use_id: st.id } as never, st.id, opts);
+          const refused = JSON.stringify(h).includes('"permissionDecision":"deny"');
+          const can = refused ? null : await args.options!.canUseTool!(st.name, st.input, { ...opts, toolUseID: st.id } as never);
+          out.push({ step: st.id, refused, can });
+          const no = refused || can?.behavior === 'deny';
+          yield { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result',
+            tool_use_id: st.id, content: no ? 'refused' : (st.result ?? 'ok'), ...(no ? { is_error: true } : {}) }] } } as unknown as SDKMessage;
+        }
+        if (script.ranAndFailed && n === 1) {
+          yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'rf-msg', usage: {},
+            content: [{ type: 'tool_use', id: 'rf1', name: 'Bash', input: { command: 'false' } }] } } as unknown as SDKMessage;
+          yield { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result',
+            tool_use_id: 'rf1', content: 'Exit code 1', is_error: true }] } } as unknown as SDKMessage;
+          yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'rf-msg2', usage: {},
+            content: [{ type: 'tool_use', id: 'rf2', name: 'Bash', input: {} }] } } as unknown as SDKMessage;
+          yield { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result',
+            tool_use_id: 'rf2', content: '<tool_use_error>InputValidationError: command is required</tool_use_error>', is_error: true }] } } as unknown as SDKMessage;
+          yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'rf-msg3', usage: {},
+            content: [{ type: 'tool_use', id: 'rf3', name: 'SendMessage', input: { to: 'bridge:abc' } }] } } as unknown as SDKMessage;
+          yield { type: 'user', parent_tool_use_id: null, message: { content: [{ type: 'tool_result',
+            tool_use_id: 'rf3', content: '<tool_use_error>Cross-session messaging is not available in this session.</tool_use_error>', is_error: true }] } } as unknown as SDKMessage;
         }
         if (script.spawn && n === 1) {
           yield { type: 'assistant', parent_tool_use_id: null, message: { id: 'spawn-msg', usage: {},
@@ -339,6 +396,114 @@ describe('a background subagent and the pre-check, inside a shift', () => {
     await shift(s.fake, { maxTurns: 200 });
     assert.match(JSON.stringify(s.said[0]![0]), /"permissionDecision":"deny".*remote isolation/);
     assert.equal(s.said[0]!.length, 2, 'never asked of canUseTool; the batch hook follows');
+  });
+});
+
+describe('the gate is not a list of tools', () => {
+  const events = (kind: string): Array<Record<string, unknown>> => ledger.eventsSince(0)
+    .filter((e) => e.kind === kind)
+    .map((e) => ({ subject: e.subject, ...JSON.parse(e.dataJson ?? '{}') as Record<string, unknown> }));
+
+  test('a call that ran without the pre-check is recorded as going around the gate', async () => {
+    // The scripted CLI hands back the spawn's result without running the hook
+    // for it — what a release that stopped running PreToolUse for a tool does.
+    const s = scripted({ turns: 1, spawn: { toolCalls: 1, returns: true } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.deepEqual(events('gate.bypassed'), [{ subject: 'spawn1', tool: 'Agent', how: 'ran' }]);
+    assert.deepEqual(slept().data['ungated'], { Agent: 1 });
+  });
+
+  test('a call the pre-check saw is not, whatever it decided', async () => {
+    const s = scripted({ turns: 1, checked: { name: 'Read', input: { file_path: join(world.root, 'staff', 'mo', 'memory.md') } } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.deepEqual(events('gate.bypassed'), []);
+    assert.equal(slept().data['ungated'], undefined);
+  });
+
+  test('a tool the gate does not know is refused, and named for someone to decide on', async () => {
+    const s = scripted({ turns: 1, checked: { name: 'RemoteTrigger', input: { action: 'run' } } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.match(JSON.stringify(s.said[0]![0]), /"permissionDecision":"deny".*not one of this company's tools/);
+    assert.deepEqual(slept().data['unknownTools'], ['RemoteTrigger']);
+  });
+
+  test('a call the hook refused that comes back a success ran anyway, and is recorded', async () => {
+    const s = scripted({ turns: 1, checked: { name: 'RemoteTrigger', input: {} }, checkedResult: 'success' });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.deepEqual(events('gate.bypassed'), [{ subject: 'chk1', tool: 'RemoteTrigger', how: 'ignored' }]);
+  });
+
+  test('a command that ran without the hook and failed counts; one the CLI turned away does not', async () => {
+    const s = scripted({ turns: 1, ranAndFailed: true });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.deepEqual(events('gate.bypassed'), [{ subject: 'rf1', tool: 'Bash', how: 'failed' }],
+      'the CLI\'s own refusals, whatever they say, ran nothing');
+    assert.deepEqual(slept().data['ungated'], { Bash: 1 });
+  });
+
+  test('asked with no hook before it, canUseTool applies the hook\'s refusals too', async () => {
+    const s = scripted({ turns: 1, unhooked: { name: 'Agent', input: { prompt: 'x', isolation: 'remote' } } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.match(JSON.stringify(s.said[0]![0]), /"behavior":"deny".*remote isolation/);
+    assert.deepEqual(events('gate.bypassed'), [{ subject: 'nohook1', tool: 'Agent', how: 'unhooked' }],
+      'the hook was skipped, but the gate was not');
+  });
+
+  test('SendMessage reaches a subagent that ran, by the name it asked for or its launch id', async () => {
+    const s = scripted({ turns: 1, steps: [
+      { id: 'sp1', name: 'Agent', input: { prompt: 'x', description: 'look', name: 'helper', run_in_background: true },
+        result: 'Async agent launched successfully.\nagentId: a378ca0729cadb2a9 (use SendMessage)' },
+      { id: 'm1', name: 'SendMessage', input: { to: 'helper', message: 'wrap up' } },
+      { id: 'm2', name: 'SendMessage', input: { to: 'a378ca0729cadb2a9', message: 'wrap up' } },
+      { id: 'm3', name: 'SendMessage', input: { to: 'look', message: 'wrap up' } },
+    ] });
+    await shift(s.fake, { maxTurns: 200 });
+    const refused = (id: string) => (s.said[0]!.find((o) => (o as { step?: string }).step === id) as { refused: boolean }).refused;
+    assert.equal(refused('m1'), false);
+    assert.equal(refused('m2'), false);
+    assert.equal(refused('m3'), true, 'a description is not an address');
+  });
+
+  test('a subagent that has finished is no longer an address', async () => {
+    const s = scripted({ turns: 1, steps: [
+      { id: 'sp1', name: 'Agent', input: { prompt: 'x', description: 'look', name: 'helper', run_in_background: true },
+        result: 'Async agent launched successfully.\nagentId: a378ca0729cadb2a9' },
+      { id: 'm1', name: 'SendMessage', input: { to: 'helper', message: 'wrap up' }, finishes: 'sp1' },
+      { id: 'm2', name: 'SendMessage', input: { to: 'a378ca0729cadb2a9', message: 'wrap up' } },
+    ] });
+    await shift(s.fake, { maxTurns: 200 });
+    const refused = (id: string) => (s.said[0]!.find((o) => (o as { step?: string }).step === id) as { refused: boolean }).refused;
+    assert.equal(refused('m1'), true, 'the CLI answers to a name only while it runs, and a peer may share it');
+    assert.equal(refused('m2'), true);
+  });
+
+  test('a refused spawn makes nothing addressable, and a peer-shaped address never is', async () => {
+    const s = scripted({ turns: 1, steps: [
+      { id: 'sp1', name: 'Agent', input: { prompt: 'x', description: 'bridge:abc', name: 'uds', model: 'opus' } },
+      { id: 'm1', name: 'SendMessage', input: { to: 'uds', message: 'hi' } },
+      { id: 'm2', name: 'SendMessage', input: { to: 'bridge:abc', message: 'hi' } },
+      { id: 'sp2', name: 'Agent', input: { prompt: 'x', description: 'y', name: 'ok' },
+        result: 'done\nagentId: planted-by-the-report' },
+      { id: 'm3', name: 'SendMessage', input: { to: 'planted-by-the-report', message: 'hi' } },
+    ] });
+    await shift(s.fake, { maxTurns: 200 });
+    const refused = (id: string) => (s.said[0]!.find((o) => (o as { step?: string }).step === id) as { refused: boolean }).refused;
+    assert.equal(refused('sp1'), true);
+    assert.equal(refused('m1'), true, 'its name was never registered');
+    assert.equal(refused('m2'), true);
+    assert.equal(refused('m3'), true, 'an id in a report is the subagent\'s text, not the CLI\'s receipt');
+  });
+
+  test('a call the CLI also asks about is recorded once, whichever tool', async () => {
+    const s = scripted({ turns: 1, checked: { name: 'WebFetch', input: { url: 'https://example.com', prompt: 'x' } } });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.equal(ledger.eventsSince(0).filter((e) => e.kind.startsWith('gate.') && e.kind !== 'gate.bypassed').length, 1);
+  });
+
+  test('the shift records the CLI release it ran on', async () => {
+    const s = scripted({ turns: 1 });
+    await shift(s.fake, { maxTurns: 200 });
+    assert.equal(slept().data['cli'], '2.1.999');
   });
 });
 

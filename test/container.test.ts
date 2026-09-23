@@ -232,6 +232,31 @@ describe('what the factory can reach', () => {
   });
 });
 
+describe('one Claude Code, and none of it in the keyproxy', () => {
+  const dockerfile = readFileSync('docker/Dockerfile', 'utf8');
+  const stage = (name: string): string => {
+    const from = dockerfile.indexOf(`AS ${name}\n`);
+    const next = dockerfile.indexOf('\nFROM ', from);
+    return dockerfile.slice(from, next === -1 ? undefined : next);
+  };
+
+  test('the keyproxy takes one file from the factory, the SDK\'s package.json, and installs nothing', () => {
+    // It decrypts every company's keys. Widen this COPY to node_modules and the
+    // factory's whole dependency tree lands in it, passing every other test.
+    const kp = stage('keyproxy');
+    const froms = [...kp.matchAll(/COPY[^\n]*--from=(\S+)\s+(\S+)/g)].map((m) => `${m[1]} ${m[2]}`);
+    assert.deepEqual(froms, ['runtime /app/node_modules/@anthropic-ai/claude-agent-sdk/package.json']);
+    assert.ok(!/\bnpm\b/.test(kp.split('\n').filter((l) => !l.trimStart().startsWith('#')).join('\n')), 'no npm in the keyproxy');
+  });
+
+  test('no second Claude Code is installed beside the one the SDK drives', () => {
+    const code = dockerfile.split('\n').filter((l) => !l.trimStart().startsWith('#')).join('\n');
+    assert.ok(!code.includes('@anthropic-ai/claude-code'), 'claude on PATH is the SDK\'s own binary');
+    assert.match(stage('runtime'), /ln -sf "\$1" \/usr\/local\/bin\/claude/);
+    assert.match(stage('runtime'), /\[ "\$ran" = "\$said" \]/, 'the build checks the CLI is the one the SDK names');
+  });
+});
+
 describe('the example env file describes this container, not an imagined one', () => {
   // A .env.example naming variables nothing reads is worse than none at all:
   // someone sets one, nothing happens, and they go looking for the bug in
@@ -270,7 +295,7 @@ describe('the example env file describes this container, not an imagined one', (
    * should not.
    */
   const launch = (args: string[] = ['up'], env: Record<string, string> = {}):
-      { out: string; err: string; curl: string; argv: string } => {
+      { out: string; err: string; curl: string; argv: string; sdk: string } => {
     const dir = mkdtempSync(join(tmpdir(), 'riff-launch-'));
     // It answers `compose port` as a running stack would (STUB_PORT, or 4173),
     // and says nothing is published when STUB_STACK_DOWN is set.
@@ -279,7 +304,9 @@ describe('the example env file describes this container, not an imagined one', (
       + `case "$*" in *" port ingress 4173"*)\n`
       + `  [ -n "$STUB_STACK_DOWN" ] && exit 1\n`
       + `  echo "127.0.0.1:\${STUB_PORT:-4173}"; exit 0 ;;\nesac\n`
-      + `printf '%s\\n' "$*" > ${dir}/argv\n`, { mode: 0o755 });
+      + `printf '%s\\n' "$*" > ${dir}/argv\n`
+      // What compose would substitute for the image's Claude Code release.
+      + `printf '%s' "\${CLAUDE_SDK_VERSION-<unset>}" > ${dir}/sdk\n`, { mode: 0o755 });
     // A stub `curl`, because the launcher asks a running server to drain its
     // companies before recreating the container. Unstubbed, this suite would
     // reach 127.0.0.1:4173 and pause the operator's real work. It answers a
@@ -291,6 +318,11 @@ describe('the example env file describes this container, not an imagined one', (
       + `[ -n "$STUB_CURL_DOWN" ] && exit 7\n`
       + `case "$*" in\n`
       + `  *"-X POST"*) exit 0 ;;\n`
+      // The registry's abbreviated packument, with a prerelease past the newest
+      // in the line; STUB_SDK_LATEST empty is a registry that did not answer.
+      + `  *registry.npmjs.org*) [ -n "$STUB_SDK_LATEST" ] || exit 7\n`
+      + `    printf '{"name":"sdk","dist-tags":{"latest":"%s","next":"%s"},"versions":{"0.3.100":{},"0.3.999":{},"0.3.1000-beta.1":{},"%s":{}}}' `
+      + `"$STUB_SDK_LATEST" "$STUB_SDK_LATEST" "$STUB_SDK_LATEST"; exit 0 ;;\n`
       + `esac\n`
       // The REAL field order from registry.list(): slug and running are eight
       // fields apart. The first fixture put them side by side, which is the one
@@ -306,7 +338,8 @@ describe('the example env file describes this container, not an imagined one', (
       + `fi\n`, { mode: 0o755 });
     const r = spawnSync('sh', ['docker/up.sh', ...args], {
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}`, RIFF_ENV: '', ...env },
+      env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}`, RIFF_ENV: '',
+        CLAUDE_SDK_VERSION: undefined, STUB_SDK_LATEST: '0.3.999', ...env },
     });
     assert.equal(r.status, 0, `up.sh ${args.join(' ')} failed: ${r.stderr}`);
     return {
@@ -314,8 +347,60 @@ describe('the example env file describes this container, not an imagined one', (
       err: r.stderr,
       curl: existsSync(join(dir, 'curl.log')) ? readFileSync(join(dir, 'curl.log'), 'utf8') : '',
       argv: existsSync(join(dir, 'argv')) ? readFileSync(join(dir, 'argv'), 'utf8') : '',
+      sdk: existsSync(join(dir, 'sdk')) ? readFileSync(join(dir, 'sdk'), 'utf8') : '',
     };
   };
+
+  test('a rebuild is on the newest Claude Code in the line Riff is written against', () => {
+    const r = launch(['up', '--build']);
+    assert.equal(r.sdk, '0.3.999');
+    assert.match(r.out, /building on Agent SDK 0\.3\.999/);
+  });
+
+  test('a release past that line is announced, and the newest inside it taken', () => {
+    // Falling back to the lockfile's here quietly took back every release
+    // since it was last bumped.
+    const r = launch(['up', '--build'], { STUB_SDK_LATEST: '0.4.0' });
+    assert.equal(r.sdk, '0.3.999', 'not the lockfile\'s, and not a prerelease');
+    assert.match(r.err, /Agent SDK 0\.4\.0 is out, past the 0\.3 line/);
+  });
+
+  test('a pin in an env file holds, left for compose to read, in any form compose reads', () => {
+    for (const line of ['CLAUDE_SDK_VERSION=0.3.279', 'export CLAUDE_SDK_VERSION=0.3.279', '  CLAUDE_SDK_VERSION="0.3.279"']) {
+      const dir = mkdtempSync(join(tmpdir(), 'riff-pin-'));
+      writeFileSync(join(dir, 'riff.env'), `${line}\n`);
+      const r = launch(['up', '--build'], { RIFF_ENV: join(dir, 'riff.env') });
+      assert.equal(r.sdk, '<unset>', `not exported over the file: ${line}`);
+      assert.match(r.out, /pinned in .*riff\.env/, line);
+      assert.ok(!/registry\.npmjs\.org/.test(r.curl), line);
+    }
+  });
+
+  test('an empty value in an env file is not a pin', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'riff-pin-'));
+    writeFileSync(join(dir, 'riff.env'), 'CLAUDE_SDK_VERSION=\n');
+    assert.equal(launch(['up', '--build'], { RIFF_ENV: join(dir, 'riff.env') }).sdk, '0.3.999');
+  });
+
+  test('a release named by hand wins, which is how one is rolled back', () => {
+    const r = launch(['up', '--build'], { CLAUDE_SDK_VERSION: '0.3.279' });
+    assert.equal(r.sdk, '0.3.279');
+    assert.ok(!/registry\.npmjs\.org/.test(r.curl), 'not looked up');
+  });
+
+  test('a registry that does not answer builds on the lockfile\'s, and says so', () => {
+    const r = launch(['up', '--build'], { STUB_SDK_LATEST: '' });
+    assert.equal(r.sdk, '<unset>');
+    assert.match(r.err, /registry did not answer/);
+    assert.match(r.err, /may be OLDER than the running image's/);
+  });
+
+  test('only a build looks the release up', () => {
+    assert.ok(!/registry/.test(launch(['logs']).curl));
+    assert.ok(!/registry/.test(launch(['restart']).curl));
+    assert.ok(!/registry/.test(launch(['up']).curl), 'an up that rebuilds nothing');
+    assert.equal(launch(['build']).sdk, '0.3.999');
+  });
 
   test('a rebuild drains what is working before it recreates the container', () => {
     // Compose sends SIGTERM and waits ten seconds; a shift runs for minutes,
@@ -468,7 +553,7 @@ describe('the egress proxy refuses the data drops and logs the rest', () => {
 
   test('the shift env turns the CLI\'s non-essential traffic off', () => {
     assert.match(readFileSync(new URL('../src/runtime/staff.ts', import.meta.url), 'utf8'),
-      /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',\n\s*\.\.\.secretEnv,/);
+      /CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',[\s\S]*?CLAUDE_CODE_HARBOR_KITE: '0',\n\s*\.\.\.secretEnv,/);
   });
 
   test('the denylist does not claim to be a containment boundary', () => {

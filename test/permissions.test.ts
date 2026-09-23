@@ -8,7 +8,7 @@ import { World } from '../src/worldfs/world.ts';
 import { Gate, type CommonsView } from '../src/policy/gate.ts';
 import { constitutionFor } from '../src/policy/rules.ts';
 import { fixedClock } from '../src/core/clock.ts';
-import { makeCanUseTool, makePreToolCheck, PRE_CHECKED, shellIsContained } from '../src/runtime/permissions.ts';
+import { makeCanUseTool, makePreToolCheck, shellIsContained } from '../src/runtime/permissions.ts';
 import { createTools, TOOL_NAMESPACE, TOOL_PREFIX } from '../src/runtime/tools.ts';
 import type { Agent, Tier } from '../src/core/types.ts';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
@@ -126,10 +126,16 @@ describe('the shell is decided by where the runtime is', () => {
     allowed(await call('Bash', { command: 'npm test' }, { contained: true }));
   });
 
-  test('every shell tool follows the same decision, not just Bash', async () => {
-    for (const t of ['Bash', 'BashOutput', 'KillShell', 'KillTask']) {
-      denied(await call(t, {}, { contained: false }), t);
-      allowed(await call(t, {}, { contained: true }), t);
+  test('every tool that runs a command follows the same decision, not just Bash', async () => {
+    for (const t of ['Bash', 'Monitor']) {
+      denied(await call(t, { command: 'ls' }, { contained: false }), t);
+      allowed(await call(t, { command: 'ls' }, { contained: true }), t);
+    }
+  });
+
+  test('reading or stopping your own background work runs nothing, so it is free', async () => {
+    for (const t of ['BashOutput', 'KillShell', 'KillTask', 'TaskStop', 'TaskOutput']) {
+      allowed(await call(t, {}, { contained: false }), t);
     }
   });
 
@@ -360,10 +366,46 @@ describe('what the CLI approves by itself still crosses the gate', () => {
     assert.deepEqual(gateEvents(), ['world.read_other']);
   });
 
-  test('the hook matches the tools it names, not their neighbours', () => {
-    const m = new RegExp(PRE_CHECKED);
-    for (const t of ['Agent', 'Task', 'Read', 'Glob', 'Grep', 'NotebookRead', 'Bash']) assert.ok(m.test(t), t);
-    for (const t of ['BashOutput', 'TaskStop', 'TaskOutput', 'TaskCreate', 'ReadMcpResource']) assert.ok(!m.test(t), t);
+  test('a tool the gate does not know is refused before the CLI can approve it', async () => {
+    // Offered by CLI 2.1.281 and never asked about: none is a company power.
+    for (const t of ['RemoteTrigger', 'CronCreate', 'PushNotification', 'Workflow', 'ListAgents', 'EnterWorktree']) {
+      const r = denied(await pre()(t, {}, 't1'), t);
+      assert.match(r.message, /not one of this company's tools/);
+    }
+    assert.deepEqual(gateEvents(), []);
+  });
+
+  test('Monitor is a shell, asked with its command', async () => {
+    allowed(await pre({ contained: true })('Monitor', { command: 'curl -s https://api.github.com/rate_limit', timeout_ms: 1000 }, 't1'));
+    const [e] = ledger.eventsSince(0).filter((x) => x.kind.startsWith('gate.'));
+    assert.match(JSON.parse(e!.dataJson ?? '{}').summary as string, /^curl -s https:\/\/api\.github\.com/);
+    denied(await pre({ contained: false })('Monitor', { command: 'ls' }, 't2'), 'no shell off the container');
+  });
+
+  test('Monitor\'s websocket is a read of the outside, with its url on the record', async () => {
+    allowed(await pre({ contained: true })('Monitor', { ws: { url: 'wss://example.com/feed' }, timeout_ms: 1000 }, 't1'));
+    const [e] = ledger.eventsSince(0).filter((x) => x.kind.startsWith('gate.'));
+    const data = JSON.parse(e!.dataJson ?? '{}') as { capability: string; summary: string };
+    assert.equal(data.capability, 'external.read');
+    assert.match(data.summary, /wss:\/\/example\.com\/feed/);
+    denied(await pre({ contained: true })('Monitor', { ws: { url: 'wss://x' }, command: 'ls' }, 't2'), 'not both');
+    denied(await pre({ contained: true })('Monitor', { timeout_ms: 1000 }, 't3'), 'neither');
+  });
+
+  test('SendMessage reaches only a subagent this shift spawned', async () => {
+    const mine = makePreToolCheck({ actor: 'rae', world, gate, toolCapabilities: capabilities as never,
+      isOwnSubagent: (to) => to === 'a378ca0729cadb2a9' });
+    allowed(await mine('SendMessage', { to: 'a378ca0729cadb2a9', message: 'wrap up' }, 't1'));
+    const r = denied(await mine('SendMessage', { to: 'someone-else', message: 'hi' }, 't2'));
+    assert.match(r.message, /only a subagent you spawned this shift/);
+    denied(await pre()('SendMessage', { to: 'a378ca0729cadb2a9', message: 'hi' }, 't3'), 'no spawns, no one to reach');
+    const all = makePreToolCheck({ actor: 'rae', world, gate, toolCapabilities: capabilities as never, isOwnSubagent: () => true });
+    for (const to of ['uds:/tmp/x.sock', 'bridge:abc', '/tmp/peer.sock', '\\\\.\\pipe\\x']) denied(await all('SendMessage', { to, message: 'hi' }, 't4'), to);
+  });
+
+  test('loading a tool, and stopping or reading your own background work, are free', async () => {
+    for (const t of ['ToolSearch', 'TaskStop', 'TaskOutput']) allowed(await pre()(t, { query: 'x', task_id: 'b1' }, 't1'), t);
+    assert.deepEqual(gateEvents(), []);
   });
 
   test('a read of the repository is refused even inside world/', async () => {

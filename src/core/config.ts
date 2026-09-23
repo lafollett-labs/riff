@@ -445,7 +445,25 @@ export const readRuntimeCredential = (raw: unknown): RuntimeCredential | undefin
  * its tests build the exact same route.
  */
 export const RUNTIME_UPSTREAM = 'https://api.anthropic.com';
-export const CLAUDE_CODE_UA = 'claude-code/2.1.281';
+/**
+ * The CLI version the installed Agent SDK drives, read from the SDK rather than
+ * written here: Riff builds on each release as it ships (docker/up.sh), and a
+ * literal named one version for as long as nobody remembered to edit it. The
+ * keyproxy image carries the same package.json for this and nothing else.
+ */
+const bundledCli = (): string => {
+  try {
+    const pkg = JSON.parse(readFileSync(
+      new URL('../../node_modules/@anthropic-ai/claude-agent-sdk/package.json', import.meta.url), 'utf8')) as
+      { claudeCodeVersion?: unknown };
+    const v = pkg.claudeCodeVersion;
+    if (typeof v === 'string' && /^\d+\.\d+\.\d+$/.test(v)) return v;
+  } catch { /* the floor below */ }
+  // Said, because a stale user-agent is otherwise silent forever.
+  process.stderr.write('riff: no Claude Code version in the Agent SDK package; the runtime route says 2.1.281\n');
+  return '2.1.281';
+};
+export const CLAUDE_CODE_UA = `claude-code/${bundledCli()}`;
 export const ANTHROPIC_VERSION = '2023-06-01';
 /**
  * Where a shift's Agent SDK is pointed (`ANTHROPIC_BASE_URL`): the keyproxy's

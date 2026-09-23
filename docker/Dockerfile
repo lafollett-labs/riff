@@ -30,14 +30,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 ENV CHROME_PATH=/usr/bin/chromium \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
-RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code@latest
 RUN useradd -m -u 10001 -s /bin/bash labs && mkdir -p /data /app && chown -R labs:labs /data /app
 WORKDIR /app
 COPY --chown=labs:labs package*.json ./
 # npm runs as root here, so node_modules lands root-owned — and the anonymous
 # volume compose mounts over it inherits that ownership. Vite then cannot write
 # its own dependency cache and the dev server dies on first request.
+ARG CLAUDE_SDK_VERSION=
 RUN npm ci --no-fund --no-audit \
+ && if [ -n "$CLAUDE_SDK_VERSION" ]; then \
+      npm install --no-save --no-fund --no-audit "@anthropic-ai/claude-agent-sdk@$CLAUDE_SDK_VERSION"; fi \
+ && set -- /app/node_modules/@anthropic-ai/claude-agent-sdk-linux-*/claude \
+ && [ "$#" -eq 1 ] && [ -x "$1" ] && ln -sf "$1" /usr/local/bin/claude \
  && mkdir -p /app/node_modules/.vite \
  && chown -R labs:labs /app/node_modules
 COPY --chown=labs:labs docker/entrypoint.sh /entrypoint.sh
@@ -133,10 +137,6 @@ ENV CHROME_PATH=/usr/bin/chromium \
     PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
 
-# The Agent SDK drives the Claude Code runtime; install it in the image so no
-# agent ever needs to fetch its own toolchain at run time.
-RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code@latest
-
 # Never root. An agent with a shell should not also have the box.
 RUN useradd -m -u 10001 -s /bin/bash labs \
  && mkdir -p /data /app \
@@ -144,7 +144,28 @@ RUN useradd -m -u 10001 -s /bin/bash labs \
 
 WORKDIR /app
 COPY --chown=labs:labs package*.json ./
-RUN npm ci --omit=dev --no-fund --no-audit
+# Claude Code, as each release ships. docker/up.sh looks up the newest Agent
+# SDK — which carries its CLI, version for version — and passes it here, so a
+# rebuild is the upgrade. Empty, as a bare compose build leaves it, is the
+# lockfile's version.
+ARG CLAUDE_SDK_VERSION=
+RUN npm ci --omit=dev --no-fund --no-audit \
+ && if [ -n "$CLAUDE_SDK_VERSION" ]; then \
+      npm install --omit=dev --no-save --no-fund --no-audit "@anthropic-ai/claude-agent-sdk@$CLAUDE_SDK_VERSION"; fi
+# One Claude Code in the image: the one the SDK drives. `claude` on PATH was a
+# second, separate `@latest` install, fixed at the day the image was built —
+# 2.1.270 beside an SDK on 2.1.281 — and the staff's own products run it
+# (ShipIt's agent runner execs /usr/local/bin/claude). Exactly one platform
+# build, or the image fails here rather than linking the wrong one.
+#
+# And the CLI must be the one the SDK says it carries: the runtime route's
+# user-agent is read from that claim, and every "measured on 2.1.N" is too.
+RUN set -- /app/node_modules/@anthropic-ai/claude-agent-sdk-linux-*/claude \
+ && [ "$#" -eq 1 ] && [ -x "$1" ] \
+ && ln -sf "$1" /usr/local/bin/claude \
+ && ran=$(claude --version | cut -d' ' -f1) \
+ && said=$(node -p "require('/app/node_modules/@anthropic-ai/claude-agent-sdk/package.json').claudeCodeVersion") \
+ && echo "Claude Code $ran (SDK says $said)" && [ "$ran" = "$said" ]
 COPY --chown=labs:labs . .
 COPY --chown=labs:labs --from=desk /app/desk/dist ./desk/dist
 COPY --chown=labs:labs docker/entrypoint.sh /entrypoint.sh
@@ -203,6 +224,12 @@ WORKDIR /app
 COPY --chown=labs:labs package.json ./
 COPY --chown=labs:labs src/core ./src/core
 COPY --chown=labs:labs src/keyproxy ./src/keyproxy
+# One file, not a dependency: the SDK's own package.json, so the runtime route's
+# `user-agent: claude-code/<version>` names the CLI the factory was built with
+# (CLAUDE_CODE_UA reads it). Copied from the runtime stage because that is where
+# the version up.sh resolved was installed; the lockfile's may be older.
+COPY --chown=labs:labs --from=runtime /app/node_modules/@anthropic-ai/claude-agent-sdk/package.json \
+     ./node_modules/@anthropic-ai/claude-agent-sdk/package.json
 USER labs
 ENV NODE_ENV=production \
     RIFF_ROOT=/data \

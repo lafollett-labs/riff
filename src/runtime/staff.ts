@@ -12,7 +12,7 @@ import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import { createTools, TOOL_NAMESPACE } from './tools.ts';
-import { makeCanUseTool, makePreToolCheck, PRE_CHECKED, shellIsContained } from './permissions.ts';
+import { makeCanUseTool, makePreToolCheck, shellIsContained, SHELL_TOOLS, UNKNOWN_TOOL } from './permissions.ts';
 import { DEFAULT_POLICY, installRoot, companiesDir, isCompanyHome, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
 import { mintScopedToken } from '../core/proxytoken.ts';
 import type { TranscriptSink } from '../ledger/transcript.ts';
@@ -989,6 +989,10 @@ const shiftChildEnv = (
     // half hour of ShipIt, 21 direct connections to api.anthropic.com and 30 to
     // http-intake.logs.us5.datadoghq.com. The model probe already set this.
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    // Cross-session messaging off: SendMessage and ListAgents reach peer
+    // sessions by socket, bridge or plain name, and the gate holds SendMessage
+    // to the shift's own subagents. The CLI's flag for it defaults on.
+    CLAUDE_CODE_HARBOR_KITE: '0',
     ...secretEnv,
   };
   delete env['CLAUDE_CODE_OAUTH_TOKEN'];
@@ -1325,7 +1329,7 @@ export const tick = async (
   let contextWindow = 0;
   const mind = mindOf(agent, d.staff ?? DEFAULT_STAFF);
   /** The model and effort the CLI reported at init: null effort means none was sent. */
-  const ran: { model?: string; effort?: Effort | null } = {};
+  const ran: { model?: string; effort?: Effort | null; cli?: string } = {};
   /**
    * What the shift cost in context, for the record. Omitted rather than
    * reported as zero when a shift died before any assistant turn — a 0% that
@@ -1483,9 +1487,19 @@ export const tick = async (
     }
     : (_op: string): void => { /* auditing off */ };
 
+  /** Tools the CLI offered that the gate does not know, refused: what a new
+   *  CLI release brought, for someone to decide on. */
+  const unknownTools = new Set<string>();
+  /** The names and ids this shift's subagents answer to, for SendMessage. */
+  const ownAgents = new Set<string>();
   const permissionDeps = {
     actor: agent.id, world, gate, toolCapabilities: capabilities,
-    ...(d.trace ? { onDecision: (t: string, o: 'allow' | 'deny', why: string) => d.trace!(`  gate  ${o.padEnd(5)} ${t} ${why}`) } : {}),
+    onDecision: (t: string, o: 'allow' | 'deny', why: string): void => {
+      // A company's connectors are refused by design, not news.
+      if (why === UNKNOWN_TOOL && !t.startsWith('mcp__') && unknownTools.size < 20) unknownTools.add(t.slice(0, 64));
+      d.trace?.(`  gate  ${o.padEnd(5)} ${t} ${why}`);
+    },
+    isOwnSubagent: (to: string): boolean => ownAgents.has(to),
   };
   const gate2 = makeCanUseTool(permissionDeps);
   const preCheck = makePreToolCheck(permissionDeps);
@@ -1502,11 +1516,68 @@ export const tick = async (
     // put every such call on the record twice.
     const pre = preDecided.get(opts.toolUseID);
     if (pre) { preDecided.delete(opts.toolUseID); return Promise.resolve(pre); }
+    // Asked with no hook before it: the same rules the hook applies, so a
+    // release that skipped the hook for a tool still meets its refusals
+    // (a remote spawn, a model override, a search of colleagues' files).
+    if (!hookSeen.has(opts.toolUseID)) {
+      unhooked.add(opts.toolUseID);
+      return preCheck(name, input, opts.toolUseID)
+        .then((r) => r ?? gate2(name, input, opts))
+        .catch((e: unknown): PermissionResult => ({ behavior: 'deny',
+          message: `The company's rules could not be checked: ${e instanceof Error ? e.message : String(e)}` }));
+    }
     return gate2(name, input, opts);
+  };
+  /** Every call the pre-check was run for, whatever it decided. */
+  const hookSeen = new Set<string>();
+  /**
+   * Calls that ran without the pre-check, by tool: the gate went around, not
+   * through. It runs for every tool, so this stays empty unless a CLI release
+   * stops running PreToolUse for some tool — which would otherwise go unseen
+   * the way Monitor did while the hook ran for a list.
+   */
+  const ungated = new Map<string, number>();
+  /** Calls the hook refused: one that comes back a success ran anyway. */
+  const hookDenied = new Set<string>();
+  /** Calls with no hook that canUseTool then decided by the hook's rules:
+   *  the CLI skipped the hook, but the gate did not skip the call. */
+  const unhooked = new Set<string>();
+  const callNames = new Map<string, string>();
+  const watchGate = (m: SDKMessage): void => {
+    if (m.type === 'assistant') {
+      for (const b of m.message.content) if (b.type === 'tool_use') callNames.set(b.id, b.name);
+    } else if (m.type === 'user' && Array.isArray(m.message.content)) {
+      for (const b of m.message.content) {
+        if (b.type !== 'tool_result') continue;
+        const id = b.tool_use_id;
+        let how: 'ran' | 'failed' | 'ignored' | 'unhooked' | null = null;
+        if (hookDenied.has(id)) how = b.is_error ? null : 'ignored';
+        else if (unhooked.has(id)) how = 'unhooked';
+        else if (!hookSeen.has(id)) {
+          // A shell command that exits non-zero is an error result too, and
+          // ran. What did not run is the CLI turning a call away before any
+          // hook: a malformed input, or a tool the model made up.
+          if (!b.is_error) how = 'ran';
+          // A tagged error is the CLI's own, and its checks before any hook
+          // say anything: a probe's SendMessage to `bridge:abc` came back
+          // `<tool_use_error>Cross-session messaging is not available…`,
+          // having run nothing. A tool that goes around the hook shows up on
+          // the call that succeeds.
+          else if (!/^\s*<tool_use_error>/.test(toolResultText(b.content))) how = 'failed';
+        }
+        const name = callNames.get(id) ?? 'unknown';
+        hookSeen.delete(id); hookDenied.delete(id); unhooked.delete(id); callNames.delete(id); preDecided.delete(id);
+        if (!how) continue;
+        const n = (ungated.get(name) ?? 0) + 1;
+        ungated.set(name, n);
+        if (n === 1) ledger.emit(agent.id, 'gate.bypassed', id, { tool: name.slice(0, 64), how });
+      }
+    }
   };
   /** The gate for what the CLI approves by itself; see makePreToolCheck. */
   const preTool: HookCallback = async (input) => {
     if (input.hook_event_name !== 'PreToolUse') return {};
+    hookSeen.add(input.tool_use_id);
     let r: PermissionResult | null;
     try {
       r = await preCheck(input.tool_name, input.tool_input as Record<string, unknown>, input.tool_use_id);
@@ -1519,6 +1590,7 @@ export const tick = async (
     gatedCalls.add(input.tool_use_id);
     trace(`pre-gate ${r.behavior} ${input.tool_name}`);
     if (r.behavior === 'deny') {
+      hookDenied.add(input.tool_use_id);
       return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: r.message } };
     }
     preDecided.set(input.tool_use_id, r);
@@ -1535,13 +1607,17 @@ export const tick = async (
    * result is its end — so a shift killed mid-subagent still says so.
    */
   const subagents = new Map<string, {
-    type: string; description: string; started: number; toolCalls: number; background: boolean;
+    type: string; description: string; started: number; toolCalls: number; background: boolean; name: string;
+    /** What it was registered in ownAgents under, removed when it ends: the
+     *  CLI answers to a name only while it runs, and a peer may share it. */
+    addresses: string[];
   }>();
   let subagentsSpawned = 0;
   const subagentDone = (id: string, how: Record<string, unknown>): void => {
     const sa = subagents.get(id);
     if (!sa) return;
     subagents.delete(id);
+    for (const a of sa.addresses) ownAgents.delete(a);
     ledger.emit(agent.id, 'subagent.finished', id, {
       type: sa.type, description: sa.description, toolCalls: sa.toolCalls,
       ms: now() - sa.started, gated: gatedCalls.has(id), ...how,
@@ -1555,11 +1631,12 @@ export const tick = async (
         if (parent) parent.toolCalls++;
         if (!SUBAGENT_TOOLS.has(b.name)) continue;
         const input = b.input as { subagent_type?: unknown; description?: unknown; model?: unknown;
-          run_in_background?: unknown };
+          run_in_background?: unknown; name?: unknown };
         const sa = {
           type: typeof input.subagent_type === 'string' ? input.subagent_type.slice(0, 64) : 'general-purpose',
           description: typeof input.description === 'string' ? input.description.slice(0, 200) : '',
           started: now(), toolCalls: 0, background: input.run_in_background === true,
+          name: typeof input.name === 'string' ? input.name : '', addresses: [] as string[],
         };
         subagents.set(b.id, sa);
         subagentsSpawned++;
@@ -1576,6 +1653,18 @@ export const tick = async (
         if (b.type !== 'tool_result') continue;
         const sa = subagents.get(b.tool_use_id);
         if (!sa) continue;
+        // What SendMessage may address it by, once the spawn is known to have
+        // run: the name it asked for, and the id the CLI's own launch receipt
+        // gives back. Never the description, and never text from a report —
+        // both are the model's, and `bridge:<id>` in either would have made a
+        // peer session an address this gate allows.
+        if (!b.is_error && !hookDenied.has(b.tool_use_id)) {
+          const text = toolResultText(b.content);
+          const launched = /^Async agent launched[^\n]*[\s\S]*?\bagentId:\s*([A-Za-z0-9_-]{1,80})/.exec(text);
+          for (const a of [/^[A-Za-z0-9_-]{1,80}$/.test(sa.name) ? sa.name : null, launched?.[1] ?? null]) {
+            if (a) { ownAgents.add(a); sa.addresses.push(a); }
+          }
+        }
         // A background spawn answers at once with a launch receipt; it is done
         // when its completion notice comes. 18 of Carver's 25 ran this way,
         // and ending them at the receipt recorded each as 0 calls in ~0ms.
@@ -1845,7 +1934,7 @@ export const tick = async (
         // disallowedTools keeps them out of the tool list the model is shown,
         // so no turn is spent reaching for something that cannot be granted.
         // Inside the container the shell is the point, so it is offered.
-        ...(shellIsContained() ? {} : { disallowedTools: ['Bash', 'BashOutput', 'KillShell'] }),
+        ...(shellIsContained() ? {} : { disallowedTools: [...SHELL_TOOLS] }),
 
         // The kernel boundary between one company and the next.
         //
@@ -1933,7 +2022,9 @@ export const tick = async (
         maxTurns,
         hooks: {
           PostToolBatch: [{ hooks: [onBatch] }],
-          PreToolUse: [{ matcher: PRE_CHECKED, hooks: [preTool] }],
+          // No matcher: every tool, so no CLI release can add one that
+          // skips the gate. See makePreToolCheck.
+          PreToolUse: [{ hooks: [preTool] }],
         },
         ...(d.maxBudgetUsd != null ? { maxBudgetUsd: d.maxBudgetUsd } : {}),
         effort: mind.effort,
@@ -1962,6 +2053,7 @@ export const tick = async (
       // system message before any content arrives; skip until it is known.
       if (d.transcript && session) recordShiftMessage(d.transcript, session, agent.id, m);
       watchSubagents(m);
+      watchGate(m);
       if (m.type === 'assistant') {
         // Every tool-using turn, not only the gated ones — this is the count
         // the ceiling is measured against. Confirmed at 30 of 30 in both the
@@ -2062,6 +2154,9 @@ export const tick = async (
         // the record says what ran, not what was asked for.
         ran.model = m.model;
         if (m.effort !== undefined) ran.effort = m.effort;
+        // Riff takes each CLI release as it ships, so a change in behaviour
+        // is read against the version that showed it.
+        if (typeof m.claude_code_version === 'string') ran.cli = m.claude_code_version.slice(0, 32);
         toolsUp = toolsConnected(m.mcp_servers);
         trace(`init tools=${companyServerStatus(m.mcp_servers) ?? 'absent'}`);
         // The init snapshot can precede the in-process ('sdk') company server's
@@ -2362,6 +2457,9 @@ export const tick = async (
     ...(truncated ? { truncated: true } : {}),
     ...(landed ? { landed } : {}),
     ...(subagentsSpawned ? { subagents: subagentsSpawned } : {}),
+    ...(ran.cli ? { cli: ran.cli } : {}),
+    ...(unknownTools.size ? { unknownTools: [...unknownTools] } : {}),
+    ...(ungated.size ? { ungated: Object.fromEntries(ungated) } : {}),
     ...(rotations ? { rotations } : {}),
     // Only when the shift did something the single number cannot explain: more
     // than one leg ran, or the total passed the ceiling. A shift that took its

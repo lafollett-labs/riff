@@ -5,8 +5,8 @@
 | Reviewer | Cali LaFollett (initiated by Marvin) |
 | Review type | generic security review with adversarial and mutation passes, four rounds; live measurements in the factory against throwaway companies (`link-probe`, `link-probe-b`) |
 | Base SHA | e19519c |
-| Files | `src/core/{atomicwrite,config}.ts`, `src/runtime/{staff,scheduler}.ts`, `src/worldfs/{within,world,git}.ts`, `src/company/{genesis,registry,rename}.ts`, `src/gateway/server.ts`, `SECURITY.md`, `test/{atomicwrite,sandbox-filesystem,world-links,shift-env}.test.ts` |
-| Verdict | ✅ APPROVED (round 4, all three scopes) |
+| Files | `src/core/{atomicwrite,config}.ts`, `src/runtime/{staff,scheduler,permissions}.ts`, `src/worldfs/{within,world,git}.ts`, `src/company/{genesis,registry,rename,transfer}.ts`, `src/policy/{gate,rules}.ts`, `src/gateway/server.ts`, `SECURITY.md`, `test/{atomicwrite,sandbox-filesystem,world-links,world-git-trust,shift-env,transfer,gate,permissions,registry}.test.ts` |
+| Verdict | ✅ APPROVED (round 7) |
 
 ## Origin
 
@@ -72,3 +72,45 @@ append through a linked `.gitignore`, and a FIFO that held the gateway.
 ✅ **APPROVED.** `npm run check` clean; `npm test` 712 pass. On Linux in the
 factory, `test/world-links.test.ts` passes 13 of 14; the other needs an
 executable `/tmp` for its stand-in bwrap, as the prune test already does.
+
+## Rounds 5–7 — the residuals, closed
+
+Base SHA 55cf7e8. Rounds 1–4 accepted three residuals — `mkdir -p` making
+empty folders next door, and the listing and seat-rename races — and left the
+runtime-token test reading source.
+
+- **Residuals (closed)**: every step of a walk opens from the descriptor
+  of the last with `O_NOFOLLOW` through `/proc/self/fd`. Folders are made,
+  listings are read and renames are done from the held descriptor, so nothing
+  is left to race.
+- **C1 (closed)**: the runtime-token test drives a real `Registry` and the
+  scheduler's `shiftDeps` against a throwaway root.
+- **R5-1 MEDIUM (fixed, measured)**: the fd walk removed PATH_MAX as a
+  limit, and a listing that re-walked from the root cost d²/2 opens for a tree
+  d deep. `filesWithin` descends from each parent's descriptor, at most
+  `COMMONS_DEPTH` (8) folders down. On a 2,000-deep tree it takes 0ms with the
+  cap and 196ms without it.
+- **R5-2, R5-3 INFO (fixed)**: the export counts commons through the same
+  walk, and test imports resolve from `import.meta.url`.
+- **OOS-5 HIGH → R6-1 MEDIUM (fixed)**: a FIFO at `.git/config` held the
+  gateway forever.
+  - The vet refuses special files.
+  - Every git call has a 10s timeout.
+  - The first timeout stops git in that world and records `world.git_stalled`.
+- **R6-2 LOW (fixed)**: the gate refuses a commons write past the cap
+  (`R6.commons_depth`).
+- **R6-3 INFO (fixed)**: `listCommons` fails closed.
+- **Found while testing (fixed)**:
+  - A transfer test started a real shift. That shift then retried a keyproxy
+    the test has not got.
+  - Two tests failed only inside the factory:
+    - one asserted the laptop's container marker;
+    - one gateway inherited `RIFF_CONTAINED=1` and refused for want of a
+      credential.
+- **R7-1 LOW (follow-up)**: clearing a stall means reopening the company,
+  and no endpoint does that alone.
+- **R7-2 LOW (follow-up)**: a legitimately slow add past 10s would trip the
+  breaker; measure a worst-case add.
+
+✅ **APPROVED (round 7).** `npm run check` is clean. `npm test` passes
+722 of 722 on the host, and 722 of 722 in the factory image.

@@ -213,13 +213,94 @@ stage the transcript into the company's own repo.
 
 What this does NOT do, and was never meant to: hide a company's own record from
 its own staff. Its home is inside its own boundary, so its Bash can read its own
-`transcript.db` and `ledger.db` as it always could — the wall is between
-companies and around the credentials, not between a company and its own history.
+`transcript.db` and `ledger.db` as bytes — the wall is between companies and
+around the credentials, not between a company and its own history. It cannot
+*write* them; see the next section.
 The stores hold agent-authored text (prompts, reasoning, tool input and output),
 never a secret: the runtime token and the product keys alike live in the vault
 the proxy reads one container away (below), never in the factory. Backups follow the same rule
 as everything else on the volume — `docker/backup.sh` carries the transcripts to
 a destination no container mounts.
+
+### A shift cannot rewrite what governs it
+
+Until 2026-09-22 a shift's Bash could write every file in its company's home,
+including the three the gateway runs the company by: `ledger.db` (approvals,
+spend, each seat's model and effort), `config.json` (policy) and
+`transcript.db`. Nothing had used it. The gap was that `allowWrite` was the whole
+home, which a coding company needs: ShipIt keeps a 3.2 GB Go toolchain and its
+git worktrees beside its world.
+
+So the home stays writable and those files do not (`companyControlFiles` in
+`src/runtime/staff.ts`, the WAL and shared-memory files included). Measured from
+a contained probe in a throwaway company, before and after:
+
+| Check | Before | After |
+| - | - | - |
+| append to `config.json`, `ledger.db`, `ledger.db-wal`, `transcript.db` | ok | `Read-only file system` |
+| rename `config.json` | ok | refused |
+| overwrite `config.json`; write `ledger.db` through a symlink | ok | `Read-only file system` |
+| hard-link `ledger.db` to a new name, to write that | — | `Invalid cross-device link` |
+| delete `ledger.db-shm` | — | `Device or resource busy` |
+| make a directory beside `world/` | ok | ok |
+| write inside `world/` | ok | ok |
+| read `/data/master.key` | denied | denied |
+| reach the gateway on `127.0.0.1:4173` or `factory:4173` | unreachable | unreachable |
+
+The last row is worth stating on its own: the console's API has no
+authentication, and a shift's shell cannot reach it — loopback is refused and
+the name does not resolve inside the sandbox. One cost: `sqlite3` in a shift can
+no longer open its own ledger, because reading a WAL database writes its
+shared-memory file. The staff read their company through their tools, not the
+file.
+
+### The gateway runs nothing a world's repository says to
+
+Every shift's work is committed by the gateway, outside the sandbox, with git
+running over a repository the staff write. Git runs commands a repository asks
+it to — a hook, an `fsmonitor`, a filter or `textconv` driver, a signing
+program — and any of them would have run as the gateway, past bubblewrap, where
+`master.key` and every other company are readable. Three routes reached it:
+
+- the **file tools** run outside bubblewrap, and the gate classified
+  `world/.git/hooks/pre-commit` as commons, so Write could plant a hook
+  (the CLI's own sandbox already protected `.git/hooks` and `.git/config` from
+  Bash; the file tools went around it);
+- **Bash** could replace `.git` itself — a gitdir file, `commondir`, or
+  `objects/info/alternates` — and aim the gateway at another repository;
+- an **imported** `.riff.tar.gz` carries whatever `.git/config` its author wrote.
+
+Closed in layers, in `src/worldfs/git.ts` and `src/runtime/permissions.ts`:
+
+- every git call the gateway makes passes `-c core.hooksPath=/dev/null
+  -c core.fsmonitor=false` and turns signing off, which outranks anything in the
+  repository's config;
+- before running, the repository is vetted: `.git` must be a real directory,
+  with no `commondir` or `alternates`, and every key in `.git/config` must be on
+  a short allowlist (identity, branch tracking, core layout). Anything else —
+  a filter, `include.path`, `core.worktree` — is refused, not neutralised one
+  key at a time, because the list of settings that run commands grows with git;
+- the gate treats `world/.git` as outside the company, in any letter case (the
+  volume is a macOS bind mount, where `.GIT` is `.git`);
+- the vet also refuses a symbolic link anywhere in the metadata git touches
+  (the top of `.git`, all of `refs/` and `logs/`, the top of `objects/`); the
+  reflog, auto-gc and background maintenance are off for the gateway's calls;
+- repositories nested inside the world — a staff member's own tool, or a
+  worktree (ShipIt had eleven) — have their own config the vet never reads, and
+  `git add -A` inspects them. The gateway's add, status and diff are scoped to
+  leave every nested repository out (`nestedRepos`, matching `.git` in any case),
+  so they stay the staff's to run git in and never the gateway's;
+- `world/` cannot be moved aside from a shell: measured, a rename is refused
+  (the CLI places its own protective mounts inside it, and `world/` is listed as
+  a writable mount of its own). It is also pinned by inode when the company
+  opens, and every gateway path — file reads, the gate's realpath check, a
+  shift's cwd, each commit — refuses a `world/` that has become a link or a
+  different directory. The home around it stays writable on purpose: making it
+  read-only was measured to stop the CLI's sandbox starting at all.
+
+`test/world-git-trust.test.ts` plants each route and asserts nothing ran.
+Removing the hooks override, or the nested-repository scoping, makes its test
+fail — which is how each was checked.
 
 ### The runtime token is not in the factory at all
 

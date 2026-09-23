@@ -76,3 +76,28 @@ describe('the shift sandbox hides the whole installation root, not just companie
     });
   });
 });
+
+describe('a shift may build beside its world but not rewrite what governs it', () => {
+  const world = '/data/companies/shipit/world';
+  beforeEach(() => { process.env['RIFF_ROOT'] = '/data'; });
+  afterEach(() => { delete process.env['RIFF_ROOT']; });
+
+  test('the ledger, the transcript and the config refuse writes, WAL files included', () => {
+    // Measured in a contained probe before this: every one took a write, and
+    // config.json took a rename. A shell that can write its ledger can approve
+    // its own drafts and raise its own effort.
+    const { denyWrite } = sandboxFilesystem(world);
+    for (const f of ['config.json', 'ledger.db', 'ledger.db-wal', 'ledger.db-shm',
+                     'transcript.db', 'transcript.db-wal', 'transcript.db-shm']) {
+      assert.ok(denyWrite.includes(`/data/companies/shipit/${f}`), f);
+    }
+  });
+
+  test('the home stays writable for a toolchain, and world/ is a mount of its own', () => {
+    // Read-only home was measured to stop the CLI's sandbox starting at all.
+    // world/ listed separately is its own mount, which cannot be renamed.
+    const { allowWrite } = sandboxFilesystem(world);
+    assert.ok(allowWrite.includes('/data/companies/shipit'));
+    assert.ok(allowWrite.includes(world));
+  });
+});

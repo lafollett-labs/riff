@@ -82,7 +82,7 @@ export const transcriptExists = (id: string, store = sessionStore()): boolean =>
  * `undo.mjs` died on exactly this).
  */
 export const sandboxFilesystem = (worldRoot: string, configDir?: string): {
-  denyRead: string[]; allowRead: string[]; allowWrite: string[];
+  denyRead: string[]; allowRead: string[]; allowWrite: string[]; denyWrite: string[];
 } => ({
   // CLAUDE_CONFIG_DIR moves the CLI's store onto the volume under the company's
   // OWN home, which allowRead re-admits — so deny that subtree straight back, or
@@ -99,8 +99,30 @@ export const sandboxFilesystem = (worldRoot: string, configDir?: string): {
     ...(configDir ? [configDir] : []),
   ],
   allowRead: [dirname(worldRoot)],
-  allowWrite: [dirname(worldRoot), home('.npm'), home('.cache'), home('.undo')],
+  // The company home stays writable: a coding company keeps a toolchain and
+  // worktrees beside its world (ShipIt's is 3.2 GB). It cannot be made
+  // read-only — measured: the CLI then fails to start the sandbox at all
+  // (`Can't create file world/.mcp.json`), because it places its own protective
+  // mounts in the working directory. world/ is listed on its own as well, so it
+  // is a mount of its own and cannot be renamed out from under the gateway;
+  // measured refused, both with and without this line.
+  allowWrite: [dirname(worldRoot), worldRoot, home('.npm'), home('.cache'), home('.undo')],
+  // Not the files the gateway governs the company by. Measured in a contained
+  // probe: before, each took a write and config.json took a rename; with these,
+  // each answers `Read-only file system`.
+  denyWrite: companyControlFiles(dirname(worldRoot)),
 });
+
+
+/**
+ * What the gateway governs a company by, and so what its staff must not write.
+ * The WAL and shared-memory files are the database as much as the main file is.
+ */
+export const companyControlFiles = (companyHome: string): string[] => [
+  'config.json',
+  'ledger.db', 'ledger.db-wal', 'ledger.db-shm',
+  'transcript.db', 'transcript.db-wal', 'transcript.db-shm',
+].map((f) => join(companyHome, f));
 
 export type TickDeps = {
   agent: Agent;

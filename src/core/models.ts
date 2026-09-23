@@ -10,8 +10,9 @@ import type { EffortLevel } from '@anthropic-ai/claude-agent-sdk';
  * to be stamped `claude-opus-5` at hire and nothing could change it, so a new
  * model reached nobody until someone edited the ledger by hand.
  *
- * Only the board sets these. No tool offers them to staff: a CEO free to hire
- * every seat at `max` is a CEO free to spend the operator's week by Tuesday.
+ * Only the board sets these. No tool offers them to staff, and a shift's shell
+ * cannot write the ledger they live in (see companyControlFiles): a CEO free to
+ * hire every seat at `max` is a CEO free to spend the operator's week by Tuesday.
  */
 
 /** A seat's setting that defers to the company's. */

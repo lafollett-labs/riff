@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { realpathSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { realpathSync, existsSync, lstatSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { systemClock, type Clock } from '../core/clock.ts';
 
@@ -14,9 +14,138 @@ import { systemClock, type Clock } from '../core/clock.ts';
  * execFile with an argv array throughout; nothing reaches a shell, so a staff
  * member naming a file `; rm -rf ~` is inert.
  */
+/**
+ * Everything in a repository that can make git run a command, switched off.
+ *
+ * The world is written by the staff, and this process runs git over it outside
+ * the shift sandbox — every commit a shift makes is committed by the gateway.
+ * A hook, an fsmonitor, or a signing program named in the repository's own
+ * files would run as the gateway: past bubblewrap, able to read master.key and
+ * every company. Flags given with -c outrank anything in .git/config, so these
+ * hold whatever the repository says.
+ */
+const INERT = [
+  '-c', 'core.hooksPath=/dev/null',
+  '-c', 'core.fsmonitor=false',
+  '-c', 'commit.gpgSign=false',
+  '-c', 'tag.gpgSign=false',
+  // A repository nested in the world is its own repository, with its own
+  // config the vet below never reads. Status and diff otherwise descend into it
+  // to see whether it changed, running whatever that config names.
+  '-c', 'diff.ignoreSubmodules=all',
+  '-c', 'submodule.recurse=false',
+  '-c', 'status.submoduleSummary=false',
+  // The reflog is a file git appends to; nothing here reads it.
+  '-c', 'core.logAllRefUpdates=false',
+  // No background work spawned after the call returns and the vet is behind us.
+  '-c', 'gc.auto=0',
+  '-c', 'maintenance.auto=false',
+];
+
+/**
+ * The repository-local settings git may find here. Anything else — a filter or
+ * textconv driver, include.path, core.worktree, an extension that reads a second
+ * config file — is refused rather than neutralised one key at a time: the list
+ * of settings that run commands grows with git, and an allowlist does not have
+ * to keep up with it. Riff's own init writes only the first two groups; ShipIt's
+ * repository carried nothing else after two weeks of staff running git in it.
+ */
+const SAFE_KEY = new RegExp('^(?:' + [
+  'core\\.(?:repositoryformatversion|filemode|bare|logallrefupdates|ignorecase|precomposeunicode|symlinks)',
+  'user\\.(?:name|email)',
+  'init\\.defaultbranch',
+  'gc\\.auto',
+  'extensions\\.objectformat',
+  'branch\\..+\\.(?:remote|merge)',
+  'remote\\..+\\.(?:url|fetch)',
+].join('|') + ')$', 'i');
+
+/**
+ * Why this repository cannot be trusted with git, or null.
+ *
+ * Separate from the flags above because some routes are not settings: a `.git`
+ * that is a file or a link can point the gateway at another company's
+ * repository, and `commondir` or `objects/info/alternates` borrow another
+ * repository's refs or objects. Reads only — nothing here runs git.
+ */
+export const untrustedRepo = (dir: string): string | null => {
+  const gitDir = join(dir, '.git');
+  if (!existsSync(gitDir)) return null;           // not a repository yet; init makes a real one
+  const st = lstatSync(gitDir);
+  if (!st.isDirectory()) return '.git is not a directory';
+  for (const f of ['commondir', 'objects/info/alternates']) {
+    if (existsSync(join(gitDir, f))) return `.git/${f} borrows from another repository`;
+  }
+  // Git follows a link inside .git as readily as a real file, and this process
+  // runs outside the sandbox that hides everything past the company — a linked
+  // ref, log or object directory would read and write wherever it points.
+  const link = linkIn(gitDir);
+  if (link) return `.git/${link} is a symbolic link`;
+  const cfg = join(gitDir, 'config');
+  if (!existsSync(cfg)) return null;
+  // `--file` never follows include.path, so an include is listed as a key and refused.
+  const keys = execFileSync('git', ['config', '--file', cfg, '--list', '--name-only'],
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n').filter(Boolean);
+  const bad = keys.find((k) => !SAFE_KEY.test(k));
+  return bad ? `.git/config sets ${bad}` : null;
+};
+
+/**
+ * The first symbolic link among the git metadata this process touches, or null.
+ * The top level of .git, all of refs/ and logs/ (small), and the top of
+ * objects/ — a linked fan-out or pack directory is alternates by another name.
+ */
+const linkIn = (gitDir: string): string | null => {
+  const walk = (rel: string, deep: boolean): string | null => {
+    let names: string[];
+    try { names = readdirSync(join(gitDir, rel)); } catch { return null; }
+    for (const n of names) {
+      const r = rel ? `${rel}/${n}` : n;
+      const st = lstatSync(join(gitDir, r));
+      if (st.isSymbolicLink()) return r;
+      const lower = n.toLowerCase();
+      const meta = !rel && (lower === 'refs' || lower === 'logs');
+      if (st.isDirectory() && (deep || meta)) {
+        const hit = walk(r, deep || meta);
+        if (hit) return hit;
+      }
+    }
+    return null;
+  };
+  return walk('', false) ?? walk('objects', false);
+};
+
+/**
+ * Every repository nested below the world root, as world-relative paths.
+ *
+ * A nested repository has its own config, which the vet never reads, and
+ * `git add -A` inspects it to decide what to record. So the gateway's commands
+ * are scoped to leave each one out: the staff's own repositories and worktrees
+ * are theirs to run git in, and never the gateway's. Links are not followed.
+ */
+export const nestedRepos = (root: string): string[] => {
+  const found: string[] = [];
+  const walk = (rel: string): void => {
+    let entries;
+    try { entries = readdirSync(join(root, rel), { withFileTypes: true }); } catch { return; }
+    // Case-insensitively: the volume is a macOS bind mount, where git takes a
+    // differently-cased .GIT for a repository just the same.
+    const isGit = (n: string): boolean => n.toLowerCase() === '.git';
+    if (rel && entries.some((e) => isGit(e.name))) { found.push(rel); return; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.isSymbolicLink() || (!rel && isGit(e.name))) continue;
+      walk(rel ? `${rel}/${e.name}` : e.name);
+    }
+  };
+  walk('');
+  return found;
+};
+
 export class WorldGit {
   #dir: string;
   #clock: Clock;
+  /** The world's own identity check (see World#assertRoot), run before every call. */
+  #checkRoot: () => void;
 
   /**
    * The company's clock, not the machine's.
@@ -28,9 +157,10 @@ export class WorldGit {
    * a test wanting to age a project could not place a commit in the past at
    * all. Identical in production, where this IS the system clock.
    */
-  constructor(dir: string, clock: Clock = systemClock) {
+  constructor(dir: string, clock: Clock = systemClock, checkRoot: () => void = () => {}) {
     this.#dir = dir;
     this.#clock = clock;
+    this.#checkRoot = checkRoot;
   }
 
   #git(args: string[], env?: Record<string, string>): string {
@@ -47,7 +177,8 @@ export class WorldGit {
     // Per-invocation rather than `git config --global`: HOME here is a tmpfs,
     // so a config written into it is gone on the next restart, and a control
     // that survives only until reboot is not a control.
-    return execFileSync('git', ['-c', `safe.directory=${this.#dir}`, '-C', this.#dir, ...args], {
+    this.#vet();
+    return execFileSync('git', [...INERT, '-c', `safe.directory=${this.#dir}`, '-C', this.#dir, ...args], {
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
       // Capture stderr rather than inheriting it. Several calls here are
@@ -58,6 +189,18 @@ export class WorldGit {
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(env ? { env: { ...process.env, ...env } } : {}),
     }).trim();
+  }
+
+  /**
+   * Refuse to run git in a repository that could make it run something, or
+   * reach past the company. See untrustedRepo. Every call, not cached: a
+   * cache keyed on file metadata can be matched by a rewrite, and one config
+   * listing costs little beside the git call it guards.
+   */
+  #vet(): void {
+    this.#checkRoot();
+    const why = untrustedRepo(this.#dir);
+    if (why) throw new Error(`refusing to run git in ${this.#dir}: ${why}`);
   }
 
   init(): void {
@@ -98,8 +241,13 @@ export class WorldGit {
     ]);
   }
 
+  /** A pathspec for the whole world less every nested repository. See nestedRepos. */
+  #scope(): string[] {
+    return ['--', '.', ...nestedRepos(this.#dir).map((r) => `:(exclude,literal)${r}`)];
+  }
+
   isDirty(): boolean {
-    return this.#git(['status', '--porcelain']).length > 0;
+    return this.#git(['status', '--porcelain', '--ignore-submodules=all', ...this.#scope()]).length > 0;
   }
 
   /**
@@ -128,8 +276,9 @@ export class WorldGit {
    * Returns the sha, or null when there was nothing to record.
    */
   commitAs(actor: { id: string; name: string }, message: string): string | null {
-    this.#git(['add', '-A']);
-    const staged = this.#git(['diff', '--cached', '--name-only']);
+    const scope = this.#scope();
+    this.#git(['add', '-A', ...scope]);
+    const staged = this.#git(['diff', '--cached', '--name-only', '--ignore-submodules=all', ...scope]);
     if (!staged) return null;
 
     const at = this.#clock.now().toISOString();

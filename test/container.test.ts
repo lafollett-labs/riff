@@ -628,7 +628,7 @@ describe('one company cannot read another', () => {
     // Everything outside allowWrite is read-only inside the sandbox, so a
     // missing home directory turns `npm install` into EROFS. Marlow hit this
     // on the first shift under the sandbox.
-    assert.match(staff, /allowWrite: \[dirname\(worldRoot\), home\('\.npm'\), home\('\.cache'\)/);
+    assert.match(staff, /allowWrite: \[dirname\(worldRoot\), worldRoot, home\('\.npm'\), home\('\.cache'\)/);
   });
 
   test('the container ships what the Linux sandbox needs', () => {

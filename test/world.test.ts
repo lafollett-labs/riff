@@ -281,7 +281,9 @@ describe('git works on a world the host presents under another uid', () => {
     const git = readFileSync(new URL('../src/worldfs/git.ts', import.meta.url), 'utf8');
     assert.match(git, /'-c', `safe\.directory=\$\{this\.#dir\}`/,
       'git calls must pass safe.directory for the world root');
-    const call = git.match(/execFileSync\('git',[^)]*\)/s)?.[0] ?? '';
+    // The call that runs in the world — the other one only lists a config file.
+    const call = [...git.matchAll(/execFileSync\('git',[^)]*\)/gs)].map((m) => m[0])
+      .find((c) => c.includes("'-C'")) ?? '';
     assert.ok(call.indexOf('safe.directory') < call.indexOf("'-C'"),
       'safe.directory must come before -C, or git parses it as a subcommand arg');
   });

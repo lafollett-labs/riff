@@ -104,6 +104,12 @@ export const classifyPath = (world: World, actor: AgentId, raw: string): Where =
   if (resolved === base) return { kind: 'commons' };
   const rel = resolved.slice(base.length + 1);
   const parts = rel.split(sep);
+  // The world's own repository is Riff's, not the company's. The gateway runs
+  // git over it outside the shift sandbox, so a hook or a config line written
+  // here by a file tool — which runs outside bubblewrap too — would run as the
+  // gateway. It fell through to "commons" below and was writable. Compared
+  // case-insensitively: the volume is a macOS bind mount, where .GIT is .git.
+  if (parts[0]?.toLowerCase() === '.git') return { kind: 'outside' };
   if (parts[0] === 'commons') return { kind: 'commons' };
   if (parts[0] === 'staff' && parts[1]) {
     return parts[1] === slug(actor) ? { kind: 'own' } : { kind: 'other', who: parts[1] };

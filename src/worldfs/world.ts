@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, rmSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join, resolve, sep, dirname, relative } from 'node:path';
 import { parse, stringify, field, type Doc, type Frontmatter } from './frontmatter.ts';
@@ -41,10 +41,33 @@ export class World {
   constructor(root: string, clock: Clock = systemClock) {
     this.#root = resolve(root);
     this.#clock = clock;
-    this.git = new WorldGit(this.#root, clock);
+    this.git = new WorldGit(this.#root, clock, () => this.#assertRoot());
   }
 
-  get root(): string { return this.#root; }
+  /** The directory world/ was when this company opened, by inode. */
+  #rootIno: number | null = null;
+
+  /**
+   * world/ must still be the real directory it was when the company opened.
+   *
+   * The company home is writable from a shift's shell (a coding company keeps
+   * its toolchain there), so the directory named world/ could be moved aside and
+   * replaced. Everything the gateway does resolves through this path — file
+   * reads, the gate's realpath check, a shift's cwd, every commit — and the
+   * gateway runs outside the sandbox that hides the other companies. A link or
+   * a stranger directory here would be followed, so either is refused.
+   */
+  #assertRoot(): void {
+    let st;
+    try { st = lstatSync(this.#root); } catch { return; }   // not made yet: nothing to follow
+    if (st.isSymbolicLink() || !st.isDirectory()) {
+      throw new Error(`world is no longer a directory: ${this.#root}`);
+    }
+    if (this.#rootIno === null) this.#rootIno = st.ino;
+    else if (st.ino !== this.#rootIno) throw new Error(`world was replaced: ${this.#root}`);
+  }
+
+  get root(): string { this.#assertRoot(); return this.#root; }
 
   /**
    * Resolve a staff-supplied relative path, refusing anything that escapes
@@ -52,10 +75,10 @@ export class World {
    * and `..` are both handled by comparing the REALPATH prefix, not the text.
    */
   path(rel: string): string {
-    const abs = resolve(this.#root, rel);
+    const abs = resolve(this.root, rel);
 
     // 1. Textual check — kills `../../etc/passwd` and absolute paths.
-    if (abs !== this.#root && !abs.startsWith(this.#root + sep)) {
+    if (abs !== this.root && !abs.startsWith(this.root + sep)) {
       throw new Error(`path escapes the world: ${rel}`);
     }
 
@@ -66,7 +89,7 @@ export class World {
     let probe = abs;
     while (!existsSync(probe) && dirname(probe) !== probe) probe = dirname(probe);
     const real = realpathSync(probe);
-    const realRoot = realpathSync(this.#root);
+    const realRoot = realpathSync(this.root);
     if (real !== realRoot && !real.startsWith(realRoot + sep)) {
       throw new Error(`path escapes the world via symlink: ${rel}`);
     }
@@ -75,14 +98,14 @@ export class World {
 
   ensure(): void {
     for (const d of ['staff', 'commons', 'commons/bulletin']) {
-      mkdirSync(join(this.#root, d), { recursive: true });
+      mkdirSync(join(this.root, d), { recursive: true });
     }
     this.git.init();
   }
 
   ensureStaff(id: AgentId): void {
     for (const d of ['journal', 'notes', 'drafts']) {
-      mkdirSync(join(this.#root, 'staff', slug(id), d), { recursive: true });
+      mkdirSync(join(this.root, 'staff', slug(id), d), { recursive: true });
     }
   }
 
@@ -180,7 +203,7 @@ export class World {
   reindexNotes(ledger: Ledger): number {
     ledger.clearNoteIndex();
     let n = 0;
-    const staffDir = join(this.#root, 'staff');
+    const staffDir = join(this.root, 'staff');
     if (!existsSync(staffDir)) return 0;
 
     for (const who of readdirSync(staffDir)) {
@@ -191,7 +214,7 @@ export class World {
         const abs = join(notes, f);
         const doc = parse(readFileSync(abs, 'utf8'));
         ledger.indexNote({
-          path: relative(this.#root, abs),
+          path: relative(this.root, abs),
           author: field(doc.data, 'author') ?? who,
           subject: field(doc.data, 'subject'),
           title: field(doc.data, 'title') ?? f.replace(/\.md$/, ''),
@@ -212,14 +235,14 @@ export class World {
   }
 
   listCommons(): string[] {
-    const dir = join(this.#root, 'commons');
+    const dir = join(this.root, 'commons');
     if (!existsSync(dir)) return [];
     const out: string[] = [];
     const walk = (d: string) => {
       for (const f of readdirSync(d)) {
         const abs = join(d, f);
         if (statSync(abs).isDirectory()) walk(abs);
-        else if (f.endsWith('.md')) out.push(relative(this.#root, abs));
+        else if (f.endsWith('.md')) out.push(relative(this.root, abs));
       }
     };
     walk(dir);
@@ -244,7 +267,7 @@ export class World {
    * scratch `.work-mut-*` never counts as work.
    */
   listProjects(): string[] {
-    const dir = join(this.#root, 'projects');
+    const dir = join(this.root, 'projects');
     if (!existsSync(dir)) return [];
     return readdirSync(dir)
       .filter((f) => !f.startsWith('.') && statSync(join(dir, f)).isDirectory())
@@ -264,7 +287,7 @@ export class World {
     // Never let a name climb out of projects/. The gate classifies paths, but
     // this is reachable from a tool argument and must not depend on that.
     if (!name || name.startsWith('.') || name.includes('/') || name.includes('\\')) return false;
-    const abs = join(this.#root, 'projects', name);
+    const abs = join(this.root, 'projects', name);
     if (!existsSync(abs)) return false;
     rmSync(abs, { recursive: true, force: true });
     return true;
@@ -292,7 +315,7 @@ export class World {
   }
 
   listDrafts(id: AgentId): string[] {
-    const dir = join(this.#root, 'staff', slug(id), 'drafts');
+    const dir = join(this.root, 'staff', slug(id), 'drafts');
     if (!existsSync(dir)) return [];
     return readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => `staff/${slug(id)}/drafts/${f}`);
   }

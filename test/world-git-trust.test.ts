@@ -1,6 +1,7 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, symlinkSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, symlinkSync,
+  utimesSync, readdirSync, readFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -103,6 +104,31 @@ describe('the gateway’s git stays inside this company’s repository', () => {
     assert.ok(!existsSync(marker), 'nothing in the nested repository ran');
   });
 
+  test('a nested repository the world ignores does not stop the shift being committed', () => {
+    // Excluding it by pathspec made `git add` refuse: a pathspec naming an
+    // ignored path is an error. ShipIt ignores staff/*/notes/wt-*, and from the
+    // 00:42 deploy on 2026-09-22 every shift's commit threw on Jack's leftover
+    // worktree — no journal commit, no agent.slept, for the whole team.
+    const nested = join(world.root, 'staff', 'juno', 'notes', 'wt-old');
+    mkdirSync(nested, { recursive: true });
+    execFileSync('git', ['-C', nested, 'init', '-q'], { stdio: 'ignore' });
+    writeFileSync(join(world.root, '.gitignore'), '.DS_Store\nstaff/*/notes/wt-*\n');
+    changeSomething();
+    assert.ok(world.git.commitAs({ id: 'juno', name: 'Juno' }, 'work'));
+    assert.equal(world.git.isDirty(), false);
+  });
+
+  test('a nested repository named like pathspec magic keeps its exclusion', () => {
+    const nested = join(world.root, 'staff', 'juno', ':(glob)*');
+    mkdirSync(nested, { recursive: true });
+    execFileSync('git', ['-C', nested, 'init', '-q'], { stdio: 'ignore' });
+    writeFileSync(join(nested, 'inside.md'), 'not the world\'s\n');
+    changeSomething();
+    world.git.commitAs({ id: 'juno', name: 'Juno' }, 'work');
+    const tracked = execFileSync('git', ['-C', world.root, 'ls-files'], { encoding: 'utf8' });
+    assert.doesNotMatch(tracked, /inside\.md|\(glob\)/);
+  });
+
   test('a nested repository is left out whatever the case of its .git', () => {
     // The volume is case-insensitive; git takes .GIT for a repository there.
     const nested = join(world.root, 'staff', 'juno', 'odd');
@@ -119,6 +145,19 @@ describe('the gateway’s git stays inside this company’s repository', () => {
       assert.throws(() => world.git.isDirty(), /symbolic link/, rel);
       rmSync(at, { force: true });
     }
+  });
+
+  test('pruning cannot be pointed at a directory outside the repository', () => {
+    // Prune deletes a stale .git/worktrees/<name> recursively, and git opens a
+    // linked one as the directory it points at — from the gateway, outside the
+    // sandbox. A planted link is refused before anything is removed.
+    const victim = join(dir, 'victim');
+    mkdirSync(victim);
+    writeFileSync(join(victim, 'keep.md'), 'still here\n');
+    mkdirSync(join(world.root, '.git', 'worktrees'), { recursive: true });
+    symlinkSync(victim, join(world.root, '.git', 'worktrees', 'evil'));
+    assert.throws(() => world.git.pruneWorktrees(), /worktrees\/evil is a symbolic link/);
+    assert.ok(existsSync(join(victim, 'keep.md')));
   });
 
   test('a world moved aside and replaced is refused, not followed', () => {
@@ -144,5 +183,69 @@ describe('the file tools cannot write the world’s repository', () => {
   test('a file merely named like it elsewhere is still ordinary work', () => {
     assert.equal(classifyPath(world, 'juno', 'commons/.git-notes.md').kind, 'commons');
     assert.equal(classifyPath(world, 'juno', 'staff/juno/.gitignore').kind, 'own');
+  });
+});
+
+describe('worktrees the staff removed are forgotten on their behalf', () => {
+  // The sandbox mounts each .git/worktrees/<name> read-only, so a shift's own
+  // `git worktree prune` answers EBUSY and every removed worktree left its entry.
+  const add = (name: string) => {
+    changeSomething();
+    world.git.commitAs({ id: 'ada', name: 'Ada' }, 'work');
+    const at = join(dir, 'wt', name);
+    raw('worktree', 'add', '-q', '--detach', at);
+    return at;
+  };
+  const entries = () => readdirSync(join(world.root, '.git', 'worktrees')).sort();
+  const age = (name: string, hours: number) => {
+    const t = new Date(Date.now() - hours * 3_600_000);
+    // What git reads the age from, for an entry whose checkout is gone.
+    utimesSync(join(world.root, '.git', 'worktrees', name, 'index'), t, t);
+  };
+
+  test('a gone checkout is pruned, a live one and a fresh one are kept', () => {
+    const gone = add('gone');
+    add('live');
+    const fresh = add('fresh');
+    rmSync(gone, { recursive: true, force: true });
+    rmSync(fresh, { recursive: true, force: true });
+    age('gone', 3);
+    age('live', 3);
+    // `fresh` may be a live checkout in a shift's private /tmp, which reads as
+    // gone from the gateway; nothing younger than a shift can live is touched.
+    world.git.pruneWorktrees();
+    assert.deepEqual(entries(), ['fresh', 'live']);
+  });
+});
+
+describe('the gateway prunes inside the company\'s own view', () => {
+  test('git runs under bwrap with the confinement it was given, and still prunes', () => {
+    // A stand-in bwrap on PATH records its argv and runs what follows `--`,
+    // since bubblewrap is Linux-only and this suite runs anywhere.
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    const log = join(dir, 'bwrap.argv');
+    writeFileSync(join(bin, 'bwrap'),
+      `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`,
+      { mode: 0o755 });
+    const path = process.env['PATH'];
+    process.env['PATH'] = `${bin}:${path ?? ''}`;
+    try {
+      changeSomething();
+      world.git.commitAs({ id: 'ada', name: 'Ada' }, 'work');
+      const at = join(dir, 'wt', 'gone');
+      raw('worktree', 'add', '-q', '--detach', at);
+      rmSync(at, { recursive: true, force: true });
+      const t = new Date(Date.now() - 3 * 3_600_000);
+      utimesSync(join(world.root, '.git', 'worktrees', 'gone', 'index'), t, t);
+      world.git.pruneWorktrees(['--ro-bind', '/', '/']);
+      const argv = readFileSync(log, 'utf8').split('\n');
+      assert.deepEqual(argv.slice(0, 4), ['--ro-bind', '/', '/', '--']);
+      assert.equal(argv[4], 'git');
+      assert.ok(argv.includes('prune'));
+      assert.ok(!existsSync(join(world.root, '.git', 'worktrees', 'gone')));
+    } finally {
+      process.env['PATH'] = path;
+    }
   });
 });

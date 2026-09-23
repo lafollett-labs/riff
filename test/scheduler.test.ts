@@ -219,3 +219,14 @@ describe('the interval paces the company, not one person at a time', () => {
     assert.equal(roundIsDue(t0 + 15 * 60_000, t0, 15 * 60_000), true);
   });
 });
+
+describe('a shift that throws past its own error handling still leaves a record', () => {
+  test('the wake records an unexpected throw as a failure instead of letting #track swallow it', () => {
+    // A git refusal after the result threw out of tick; #track's catch is
+    // silent, so the ledger showed three wakes and no shift ever ending.
+    const src = readFileSync(new URL('../src/runtime/scheduler.ts', import.meta.url), 'utf8');
+    const wake = src.slice(src.indexOf('async #wake('), src.indexOf('nudge(id: AgentId)'));
+    assert.match(wake, /\} catch \(e\) \{[\s\S]*ledger\.emit\(a\.id, 'agent\.failed'/);
+    assert.ok(wake.indexOf('} catch (e) {') < wake.indexOf('} finally {'), 'caught before the finally reschedules');
+  });
+});

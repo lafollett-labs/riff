@@ -92,8 +92,10 @@ export const untrustedRepo = (dir: string): string | null => {
 
 /**
  * The first symbolic link among the git metadata this process touches, or null.
- * The top level of .git, all of refs/ and logs/ (small), and the top of
- * objects/ — a linked fan-out or pack directory is alternates by another name.
+ * The top level of .git, all of refs/ and logs/ (small), the top of objects/ —
+ * a linked fan-out or pack directory is alternates by another name — and the
+ * top of worktrees/, because pruning deletes a stale entry there recursively
+ * and git opens a linked one as the directory it points at.
  */
 const linkIn = (gitDir: string): string | null => {
   const walk = (rel: string, deep: boolean): string | null => {
@@ -112,7 +114,7 @@ const linkIn = (gitDir: string): string | null => {
     }
     return null;
   };
-  return walk('', false) ?? walk('objects', false);
+  return walk('', false) ?? walk('objects', false) ?? walk('worktrees', false);
 };
 
 /**
@@ -163,7 +165,7 @@ export class WorldGit {
     this.#checkRoot = checkRoot;
   }
 
-  #git(args: string[], env?: Record<string, string>): string {
+  #git(args: string[], env?: Record<string, string>, confine?: string[]): string {
     // `safe.directory` on every call, not in a config file.
     //
     // The world lives on a bind mount, and the uid the host presents it under
@@ -178,7 +180,8 @@ export class WorldGit {
     // so a config written into it is gone on the next restart, and a control
     // that survives only until reboot is not a control.
     this.#vet();
-    return execFileSync('git', [...INERT, '-c', `safe.directory=${this.#dir}`, '-C', this.#dir, ...args], {
+    const argv = [...INERT, '-c', `safe.directory=${this.#dir}`, '-C', this.#dir, ...args];
+    return execFileSync(confine ? 'bwrap' : 'git', confine ? [...confine, '--', 'git', ...argv] : argv, {
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
       // Capture stderr rather than inheriting it. Several calls here are
@@ -241,9 +244,33 @@ export class WorldGit {
     ]);
   }
 
-  /** A pathspec for the whole world less every nested repository. See nestedRepos. */
+  /**
+   * A pathspec for the whole world less every nested repository. See nestedRepos.
+   *
+   * Only the ones the world does not already ignore: `git add` refuses any
+   * pathspec that names an ignored path, exclusions included, and ignored ones
+   * are never added anyway. From the 00:42 deploy on 2026-09-22 until this, every
+   * shift's commit in ShipIt threw on one gitignored leftover worktree.
+   */
   #scope(): string[] {
-    return ['--', '.', ...nestedRepos(this.#dir).map((r) => `:(exclude,literal)${r}`)];
+    const nested = nestedRepos(this.#dir);
+    const ignored = this.#ignored(nested);
+    return ['--', '.', ...nested.filter((r) => !ignored.has(r)).map((r) => `:(exclude,literal)${r}`)];
+  }
+
+  #ignored(paths: string[]): Set<string> {
+    if (!paths.length) return new Set();
+    try {
+      // `./` first: the names are the staff's, and a leading `:(...)` is
+      // pathspec magic, which check-ignore refuses outright — one oddly named
+      // directory would stop every commit. It echoes each path as given.
+      return new Set(this.#git(['check-ignore', '--', ...paths.map((r) => `./${r}`)])
+        .split('\n').filter(Boolean).map((r) => r.replace(/^\.\//, '')));
+    } catch (e) {
+      // check-ignore answers 1 when nothing it was given is ignored.
+      if ((e as { status?: number }).status === 1) return new Set();
+      throw e;
+    }
   }
 
   isDirty(): boolean {
@@ -288,6 +315,27 @@ export class WorldGit {
       'commit', '-q', '-m', message,
     ], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at });
     return this.#git(['rev-parse', 'HEAD']);
+  }
+
+  /**
+   * Forget linked worktrees whose checkout is gone.
+   *
+   * The staff cannot do this themselves: the shift sandbox mounts each
+   * `.git/worktrees/<name>` read-only piece by piece, so `git worktree prune`
+   * from a shift answers EBUSY, and every worktree they removed left its entry
+   * behind — 25 in ShipIt on 2026-09-22, with more after every run of its
+   * commit hook. Two hours of grace: a worktree checked out in a shift's
+   * private /tmp is invisible from here and would read as gone, and no shift
+   * lives that long. A locked worktree is kept, as git always keeps it.
+   *
+   * `confine` is the bubblewrap view to run it in (cliConfinement). Prune
+   * deletes stale entries recursively, and the vet's link check is a moment
+   * before git walks: a colleague's shell still running could plant a link in
+   * between. Inside the company's own view, whatever a link names resolves
+   * within the company — and whether a path exists is answered there too.
+   */
+  pruneWorktrees(confine?: string[]): void {
+    this.#git(['worktree', 'prune', '--expire=2.hours.ago'], undefined, confine);
   }
 
   /**

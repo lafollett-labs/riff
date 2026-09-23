@@ -6,7 +6,7 @@ import type { TranscriptStore } from '../ledger/transcript.ts';
 import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
-import { tick, type TickResult } from './staff.ts';
+import { tick, withoutSecrets, type TickResult } from './staff.ts';
 import { worstWindow, isWeekly, isKnownLimit } from './limits.ts';
 import { roundIsDue } from './cadence.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
@@ -528,7 +528,7 @@ export class Scheduler {
 
   #track(p: Promise<void>): void {
     this.#flights.add(p);
-    void p.catch(() => { /* #wake reports its own failures */ })
+    void p.catch(() => { /* #wake records its own failures */ })
       .finally(() => this.#flights.delete(p));
   }
 
@@ -633,8 +633,9 @@ export class Scheduler {
   async #wake(a: Agent): Promise<void> {
     this.#inFlight.add(a.id);
     this.#ticks++;
+    let r: TickResult | null = null;
     try {
-      const r = await tick({
+      r = await tick({
         agent: a, ledger: this.#d.ledger, gate: this.#d.gate,
         world: this.#d.world, clock: this.#d.clock,
         ...(this.#d.staff ? { staff: this.#d.staff() } : {}),
@@ -663,11 +664,22 @@ export class Scheduler {
       // them rather than from whichever arrived last.
       for (const [, w] of r.windows ?? []) this.#applyRateLimit(w);
       if (r.rateLimit) this.#applyRateLimit(r.rateLimit);
-      this.#d.onTick?.(r);
+    } catch (e) {
+      // tick records the failures it expects and returns. A throw is one it
+      // did not, and #track swallows it: from 00:42 to 02:30 on 2026-09-22 every
+      // ShipIt shift ended in a git refusal after its result, and the ledger
+      // showed three people waking and nobody ever finishing.
+      const msg = withoutSecrets(e instanceof Error ? e.message : String(e));
+      try {
+        this.#d.ledger.emit(a.id, 'agent.failed', null,
+          { error: `the shift could not be recorded: ${msg}`.slice(0, 2000) });
+      } catch { /* a ledger that cannot take this cannot take anything */ }
     } finally {
       this.#inFlight.delete(a.id);
       this.#nextDue.set(a.id, Date.now() + this.#intervalFor(a));
     }
+    // Outside the catch: a listener's throw is not the shift failing.
+    if (r) this.#d.onTick?.(r);
   }
 
   /** Wake someone immediately — used by "call a meeting" and by direct address. */

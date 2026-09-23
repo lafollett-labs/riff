@@ -1,6 +1,6 @@
 import type { Decision, GateRequest } from '../core/types.ts';
 import type { Ledger } from '../ledger/ledger.ts';
-import type { Constitution } from './rules.ts';
+import { COMMONS_DEPTH, type Constitution } from './rules.ts';
 
 /**
  * Every action any agent attempts crosses this. The runtime exposes no tool
@@ -133,6 +133,14 @@ export class Gate {
     // removals. Refusing here is what turns variation into selection.
     if (capability === 'world.write' && req.target?.startsWith('commons/')) {
       const target = req.target;
+      // Past the depth the listing searches, a document would be held but
+      // never counted, and the ceiling would stop meaning anything.
+      if (target.split('/').length - 2 > COMMONS_DEPTH) {
+        return {
+          kind: 'deny', rule: 'R6.commons_depth',
+          reason: `the commons is searched ${COMMONS_DEPTH} folders deep; write this document nearer the top.`,
+        };
+      }
       if (!this.#commons.exists(target)) {
         const count = this.#commons.count();
         if (count >= c.commonsCeiling) {

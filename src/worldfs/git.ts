@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { realpathSync, existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { lexists, readNoFollow, writeWithin } from './within.ts';
+import { lexists, readWithin, writeWithin } from './within.ts';
 import { join } from 'node:path';
 import { systemClock, type Clock } from '../core/clock.ts';
 
@@ -44,6 +44,16 @@ const INERT = [
 ];
 
 /**
+ * The longest any git call may hold the gateway, whose loop every company
+ * shares. The vet refuses the special files it can see; this bounds whatever
+ * it cannot, such as a FIFO planted among the loose objects it does not walk.
+ * On ShipIt's world (4,096 files) status takes 63ms and a whole-world add 22ms.
+ */
+export const GIT_TIMEOUT_MS = 10_000;
+
+const timedOut = (e: unknown): boolean => (e as NodeJS.ErrnoException).code === 'ETIMEDOUT';
+
+/**
  * The repository-local settings git may find here. Anything else — a filter or
  * textconv driver, include.path, core.worktree, an extension that reads a second
  * config file — is refused rather than neutralised one key at a time: the list
@@ -80,32 +90,36 @@ export const untrustedRepo = (dir: string): string | null => {
   // Git follows a link inside .git as readily as a real file, and this process
   // runs outside the sandbox that hides everything past the company — a linked
   // ref, log or object directory would read and write wherever it points.
-  const link = linkIn(gitDir);
-  if (link) return `.git/${link} is a symbolic link`;
+  const odd = oddIn(gitDir);
+  if (odd) return `.git/${odd.path} is ${odd.what}`;
   const cfg = join(gitDir, 'config');
   if (!existsSync(cfg)) return null;
   // `--file` never follows include.path, so an include is listed as a key and refused.
   const keys = execFileSync('git', ['config', '--file', cfg, '--list', '--name-only'],
-    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).split('\n').filter(Boolean);
+    { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout: GIT_TIMEOUT_MS }).split('\n').filter(Boolean);
   const bad = keys.find((k) => !SAFE_KEY.test(k));
   return bad ? `.git/config sets ${bad}` : null;
 };
 
 /**
- * The first symbolic link among the git metadata this process touches, or null.
- * The top level of .git, all of refs/ and logs/ (small), the top of objects/ —
+ * The first link, FIFO, socket or device among the git metadata this process
+ * touches, or null. Git reading a FIFO at .git/config or HEAD waits for a writer
+ * that never comes, synchronously, holding every company's gateway.
+ *
+ * Walked: the top level of .git, all of refs/ and logs/ (small), the top of objects/ —
  * a linked fan-out or pack directory is alternates by another name — and the
  * top of worktrees/, because pruning deletes a stale entry there recursively
  * and git opens a linked one as the directory it points at.
  */
-const linkIn = (gitDir: string): string | null => {
-  const walk = (rel: string, deep: boolean): string | null => {
+const oddIn = (gitDir: string): { path: string; what: string } | null => {
+  const walk = (rel: string, deep: boolean): { path: string; what: string } | null => {
     let names: string[];
     try { names = readdirSync(join(gitDir, rel)); } catch { return null; }
     for (const n of names) {
       const r = rel ? `${rel}/${n}` : n;
       const st = lstatSync(join(gitDir, r));
-      if (st.isSymbolicLink()) return r;
+      if (st.isSymbolicLink()) return { path: r, what: 'a symbolic link' };
+      if (!st.isFile() && !st.isDirectory()) return { path: r, what: 'neither a file nor a folder' };
       const lower = n.toLowerCase();
       const meta = !rel && (lower === 'refs' || lower === 'logs');
       if (st.isDirectory() && (deep || meta)) {
@@ -160,6 +174,18 @@ export class WorldGit {
    * a test wanting to age a project could not place a commit in the past at
    * all. Identical in production, where this IS the system clock.
    */
+  /**
+   * Why git stopped being run here, once a call timed out.
+   *
+   * A timeout alone turned a planted FIFO from a permanent hang into one of
+   * GIT_TIMEOUT_MS on every later call — each commit, each vitals poll — with
+   * the FIFO still there. After the first, nothing more is run until the
+   * company is reopened, which the operator does once the file is gone.
+   */
+  #stalled: string | null = null;
+  /** Told once, when git is first stopped here; the company records it in its ledger. */
+  onStall: (why: string) => void = () => {};
+
   constructor(dir: string, clock: Clock = systemClock, checkRoot: () => void = () => {}) {
     this.#dir = dir;
     this.#clock = clock;
@@ -182,9 +208,10 @@ export class WorldGit {
     // that survives only until reboot is not a control.
     this.#vet();
     const argv = [...INERT, '-c', `safe.directory=${this.#dir}`, '-C', this.#dir, ...args];
-    return execFileSync(confine ? 'bwrap' : 'git', confine ? [...confine, '--', 'git', ...argv] : argv, {
+    return this.#bounded(`git ${args[0]}`, () => execFileSync(confine ? 'bwrap' : 'git', confine ? [...confine, '--', 'git', ...argv] : argv, {
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
+      timeout: GIT_TIMEOUT_MS,
       // Capture stderr rather than inheriting it. Several calls here are
       // probes whose failure is expected and handled — notably the
       // "is this already a repo?" check on a directory that is not one yet.
@@ -192,7 +219,19 @@ export class WorldGit {
       // run and make a healthy bootstrap look broken.
       stdio: ['ignore', 'pipe', 'pipe'],
       ...(env ? { env: { ...process.env, ...env } } : {}),
-    }).trim();
+    }).trim());
+  }
+
+  #bounded<T>(what: string, run: () => T): T {
+    try {
+      return run();
+    } catch (e) {
+      if (!timedOut(e)) throw e;
+      this.#stalled = `${what} ran past ${GIT_TIMEOUT_MS / 1000}s; something in the repository blocks git ` +
+        '(a FIFO among the objects, say). Remove it and reopen the company.';
+      this.onStall(this.#stalled);
+      throw new Error(`refusing to run git in ${this.#dir}: ${this.#stalled}`);
+    }
   }
 
   /**
@@ -202,8 +241,9 @@ export class WorldGit {
    * listing costs little beside the git call it guards.
    */
   #vet(): void {
+    if (this.#stalled) throw new Error(`refusing to run git in ${this.#dir}: ${this.#stalled}`);
     this.#checkRoot();
-    const why = untrustedRepo(this.#dir);
+    const why = this.#bounded('the repository vet', () => untrustedRepo(this.#dir));
     if (why) throw new Error(`refusing to run git in ${this.#dir}: ${why}`);
   }
 
@@ -290,8 +330,9 @@ export class WorldGit {
   ignore(pattern: string): void {
     const path = join(this.#dir, '.gitignore');
     // A shift can make .gitignore a link to another company's config.json;
-    // read through it and the append below would be written there.
-    const cur = lexists(path) ? readNoFollow(path) : '';
+    // read through it and the append below would be written there. A link
+    // reads as nothing here, and the write refuses it.
+    const cur = readWithin(this.#dir, path) ?? '';
     if (cur.split('\n').some((l) => l.trim() === pattern)) return;
     writeWithin(this.#dir, path, (cur && !cur.endsWith('\n') ? cur + '\n' : cur) + pattern + '\n');
     this.#git(['add', '.gitignore']);   // works whether it is new or already tracked

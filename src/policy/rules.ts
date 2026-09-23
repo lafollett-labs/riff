@@ -1,6 +1,14 @@
 import type { AgentId, Capability } from '../core/types.ts';
 
 /**
+ * How many folders below commons/ a document may sit. ShipIt's deepest after
+ * three weeks is one. The listing stops here, so a shift cannot make it — and
+ * every count taken from it — as expensive as it likes; the gate refuses a
+ * write past it, so what the tools write and what the ceiling counts agree.
+ */
+export const COMMONS_DEPTH = 8;
+
+/**
  * The company's constitution.
  *
  * Seven rules — R7 only when a portfolio ceiling is set. The enforced ones

@@ -42,6 +42,26 @@ afterEach(() => {
 });
 
 describe('a company travels whole', () => {
+  test('a link in commons neither loops the export nor counts a neighbour\'s documents', () => {
+    const res = JSON.parse(run(`${PRELUDE}
+      const { symlinkSync, mkdirSync, writeFileSync } = await import('node:fs');
+      const { join } = await import('node:path');
+      const r = new Registry(systemClock);
+      const a = r.found({ name: 'Loop Works', business: 'b', ceo: 'Rune', chair: 'Cali' });
+      if (!a.ok) throw new Error('found failed');
+      a.company.world.writeCommons('commons/one.md', { title: 'One' }, 'Body.');
+      const next = '${home}/next-door';
+      mkdirSync(next, { recursive: true });
+      writeFileSync(join(next, 'theirs.md'), 'x');
+      const commons = join(a.company.world.root, 'commons');
+      symlinkSync('.', join(commons, 'loop'));
+      symlinkSync(next, join(commons, 'next'));
+      await r.close('loop-works');
+      console.log(JSON.stringify(T.exportCompany('loop-works', '${out}/loop.tar.gz').counts));
+    `).trim().split('\n').pop()!);
+    assert.equal(res.commons, 1);
+  });
+
   test('export then import reproduces the ledger, the world and the git history', () => {
     const res = JSON.parse(run(`${PRELUDE}
       const r = new Registry(systemClock);
@@ -222,7 +242,10 @@ describe('a company travels whole', () => {
       const r = new Registry(systemClock);
       const a = r.found({ name: 'Busy Co', business: 'x', ceo: 'Bee', chair: 'Cali' });
       if (!a.ok) throw new Error('found failed');
-      await r.setRunning('busy-co', true);
+      // The recorded intent, not a started run: a run would spend a real shift
+      // against a keyproxy the test has not got, and close waits it out.
+      const { setRunningFlag } = await import('${cwd}/src/core/config.ts');
+      setRunningFlag(a.company.cfg.home, true);
       const wantedBefore = r.list().find((c) => c.slug === 'busy-co').wanted;
       await r.close('busy-co');
       const file = '${out}/b.tar.gz';

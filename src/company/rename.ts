@@ -6,7 +6,8 @@
  * founded as `ceo` becomes a person — and doing it by hand leaves an id nobody
  * answers to scattered through the ledger.
  */
-import { renameSync, existsSync } from 'node:fs';
+import { existsSync } from 'node:fs';
+import { renameWithin } from '../worldfs/within.ts';
 import { join } from 'node:path';
 import type { Ledger } from '../ledger/ledger.ts';
 import type { World } from '../worldfs/world.ts';
@@ -81,10 +82,11 @@ export const renameAgent = (
   }
 
   if (oldId !== newId) {
-    // Through path(): a staff/ that is a link would move folders next door.
+    // Reached without following a link: a shell swapping staff/ for a link
+    // while the operator renames would have a neighbour's folder moved.
     const from = world.path(join('staff', oldId));
     const to = world.path(join('staff', newId));
-    if (existsSync(from) && !existsSync(to)) renameSync(from, to);
+    if (existsSync(from) && !existsSync(to)) renameWithin(world.root, from, to);
   }
 
   ledger.emit('company', 'agent.renamed', newId, { from: oldId, to: newId, name });

@@ -6,7 +6,7 @@ import type { TranscriptStore } from '../ledger/transcript.ts';
 import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
-import { tick, withoutSecrets, type TickResult } from './staff.ts';
+import { tick, withoutSecrets, type TickDeps, type TickResult } from './staff.ts';
 import { worstWindow, isWeekly, isKnownLimit } from './limits.ts';
 import { roundIsDue } from './cadence.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
@@ -631,35 +631,44 @@ export class Scheduler {
     }
   }
 
+  /**
+   * What a shift is handed: the agent, the company's state and the engine's.
+   * Public so the wiring can be checked from the registry down, which is where
+   * a company that declared no services once lost its runtime token.
+   */
+  shiftDeps(a: Agent): TickDeps {
+    return {
+      agent: a, ledger: this.#d.ledger, gate: this.#d.gate,
+      world: this.#d.world, clock: this.#d.clock,
+      ...(this.#d.staff ? { staff: this.#d.staff() } : {}),
+      ...(this.#opts.perTickBudgetUsd != null ? { maxBudgetUsd: this.#opts.perTickBudgetUsd } : {}),
+      maxTurns: this.#opts.maxTurns,
+      rotateAtContextPct: this.#opts.rotateAtContextPct,
+      rotateAtSessionTurns: this.#opts.rotateAtSessionTurns,
+      ...(this.#opts.shiftTimeoutMs > 0 ? { shiftTimeoutMs: this.#opts.shiftTimeoutMs } : {}),
+      ...(this.#opts.shiftTrace ? { shiftTrace: true } : {}),
+      // The engine's own state, so the shift can wind down before the cap and
+      // pace on the window instead of learning it by being throttled.
+      ...(this.#opts.until != null ? { sessionEndsAt: this.#opts.until } : {}),
+      ...(this.#windows.size ? { usageWindows: this.windows.map(
+        (w) => ({ kind: w.kind, utilization: w.utilization })) } : {}),
+      ...(this.#opts.cacheDir ? { cacheDir: this.#opts.cacheDir } : {}),
+      ...(this.#opts.configDir ? { configDir: this.#opts.configDir } : {}),
+      ...(this.#d.transcript ? { transcript: this.#d.transcript } : {}),
+      ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
+      ...(this.#d.release ? { release: this.#d.release } : {}),
+      ...(this.#d.companySlug ? { companySlug: this.#d.companySlug } : {}),
+      ...(this.#d.services && Object.keys(this.#d.services).length ? { services: this.#d.services } : {}),
+      signal: this.#abort.signal,
+    };
+  }
+
   async #wake(a: Agent): Promise<void> {
     this.#inFlight.add(a.id);
     this.#ticks++;
     let r: TickResult | null = null;
     try {
-      r = await tick({
-        agent: a, ledger: this.#d.ledger, gate: this.#d.gate,
-        world: this.#d.world, clock: this.#d.clock,
-        ...(this.#d.staff ? { staff: this.#d.staff() } : {}),
-        ...(this.#opts.perTickBudgetUsd != null ? { maxBudgetUsd: this.#opts.perTickBudgetUsd } : {}),
-        maxTurns: this.#opts.maxTurns,
-        rotateAtContextPct: this.#opts.rotateAtContextPct,
-        rotateAtSessionTurns: this.#opts.rotateAtSessionTurns,
-        ...(this.#opts.shiftTimeoutMs > 0 ? { shiftTimeoutMs: this.#opts.shiftTimeoutMs } : {}),
-        ...(this.#opts.shiftTrace ? { shiftTrace: true } : {}),
-        // The engine's own state, so the shift can wind down before the cap and
-        // pace on the window instead of learning it by being throttled.
-        ...(this.#opts.until != null ? { sessionEndsAt: this.#opts.until } : {}),
-        ...(this.#windows.size ? { usageWindows: this.windows.map(
-          (w) => ({ kind: w.kind, utilization: w.utilization })) } : {}),
-        ...(this.#opts.cacheDir ? { cacheDir: this.#opts.cacheDir } : {}),
-        ...(this.#opts.configDir ? { configDir: this.#opts.configDir } : {}),
-        ...(this.#d.transcript ? { transcript: this.#d.transcript } : {}),
-        ...(this.#d.connectors ? { connectors: this.#d.connectors } : {}),
-        ...(this.#d.release ? { release: this.#d.release } : {}),
-        ...(this.#d.companySlug ? { companySlug: this.#d.companySlug } : {}),
-        ...(this.#d.services && Object.keys(this.#d.services).length ? { services: this.#d.services } : {}),
-        signal: this.#abort.signal,
-      });
+      r = await tick(this.shiftDeps(a));
       this.#spentToday += r.costUsd;
       // Every window the shift saw, so the fullest one is chosen from all of
       // them rather than from whichever arrived last.

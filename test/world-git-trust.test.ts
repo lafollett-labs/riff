@@ -1,12 +1,13 @@
-import { test, describe, beforeEach, afterEach } from 'node:test';
+import { test, describe, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, existsSync, chmodSync, mkdirSync, renameSync, symlinkSync,
   utimesSync, readdirSync, readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import cp, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { World } from '../src/worldfs/world.ts';
-import { nestedRepos } from '../src/worldfs/git.ts';
+import { GIT_TIMEOUT_MS, nestedRepos } from '../src/worldfs/git.ts';
 import { classifyPath } from '../src/runtime/permissions.ts';
 import { fixedClock } from '../src/core/clock.ts';
 
@@ -16,6 +17,24 @@ import { fixedClock } from '../src/core/clock.ts';
  * run past bubblewrap, where master.key and every other company are readable.
  * Each test plants one such route and checks that nothing runs.
  */
+/**
+ * bwrap is Linux-only and a stand-in on PATH cannot run from a noexec /tmp
+ * (the factory's), so the call is intercepted instead: record the argv, then
+ * run what follows `--` unconfined.
+ */
+const underStandInBwrap = <T>(fn: (argvs: string[][]) => T): T => {
+  const argvs: string[][] = [];
+  const real = cp.execFileSync;
+  mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: object) => {
+    if (cmd !== 'bwrap') return real(cmd, args, opts);
+    argvs.push(args);
+    const at = args.indexOf('--');
+    return real(args[at + 1]!, args.slice(at + 2), opts);
+  }) as typeof real);
+  syncBuiltinESMExports();
+  try { return fn(argvs); } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+};
+
 let dir: string;
 let world: World;
 let marker: string;
@@ -147,6 +166,60 @@ describe('the gateway’s git stays inside this company’s repository', () => {
     }
   });
 
+  test('a FIFO in the metadata is refused rather than holding the gateway', () => {
+    // git reading a FIFO at .git/config or HEAD waits for a writer, synchronously,
+    // on the loop every company shares.
+    for (const rel of ['config', 'HEAD', 'refs/heads/stuck']) {
+      const at = join(world.root, '.git', rel);
+      const was = existsSync(at) ? readFileSync(at) : null;
+      rmSync(at, { force: true });
+      execFileSync('mkfifo', [at]);
+      assert.throws(() => world.git.isDirty(), /neither a file nor a folder/, rel);
+      rmSync(at, { force: true });
+      if (was) writeFileSync(at, was);
+    }
+  });
+
+  test('every git call the gateway makes is bounded in time', () => {
+    // The vet cannot see everything git may open — a FIFO among the loose
+    // objects, say — so a hang there has to end as a refused call.
+    const timeouts: unknown[] = [];
+    const real = cp.execFileSync;
+    mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: { timeout?: number }) => {
+      if (cmd === 'git') timeouts.push(opts?.timeout);
+      return real(cmd, args, opts);
+    }) as typeof real);
+    syncBuiltinESMExports();
+    try { changeSomething(); world.git.isDirty(); } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.ok(timeouts.length >= 2, 'the vet and the call itself both ran git');
+    assert.ok(timeouts.every((t) => t === GIT_TIMEOUT_MS), `timeouts: ${timeouts}`);
+  });
+
+  test('after one git call times out, the next is refused without running git', () => {
+    // A timeout alone made a planted FIFO a stall of GIT_TIMEOUT_MS on every
+    // later commit and vitals poll, with the FIFO still in place.
+    const stalls: string[] = [];
+    world.git.onStall = (why) => stalls.push(why);
+    let gitRuns = 0;
+    const real = cp.execFileSync;
+    mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: object) => {
+      if (cmd !== 'git') return real(cmd, args, opts);
+      gitRuns++;
+      if (args.includes('status')) throw Object.assign(new Error('spawnSync git ETIMEDOUT'), { code: 'ETIMEDOUT' });
+      return real(cmd, args, opts);
+    }) as typeof real);
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => world.git.isDirty(), /ran past/);
+      const before = gitRuns;
+      assert.throws(() => world.git.isDirty(), /ran past/);
+      assert.throws(() => world.git.since('1.day'), /ran past/);
+      assert.equal(gitRuns, before, 'nothing more was run');
+    } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.equal(stalls.length, 1, 'told once');
+    assert.match(stalls[0]!, /reopen the company/);
+  });
+
   test('pruning cannot be pointed at a directory outside the repository', () => {
     // Prune deletes a stale .git/worktrees/<name> recursively, and git opens a
     // linked one as the directory it points at — from the gateway, outside the
@@ -220,32 +293,18 @@ describe('worktrees the staff removed are forgotten on their behalf', () => {
 
 describe('the gateway prunes inside the company\'s own view', () => {
   test('git runs under bwrap with the confinement it was given, and still prunes', () => {
-    // A stand-in bwrap on PATH records its argv and runs what follows `--`,
-    // since bubblewrap is Linux-only and this suite runs anywhere.
-    const bin = join(dir, 'bin');
-    mkdirSync(bin);
-    const log = join(dir, 'bwrap.argv');
-    writeFileSync(join(bin, 'bwrap'),
-      `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`,
-      { mode: 0o755 });
-    const path = process.env['PATH'];
-    process.env['PATH'] = `${bin}:${path ?? ''}`;
-    try {
-      changeSomething();
-      world.git.commitAs({ id: 'ada', name: 'Ada' }, 'work');
-      const at = join(dir, 'wt', 'gone');
-      raw('worktree', 'add', '-q', '--detach', at);
-      rmSync(at, { recursive: true, force: true });
-      const t = new Date(Date.now() - 3 * 3_600_000);
-      utimesSync(join(world.root, '.git', 'worktrees', 'gone', 'index'), t, t);
-      world.git.pruneWorktrees(['--ro-bind', '/', '/']);
-      const argv = readFileSync(log, 'utf8').split('\n');
-      assert.deepEqual(argv.slice(0, 4), ['--ro-bind', '/', '/', '--']);
-      assert.equal(argv[4], 'git');
-      assert.ok(argv.includes('prune'));
-      assert.ok(!existsSync(join(world.root, '.git', 'worktrees', 'gone')));
-    } finally {
-      process.env['PATH'] = path;
-    }
+    changeSomething();
+    world.git.commitAs({ id: 'ada', name: 'Ada' }, 'work');
+    const at = join(dir, 'wt', 'gone');
+    raw('worktree', 'add', '-q', '--detach', at);
+    rmSync(at, { recursive: true, force: true });
+    const t = new Date(Date.now() - 3 * 3_600_000);
+    utimesSync(join(world.root, '.git', 'worktrees', 'gone', 'index'), t, t);
+    const argvs = underStandInBwrap((argvs) => { world.git.pruneWorktrees(['--ro-bind', '/', '/']); return argvs; });
+    const argv = argvs.at(-1)!;
+    assert.deepEqual(argv.slice(0, 4), ['--ro-bind', '/', '/', '--']);
+    assert.equal(argv[4], 'git');
+    assert.ok(argv.includes('prune'));
+    assert.ok(!existsSync(join(world.root, '.git', 'worktrees', 'gone')));
   });
 });

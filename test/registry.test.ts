@@ -368,6 +368,25 @@ describe('opening a company is not something that happened to it', () => {
   });
 });
 
+describe('a world whose git stalls is on the record', () => {
+  test('the company\'s ledger names the stall, so the operator knows to clear it', () => {
+    // Once git times out it is no longer run in that world; without an event
+    // the only trace would be commits quietly not happening.
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const r = new Registry(systemClock);
+      const a = r.found({ name: 'Stuck Co', business: 'x', ceo: 'Sol', chair: 'Cali' });
+      if (!a.ok) throw new Error('found failed');
+      a.company.world.git.onStall('git status ran past 10s');
+      const e = a.company.ledger.lastEvent(['world.git_stalled']);
+      await r.close('stuck-co');
+      console.log(JSON.stringify({ actor: e?.actor, why: e && JSON.parse(e.dataJson).why }));
+    `);
+    assert.deepEqual(JSON.parse(out), { actor: 'company', why: 'git status ran past 10s' });
+  });
+});
+
 describe('the environment seeds a company; it never renames one', () => {
   // The container sets RIFF_COMPANY and RIFF_CEO to placeholder defaults so a
   // fresh installation can bootstrap. Those used to win on every read, which
@@ -602,8 +621,11 @@ const serve = async (): Promise<{ port: number; kill: () => void }> => {
   const port = 4400 + (process.pid % 400);
   const child = spawn(process.execPath, ['src/gateway/server.ts'], {
     cwd: process.cwd(), stdio: 'ignore',
+    // Uncontained whatever runs the suite: in the factory the image sets
+    // RIFF_CONTAINED=1, and this throwaway gateway then refused to start a
+    // company for want of a runtime credential the throwaway root never has.
     env: { ...process.env, HOME: home, RIFF_ROOT: join(home, '.riff'),
-           RIFF_COMPANY_ID: '', PORT: String(port) },
+           RIFF_COMPANY_ID: '', RIFF_CONTAINED: '', PORT: String(port) },
   });
   for (let i = 0; i < 40; i++) {
     await new Promise((r) => setTimeout(r, 250));

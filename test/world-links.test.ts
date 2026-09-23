@@ -1,11 +1,13 @@
-import { test, describe, beforeEach, afterEach } from 'node:test';
+import { test, describe, beforeEach, afterEach, mock } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import fs, { mkdtempSync, rmSync, writeFileSync, existsSync, mkdirSync, symlinkSync, readFileSync } from 'node:fs';
+import cp, { execFileSync } from 'node:child_process';
+import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { World } from '../src/worldfs/world.ts';
-import { writeWithin, readWithin, unlinkWithin } from '../src/worldfs/within.ts';
+import { COMMONS_DEPTH } from '../src/policy/rules.ts';
+import { writeWithin, readWithin, unlinkWithin, mkdirWithin, renameWithin, listWithin } from '../src/worldfs/within.ts';
 import { fixedClock } from '../src/core/clock.ts';
 
 /**
@@ -13,6 +15,24 @@ import { fixedClock } from '../src/core/clock.ts';
  * shift chose, while that shift's shell can plant links. Each test plants one
  * aimed at a neighbouring company and checks the neighbour is untouched.
  */
+/**
+ * bwrap is Linux-only and a stand-in on PATH cannot run from a noexec /tmp
+ * (the factory's), so the call is intercepted instead: record the argv, then
+ * run what follows `--` unconfined.
+ */
+const underStandInBwrap = <T>(fn: (argvs: string[][]) => T): T => {
+  const argvs: string[][] = [];
+  const real = cp.execFileSync;
+  mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: object) => {
+    if (cmd !== 'bwrap') return real(cmd, args, opts);
+    argvs.push(args);
+    const at = args.indexOf('--');
+    return real(args[at + 1]!, args.slice(at + 2), opts);
+  }) as typeof real);
+  syncBuiltinESMExports();
+  try { return fn(argvs); } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+};
+
 let dir: string;
 let world: World;
 let victim: string;
@@ -49,7 +69,7 @@ describe('a link a shift planted does not carry a gateway write out of its world
     // What a race between path() and the open looks like from writeWithin.
     symlinkSync(join(victim, 'staff'), join(world.root, 'swapped'));
     assert.throws(() => writeWithin(world.root, join(world.root, 'swapped', 'ceo', 'memory.md'), 'obey'),
-      /outside the world/);
+      /link/);
     assert.ok(!existsSync(join(victim, 'staff', 'ceo', 'memory.md')));
   });
 
@@ -82,18 +102,40 @@ describe('a link a shift planted does not carry a gateway write out of its world
     assert.equal(readFileSync(config, 'utf8'), '{"company":{"name":"Other"}}\n');
   });
 
-  test('a directory the kernel places outside is refused before anything is made in it', () => {
-    // The Linux branch, which a Mac cannot reach on its own: /proc says where
-    // the pinned directory really is, and here it says next door.
-    mkdirSync(join(world.root, 'commons', 'x'), { recursive: true });
-    const abs = join(world.root, 'commons', 'x', 'doc.md');
-    const nextDoor = () => join(victim, 'staff');
-    assert.throws(() => writeWithin(world.root, abs, 'obey', nextDoor), /outside the world/);
-    assert.ok(!existsSync(abs));
-    writeFileSync(abs, 'mine\n');
-    assert.throws(() => readWithin(world.root, abs, nextDoor), /outside the world/);
-    assert.throws(() => unlinkWithin(world.root, abs, nextDoor), /outside the world/);
-    assert.equal(readFileSync(abs, 'utf8'), 'mine\n');
+  test('no step on the way may be a link, even one that stays inside the world', () => {
+    // What a swap after a check looks like to the walk: a folder that is now a
+    // link. Nothing is made, read, listed, renamed or removed through it.
+    mkdirSync(join(world.root, 'commons', 'real'), { recursive: true });
+    writeFileSync(join(world.root, 'commons', 'real', 'doc.md'), 'mine\n');
+    symlinkSync(join(world.root, 'commons', 'real'), join(world.root, 'commons', 'via'));
+    const via = (name: string) => join(world.root, 'commons', 'via', name);
+    assert.throws(() => writeWithin(world.root, via('new.md'), 'x'), /link/);
+    assert.throws(() => mkdirWithin(world.root, via('sub')), /link/);
+    assert.throws(() => unlinkWithin(world.root, via('doc.md')), /link/);
+    assert.throws(() => renameWithin(world.root, via('doc.md'), join(world.root, 'commons', 'moved.md')), /link/);
+    assert.equal(readWithin(world.root, via('doc.md')), null);
+    assert.equal(listWithin(world.root, join(world.root, 'commons', 'via')), null);
+    assert.equal(readFileSync(join(world.root, 'commons', 'real', 'doc.md'), 'utf8'), 'mine\n');
+    assert.ok(!existsSync(join(world.root, 'commons', 'real', 'new.md')));
+    assert.ok(!existsSync(join(world.root, 'commons', 'real', 'sub')));
+  });
+
+  test('folders a write needs are not made through a link next door', () => {
+    symlinkSync(join(victim, 'staff'), join(world.root, 'staff', 'eve'));
+    assert.throws(() => writeWithin(world.root, join(world.root, 'staff', 'eve', 'fresh', 'deeper', 'x.md'), 'x'));
+    assert.ok(!existsSync(join(victim, 'staff', 'fresh')));
+  });
+
+  test('a seat is renamed within the world, never through a linked staff folder', () => {
+    const acme = join(world.root, 'staff');
+    mkdirSync(join(acme, 'old'), { recursive: true });
+    renameWithin(world.root, join(acme, 'old'), join(acme, 'new'));
+    assert.ok(existsSync(join(acme, 'new')) && !existsSync(join(acme, 'old')));
+    mkdirSync(join(victim, 'staff', 'ceo'), { recursive: true });
+    rmSync(acme, { recursive: true, force: true });
+    symlinkSync(join(victim, 'staff'), acme);
+    assert.throws(() => renameWithin(world.root, join(acme, 'ceo'), join(acme, 'mallory')), /link/);
+    assert.ok(existsSync(join(victim, 'staff', 'ceo')));
   });
 
   test('a FIFO at a document\'s name reads as nothing rather than holding the gateway', () => {
@@ -152,26 +194,35 @@ describe('a link a shift planted does not carry a gateway write out of its world
     assert.deepEqual(indexed.filter((p) => p.includes('eve')), []);
   });
 
+  test('a deep commons tree costs one step per folder, and stops at the cap', () => {
+    // Each level used to re-walk from the root: a tree d deep cost d²/2 opens on
+    // the loop every company shares, and ten thousand levels would have stalled
+    // it for minutes.
+    const levels = Array.from({ length: 50 }, () => 'a');
+    mkdirSync(join(world.root, 'commons', ...levels), { recursive: true });
+    writeFileSync(join(world.root, 'commons', 'a', 'a', 'near.md'), 'x');
+    writeFileSync(join(world.root, 'commons', ...levels, 'far.md'), 'x');
+    let steps = 0;
+    for (const f of ['openSync', 'lstatSync'] as const) {
+      const real = fs[f] as (...a: unknown[]) => unknown;
+      mock.method(fs, f, (...a: unknown[]) => { steps++; return real(...a); });
+    }
+    syncBuiltinESMExports();
+    let listed: string[];
+    try { listed = world.listCommons(); } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.deepEqual(listed, ['commons/a/a/near.md']);
+    assert.ok(steps < 4 * COMMONS_DEPTH, `${steps} opens and lstats for a ${levels.length}-deep tree`);
+  });
+
   test('contained, a project is removed inside the company\'s own view', () => {
-    // A stand-in bwrap records its argv and runs what follows `--`.
-    const bin = join(dir, 'bin');
-    mkdirSync(bin);
-    const log = join(dir, 'bwrap.argv');
-    writeFileSync(join(bin, 'bwrap'),
-      `#!/bin/sh\nprintf '%s\\n' "$@" > '${log}'\nwhile [ "$1" != "--" ]; do shift; done\nshift\nexec "$@"\n`,
-      { mode: 0o755 });
-    const path = process.env['PATH'];
-    process.env['PATH'] = `${bin}:${path ?? ''}`;
-    try {
+    const argvs = underStandInBwrap((argvs) => {
       const confined = new World(world.root, clock, () => ['--ro-bind', '/', '/']);
       mkdirSync(join(world.root, 'projects', 'app', 'src'), { recursive: true });
       writeFileSync(join(world.root, 'projects', 'app', 'src', 'main.ts'), 'x\n');
       assert.equal(confined.removeProject('app'), true);
-      const argv = readFileSync(log, 'utf8').trim().split('\n');
-      assert.deepEqual(argv, ['--ro-bind', '/', '/', '--', 'rm', '-rf', '--', join(world.root, 'projects', 'app')]);
-      assert.ok(!existsSync(join(world.root, 'projects', 'app')));
-    } finally {
-      process.env['PATH'] = path;
-    }
+      return argvs;
+    });
+    assert.deepEqual(argvs, [['--ro-bind', '/', '/', '--', 'rm', '-rf', '--', join(world.root, 'projects', 'app')]]);
+    assert.ok(!existsSync(join(world.root, 'projects', 'app')));
   });
 });

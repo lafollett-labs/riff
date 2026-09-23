@@ -2,6 +2,7 @@ import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { scopedSecretEnv } from '../src/runtime/staff.ts';
 import { verifyScopedToken } from '../src/core/proxytoken.ts';
@@ -50,13 +51,26 @@ describe('a shift routes its own Claude inference through the keyproxy', () => {
   test('a company that declares no services still hands its shifts the company to mint for', () => {
     // scopedSecretEnv did its part, but the registry and scheduler passed the
     // slug on only alongside declared services: every newly founded company's
-    // shift failed "Not logged in" with no request reaching the proxy. The
-    // scheduler calls its shift directly, so the wiring is read from source.
-    const registry = readFileSync(new URL('../src/company/registry.ts', import.meta.url), 'utf8');
-    const scheduler = readFileSync(new URL('../src/runtime/scheduler.ts', import.meta.url), 'utf8');
-    assert.match(registry, /^\s*companySlug: slug,$/m);
-    assert.match(scheduler, /\.\.\.\(this\.#d\.companySlug \? \{ companySlug: this\.#d\.companySlug \} : \{\}\),/);
-    assert.doesNotMatch(scheduler, /companySlug && this\.#d\.services/);
+    // shift failed "Not logged in" with no request reaching the proxy. Driven
+    // from a real Registry, against a throwaway root.
+    const home = mkdtempSync(join(tmpdir(), 'riff-slug-'));
+    try {
+      const out = execFileSync(process.execPath, ['--input-type=module', '-e', `
+        const { Registry } = await import('${new URL('../src/company/registry.ts', import.meta.url).href}');
+        const { systemClock } = await import('${new URL('../src/core/clock.ts', import.meta.url).href}');
+        const { scopedSecretEnv } = await import('${new URL('../src/runtime/staff.ts', import.meta.url).href}');
+        const r = new Registry(systemClock);
+        const a = r.found({ name: 'Bare Works', business: 'b', ceo: 'Rune', chair: 'Cali' });
+        if (!a.ok) throw new Error(a.reason);
+        const d = a.company.scheduler.shiftDeps(a.company.ledger.getAgent('rune'));
+        const env = scopedSecretEnv(d.companySlug, d.services, d.shiftTimeoutMs);
+        console.log(JSON.stringify({ slug: d.companySlug, services: d.services ?? null, token: !!env.ANTHROPIC_AUTH_TOKEN }));
+        await r.close('bare-works');
+      `], { encoding: 'utf8', env: { ...process.env, HOME: home, RIFF_ROOT: join(home, '.riff'), RIFF_COMPANY_ID: '' } });
+      assert.deepEqual(JSON.parse(out.trim().split('\n').pop()!), { slug: 'bare-works', services: null, token: true });
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 
   test('no company means no env at all — nothing is minted for a shift that reaches nothing', () => {

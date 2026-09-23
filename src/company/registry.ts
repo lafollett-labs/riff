@@ -13,8 +13,8 @@ import {
 import type { Clock } from '../core/clock.ts';
 import { DEFAULT_STAFF, readStaffDefaults, type StaffDefaults } from '../core/models.ts';
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
-import { existsSync, lstatSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
-import { lexists } from '../worldfs/within.ts';
+import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
+import { mkdirWithin } from '../worldfs/within.ts';
 import { dropVault } from '../core/secrets.ts';
 import { join } from 'node:path';
 
@@ -248,11 +248,10 @@ export class Registry {
     // than a day later in the middle of somebody's build.
     const cacheDir = join(cfg.home, 'scratch', 'cache');
     // The home is writable from a shift's shell, and the gateway is not
-    // confined: a link at either name would have these made next door.
-    for (const d of [join(cfg.home, 'scratch'), cacheDir, join(cfg.home, '.claude')]) {
-      if (lexists(d) && lstatSync(d).isSymbolicLink()) throw new Error(`refusing to open ${slug}: ${d} is a link`);
-    }
-    mkdirSync(cacheDir, { recursive: true });
+    // confined: made by path, a link at either name would have these made
+    // next door.
+    mkdirSync(cfg.home, { recursive: true });
+    mkdirWithin(cfg.home, cacheDir);
     // The CLI's session store, on the volume beside the ledger rather than the
     // container's tmpfs HOME — so transcripts survive a restart and shifts
     // resume instead of starting cold. Beside the world, never inside it: the
@@ -260,7 +259,7 @@ export class Registry {
     // part of anybody's work. Created here so a volume that cannot be written
     // to says so now, not mid-shift.
     const configDir = join(cfg.home, '.claude');
-    mkdirSync(configDir, { recursive: true });
+    mkdirWithin(cfg.home, configDir);
     const p = cfg.policy;
     const constitution = constitutionFor({
       ceo: cfg.ceo.id,

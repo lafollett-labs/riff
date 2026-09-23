@@ -39,9 +39,11 @@ import { TOOL_PREFIX } from './tools.ts';
  */
 const SHELL_TOOLS = new Set(['Bash', 'BashOutput', 'KillShell', 'KillTask']);
 
-export const shellIsContained = (env: NodeJS.ProcessEnv = process.env): boolean =>
-  env['RIFF_CONTAINED'] === '1'
-  && (existsSync('/.dockerenv') || existsSync('/run/.containerenv'));
+const containerMarked = (): boolean => existsSync('/.dockerenv') || existsSync('/run/.containerenv');
+
+/** `marked` is the container probe, a parameter so each signal can be tested without the other. */
+export const shellIsContained = (env: NodeJS.ProcessEnv = process.env, marked: () => boolean = containerMarked): boolean =>
+  env['RIFF_CONTAINED'] === '1' && marked();
 
 const READ_TOOLS = new Set(['Read', 'Glob', 'Grep', 'NotebookRead']);
 const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);

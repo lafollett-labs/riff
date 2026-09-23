@@ -333,15 +333,17 @@ code:
 
 `World.path` now walks with `lstat` and refuses a link that resolves to
 nothing, and nothing after it trusts the path it returned
-(`src/worldfs/within.ts`). The directory is opened and pinned first; on Linux,
-where the shells are, `/proc/self/fd` says where it really is, and only if that
-is inside the world is the file looked up — through
-`/proc/self/fd/<dir>/<name>`, from the pinned directory, as `openat` would. A
-directory swapped for a link after the check is caught before anything is
-created, read or unlinked through it. The file itself is opened `O_NOFOLLOW`
-and `O_NONBLOCK` and used only if it is a regular file, so a FIFO reads as
-nothing and a write to one is refused. Reads (`readDoc`, `readText`,
-`/api/file`) go the same way, and listings do not walk a folder that is a link.
+(`src/worldfs/within.ts`). On Linux, where the shells are, every read, write,
+listing, folder, rename and unlink is reached from the world root one
+directory at a time, each opened from the descriptor of the last with
+`O_NOFOLLOW` — through `/proc/self/fd/<fd>/<name>`, as `openat` would. No step
+may be a link, even one that stays inside the world, so a swap after any check
+changes nothing: there is no path left to re-point, and not even an empty
+folder is made next door. The file itself is opened `O_NOFOLLOW` and
+`O_NONBLOCK` and used only if it is a regular file, so a FIFO reads as nothing
+and a write to one is refused. The same walk makes the home's `scratch/` and
+`.claude/` when a company opens. Without `/proc` (the host, where no shell
+runs) the walk is done by path with `lstat`.
 
 A project is a tree, and a tree cannot be pinned a file at a time: the CEO seat
 retires one in its own shift, so it picks the moment, and `projects/` swapped
@@ -349,13 +351,17 @@ for a link to `/data/companies/<other>` with a project named `world` deleted a
 neighbour's world. Contained, `removeProject` runs `rm -rf` inside the
 company's own view, where every link resolves within the company.
 
-What is left: `mkdir -p` before a write, which a racing swap can have make
-empty folders next door (nothing is written into them); a listing, checked and
-then read by path, which a swap in between points at a neighbour's names (never
-their contents); and renaming a seat,
-which moves `staff/<old>` by path after checking it, so a shell swapping
-`staff/` in that moment would have a neighbour's folder moved. An operator's
-rename is the only trigger, so the moment is not the shift's to pick.
+A listing of the commons is a tree too, and walking it from the root at every
+level cost a tree d deep about d²/2 opens on the loop every company shares.
+`filesWithin` descends from each parent's descriptor instead, no more than
+eight folders below `commons/` (`COMMONS_DEPTH`; ShipIt's deepest document is
+one folder down). Measured in the factory on a 2,000-deep tree: 0ms capped,
+196ms with the cap lifted. A document nested deeper than the cap is not in the
+commons: not listed, not counted, and not found by `commons_index` — and the
+gate refuses a tool write past the cap (`R6.commons_depth`), so a document the
+tools write is always one the ceiling counts. An export counts its commons through the same walk, from the
+copy, so `commons/loop -> .` loops nothing and a linked `commons/` counts no
+neighbour's documents.
 
 ### The gateway runs nothing a world's repository says to
 
@@ -385,10 +391,20 @@ Closed in layers, in `src/worldfs/git.ts` and `src/runtime/permissions.ts`:
   key at a time, because the list of settings that run commands grows with git;
 - the gate treats `world/.git` as outside the company, in any letter case (the
   volume is a macOS bind mount, where `.GIT` is `.git`);
-- the vet also refuses a symbolic link anywhere in the metadata git touches
-  (the top of `.git`, all of `refs/` and `logs/`, the top of `objects/` and of
-  `worktrees/`); the reflog, auto-gc and background maintenance are off for the
-  gateway's calls;
+- the vet also refuses a symbolic link, a FIFO or any other special file
+  anywhere in the metadata git touches (the top of `.git`, all of `refs/` and
+  `logs/`, the top of `objects/` and of `worktrees/`) — `git config --file` on a
+  FIFO at `.git/config` blocked until killed, synchronously, holding every
+  company's gateway; the reflog, auto-gc and background maintenance are off for
+  the gateway's calls;
+- every git call the gateway makes, the vet's own included, is killed after
+  10 seconds (`GIT_TIMEOUT_MS`; on ShipIt's world, 4,096 files, status takes
+  63ms and a whole-world add 22ms). A special file the vet does not walk — a
+  FIFO among the loose objects, say — would otherwise make that a stall on
+  every later commit and vitals poll, so the first timeout also stops git in
+  that world: every later call is refused without running, and the company's
+  ledger records `world.git_stalled`. Reopening the company, once the file is
+  gone, resets it;
 - after each shift the gateway runs `git worktree prune` for the staff, who
   cannot (the sandbox mounts each `.git/worktrees/<name>` read-only piece by
   piece; ShipIt had 25 stuck). Prune deletes a stale entry recursively and git

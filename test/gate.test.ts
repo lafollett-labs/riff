@@ -2,7 +2,7 @@ import { test, describe, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { Ledger } from '../src/ledger/ledger.ts';
 import { Gate, type CommonsView } from '../src/policy/gate.ts';
-import { constitutionFor, type Constitution } from '../src/policy/rules.ts';
+import { COMMONS_DEPTH, constitutionFor, type Constitution } from '../src/policy/rules.ts';
 import { fixedClock } from '../src/core/clock.ts';
 import type { Agent, Tier } from '../src/core/types.ts';
 
@@ -95,6 +95,16 @@ describe('R6 — the complexity budget', () => {
     assert.equal(d.kind, 'deny');
     assert.equal(d.rule, 'R6.commons_full');
     assert.match(d.kind === 'deny' ? d.reason : '', /remove one/i);
+  });
+
+  test('a document deeper than the commons is searched is refused, even with room', () => {
+    // The listing stops at COMMONS_DEPTH; a document past it would be held and
+    // never counted against the ceiling.
+    const at = (folders: number) => ['commons', ...Array.from({ length: folders }, () => 'd'), 'x.md'].join('/');
+    assert.equal(gate.request({ actor: 'rae', capability: 'world.write', target: at(COMMONS_DEPTH), summary: 'deep' }).kind, 'allow');
+    const d = gate.request({ actor: 'rae', capability: 'world.write', target: at(COMMONS_DEPTH + 1), summary: 'deeper' });
+    assert.equal(d.kind, 'deny');
+    assert.equal(d.rule, 'R6.commons_depth');
   });
 
   test('EDITING an existing document is always free, even when full', () => {

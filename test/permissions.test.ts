@@ -126,10 +126,19 @@ describe('the shell is decided by where the runtime is', () => {
   });
 
   test('the environment variable alone is not enough to open a shell', () => {
-    // A mistyped export on someone's laptop must not hand out a terminal.
-    // Outside a container the marker file is absent, so this stays false.
-    assert.equal(shellIsContained({ RIFF_CONTAINED: '1' } as never), false);
-    assert.equal(shellIsContained({} as never), false);
+    // A mistyped export on someone's laptop must not hand out a terminal. The
+    // marker is given, not probed: in the factory it is really there, and this
+    // test once failed there for asserting the laptop's answer.
+    const noMarker = () => false;
+    assert.equal(shellIsContained({ RIFF_CONTAINED: '1' } as never, noMarker), false);
+    assert.equal(shellIsContained({} as never, noMarker), false);
+  });
+
+  test('the container marker alone is not enough either', () => {
+    const marker = () => true;
+    assert.equal(shellIsContained({} as never, marker), false);
+    assert.equal(shellIsContained({ RIFF_CONTAINED: 'true' } as never, marker), false);
+    assert.equal(shellIsContained({ RIFF_CONTAINED: '1' } as never, marker), true);
   });
 });
 

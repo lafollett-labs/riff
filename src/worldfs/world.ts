@@ -1,11 +1,12 @@
-import { mkdirSync, existsSync, readdirSync, statSync, lstatSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, existsSync, lstatSync, realpathSync, rmSync, type Dirent } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { join, resolve, sep, dirname, relative } from 'node:path';
 import { parse, stringify, field, type Doc, type Frontmatter } from './frontmatter.ts';
 import { WorldGit } from './git.ts';
-import { inside, lexists, readWithin, unlinkWithin, writeWithin } from './within.ts';
+import { filesWithin, inside, lexists, listWithin, mkdirWithin, readWithin, unlinkWithin, writeWithin } from './within.ts';
 import { slug } from '../core/ids.ts';
+import { COMMONS_DEPTH } from '../policy/rules.ts';
 import { systemClock, type Clock } from '../core/clock.ts';
 import type { AgentId } from '../core/types.ts';
 import type { Ledger } from '../ledger/ledger.ts';
@@ -32,6 +33,8 @@ import type { Ledger } from '../ledger/ledger.ts';
  * through here so the write path and the gate can never disagree about
  * where a document lives.
  */
+const isDoc = (name: string): boolean => name.endsWith('.md');
+
 export const commonsPath = (rel: string): string =>
   `commons/${rel.replace(/^\/+/, '').replace(/^(?:commons\/)+/, '')}`;
 
@@ -106,29 +109,23 @@ export class World {
   }
 
   /**
-   * A folder to list, or null. A listing that starts at a link lists whatever
-   * it names: commons/ linked to a neighbour's gave its document names to
-   * commons_index, and projects/ its project names to portfolio.
+   * A folder's entries, or null. Reached through listWithin, so a listing
+   * never starts at or passes through a link: commons/ linked to a
+   * neighbour's once gave its document names to commons_index.
    */
-  #dirAt(rel: string): string | null {
-    let abs: string;
-    try { abs = this.path(rel); } catch { return null; }
-    return lexists(abs) && lstatSync(abs).isDirectory() ? abs : null;
+  #list(rel: string): Dirent[] | null {
+    try { return listWithin(this.root, this.path(rel)); } catch { return null; }
   }
 
   ensure(): void {
     mkdirSync(this.root, { recursive: true });
-    for (const d of ['staff', 'commons', 'commons/bulletin']) {
-      mkdirSync(this.path(d), { recursive: true });
-    }
+    for (const d of ['staff', 'commons', 'commons/bulletin']) mkdirWithin(this.root, this.path(d));
     this.git.init();
   }
 
   ensureStaff(id: AgentId): void {
     mkdirSync(this.root, { recursive: true });
-    for (const d of ['journal', 'notes', 'drafts']) {
-      mkdirSync(this.path(join('staff', slug(id), d)), { recursive: true });
-    }
+    for (const d of ['journal', 'notes', 'drafts']) mkdirWithin(this.root, this.path(join('staff', slug(id), d)));
   }
 
   // ------------------------------------------------------------- documents
@@ -222,24 +219,18 @@ export class World {
   reindexNotes(ledger: Ledger): number {
     ledger.clearNoteIndex();
     let n = 0;
-    const staffDir = this.#dirAt('staff');
-    if (!staffDir) return 0;
-
-    for (const who of readdirSync(staffDir)) {
-      // A staff folder that is a link would index another company's notes.
-      if (!lstatSync(join(staffDir, who)).isDirectory()) continue;
-      const notes = join(staffDir, who, 'notes');
-      if (!existsSync(notes) || !lstatSync(notes).isDirectory()) continue;
-      for (const f of readdirSync(notes)) {
-        if (!f.endsWith('.md')) continue;
-        const abs = join(notes, f);
-        const doc = this.readDoc(relative(this.root, abs));
+    for (const who of this.#list('staff') ?? []) {
+      if (!who.isDirectory()) continue;
+      for (const f of this.#list(join('staff', who.name, 'notes')) ?? []) {
+        if (!f.isFile() || !f.name.endsWith('.md')) continue;
+        const rel = join('staff', who.name, 'notes', f.name);
+        const doc = this.readDoc(rel);
         if (!doc) continue;
         ledger.indexNote({
-          path: relative(this.root, abs),
-          author: field(doc.data, 'author') ?? who,
+          path: rel,
+          author: field(doc.data, 'author') ?? who.name,
           subject: field(doc.data, 'subject'),
-          title: field(doc.data, 'title') ?? f.replace(/\.md$/, ''),
+          title: field(doc.data, 'title') ?? f.name.replace(/\.md$/, ''),
           writtenAt: field(doc.data, 'written_at') ?? this.#clock.iso(),
         });
         n++;
@@ -256,20 +247,13 @@ export class World {
     return path;
   }
 
+  /** Documents nested deeper than COMMONS_DEPTH folders are not in the commons. */
   listCommons(): string[] {
-    const dir = this.#dirAt('commons');
-    if (!dir) return [];
-    const out: string[] = [];
-    const walk = (d: string) => {
-      for (const f of readdirSync(d)) {
-        const abs = join(d, f);
-        // lstat: a folder that is a link would walk another company's tree.
-        if (lstatSync(abs).isDirectory()) walk(abs);
-        else if (f.endsWith('.md')) out.push(relative(this.root, abs));
-      }
-    };
-    walk(dir);
-    return out.sort();
+    let at: string;
+    // A commons/ that links out is no commons; a failure past that throws, so
+    // the ceiling check it feeds refuses rather than counting zero.
+    try { at = this.path('commons'); } catch { return []; }
+    return (filesWithin(this.root, at, COMMONS_DEPTH, isDoc) ?? []).map((f) => join('commons', f)).sort();
   }
 
   /** Delete a document. The counterpart to R6: a ceiling with no way to
@@ -289,10 +273,9 @@ export class World {
    * scratch `.work-mut-*` never counts as work.
    */
   listProjects(): string[] {
-    const dir = this.#dirAt('projects');
-    if (!dir) return [];
-    return readdirSync(dir)
-      .filter((f) => !f.startsWith('.') && lstatSync(join(dir, f)).isDirectory())
+    return (this.#list('projects') ?? [])
+      .filter((f) => !f.name.startsWith('.') && f.isDirectory())
+      .map((f) => f.name)
       .sort();
   }
 
@@ -345,8 +328,8 @@ export class World {
   }
 
   listDrafts(id: AgentId): string[] {
-    const dir = this.#dirAt(join('staff', slug(id), 'drafts'));
-    if (!dir) return [];
-    return readdirSync(dir).filter((f) => f.endsWith('.md')).map((f) => `staff/${slug(id)}/drafts/${f}`);
+    return (this.#list(join('staff', slug(id), 'drafts')) ?? [])
+      .filter((f) => f.isFile() && f.name.endsWith('.md'))
+      .map((f) => `staff/${slug(id)}/drafts/${f.name}`);
   }
 }

@@ -2,12 +2,14 @@ import { execFileSync } from 'node:child_process';
 import { DatabaseSync } from 'node:sqlite';
 import {
   cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  renameSync, rmSync, statSync, writeFileSync,
+  renameSync, rmSync, writeFileSync,
 } from 'node:fs';
 import { basename, join } from 'node:path';
 import { companiesDir, companyHome, installRoot, operatorError, persisted, slugId,
   type RiffConfig } from '../core/config.ts';
 import { atomicWriteFileSync } from '../core/atomicwrite.ts';
+import { filesWithin } from '../worldfs/within.ts';
+import { COMMONS_DEPTH } from '../policy/rules.ts';
 
 /**
  * Moving a company between machines.
@@ -122,14 +124,10 @@ export const exportCompany = (slug: string, outPath: string): Manifest => {
         recursive: true, verbatimSymlinks: true,
         filter: (from) => basename(from) !== 'node_modules',
       });
-      const commons = join(work, 'world', 'commons');
-      if (existsSync(commons)) {
-        const walk = (d: string): number => readdirSync(d).reduce((n, f) => {
-          const p = join(d, f);
-          return n + (statSync(p).isDirectory() ? walk(p) : (f.endsWith('.md') ? 1 : 0));
-        }, 0);
-        counts.commons = walk(commons);
-      }
+      // The gateway's own count: the copy keeps links verbatim, and a stat walk
+      // once followed commons/loop -> . until the gateway ran out of stack.
+      counts.commons = filesWithin(join(work, 'world'), join(work, 'world', 'commons'), COMMONS_DEPTH,
+        (n) => n.endsWith('.md'))?.length ?? 0;
     }
 
     const manifest: Manifest = {

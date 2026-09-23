@@ -399,12 +399,22 @@ Closed in layers, in `src/worldfs/git.ts` and `src/runtime/permissions.ts`:
   the gateway's calls;
 - every git call the gateway makes, the vet's own included, is killed after
   10 seconds (`GIT_TIMEOUT_MS`; on ShipIt's world, 4,096 files, status takes
-  63ms and a whole-world add 22ms). A special file the vet does not walk — a
-  FIFO among the loose objects, say — would otherwise make that a stall on
-  every later commit and vitals poll, so the first timeout also stops git in
-  that world: every later call is refused without running, and the company's
-  ledger records `world.git_stalled`. Reopening the company, once the file is
-  gone, resets it;
+  63ms), and `add` after 120 (`GIT_ADD_TIMEOUT_MS`: a legitimate 400MB drop
+  took 14.4s to hash on the factory's volume). A special file the vet does not
+  walk — a FIFO among the loose objects, say — would otherwise make that a
+  stall on every later commit and vitals poll, so the first timeout also stops
+  git in that world: every later call is refused without running, and the
+  company's ledger records `world.git_stalled`. Once the cause is gone, the
+  operator starts it again with `POST /api/companies/<slug>/git/clear`
+  (`world.git_cleared`);
+- git also opens files in the working tree — every folder's `.gitignore`, each
+  file it hashes — with a blocking open, and a FIFO there held the gateway for
+  the whole of `add`'s bound. The walk that finds nested repositories before
+  every add, status and diff (`worldTree`) refuses the call when it meets
+  anything that is not a file, a folder or a link, before git runs. The walk
+  and git's open are two moments, so a colleague's live shell in the same
+  company can plant one between them; that costs at most one
+  `GIT_ADD_TIMEOUT_MS` before the breaker stops git there;
 - after each shift the gateway runs `git worktree prune` for the staff, who
   cannot (the sandbox mounts each `.git/worktrees/<name>` read-only piece by
   piece; ShipIt had 25 stuck). Prune deletes a stale entry recursively and git

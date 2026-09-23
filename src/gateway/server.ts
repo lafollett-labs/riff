@@ -499,6 +499,18 @@ const server = createServer(async (req, res) => {
       }) : json(res, { error: `no company '${target}'` }, 404);
     }
 
+    // Git in a world stops at its first timeout (WorldGit#bounded), and the
+    // operator starts it again here once the cause is gone — without closing
+    // the company, which pause and resume do not do.
+    if (p.startsWith('/api/companies/') && p.endsWith('/git/clear') && method === 'POST') {
+      const target = p.slice('/api/companies/'.length, -'/git/clear'.length);
+      const co = registry.get(target);
+      if (!co) return json(res, { error: `no company '${target}'` }, 404);
+      const was = co.world.git.clearStall();
+      if (was) co.ledger.emit('company', 'world.git_cleared', null, { was });
+      return json(res, { slug: target, cleared: was });
+    }
+
     // Renaming an agent moves an id that is a foreign key in six tables and a
     // folder name in the world. It lived in a script, which meant the console
     // could show a seat called `ceo` and offer no way to give it a name.

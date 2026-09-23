@@ -50,6 +50,12 @@ const INERT = [
  * On ShipIt's world (4,096 files) status takes 63ms and a whole-world add 22ms.
  */
 export const GIT_TIMEOUT_MS = 10_000;
+/**
+ * `add` hashes whatever the staff dropped, and a legitimate drop is slow: 400MB
+ * in 5,003 new files took 14.4s on the factory's volume, where every other call
+ * here takes milliseconds.
+ */
+export const GIT_ADD_TIMEOUT_MS = 120_000;
 
 const timedOut = (e: unknown): boolean => (e as NodeJS.ErrnoException).code === 'ETIMEDOUT';
 
@@ -133,30 +139,41 @@ const oddIn = (gitDir: string): { path: string; what: string } | null => {
 };
 
 /**
- * Every repository nested below the world root, as world-relative paths.
+ * Every repository nested below the world root, as world-relative paths, and
+ * the first thing that is neither a file, a folder nor a link.
  *
  * A nested repository has its own config, which the vet never reads, and
  * `git add -A` inspects it to decide what to record. So the gateway's commands
  * are scoped to leave each one out: the staff's own repositories and worktrees
  * are theirs to run git in, and never the gateway's. Links are not followed.
+ *
+ * A FIFO anywhere git reads — a folder's `.gitignore`, a file it hashes —
+ * blocks it until killed, and the vet walks only `.git`. This walk already
+ * visits the whole tree before every add, status and diff, so it is where one
+ * is caught, before git is run at all.
  */
-export const nestedRepos = (root: string): string[] => {
-  const found: string[] = [];
+export const worldTree = (root: string): { nested: string[]; special: string | null } => {
+  const nested: string[] = [];
+  let special: string | null = null;
   const walk = (rel: string): void => {
     let entries;
     try { entries = readdirSync(join(root, rel), { withFileTypes: true }); } catch { return; }
     // Case-insensitively: the volume is a macOS bind mount, where git takes a
     // differently-cased .GIT for a repository just the same.
     const isGit = (n: string): boolean => n.toLowerCase() === '.git';
-    if (rel && entries.some((e) => isGit(e.name))) { found.push(rel); return; }
+    if (rel && entries.some((e) => isGit(e.name))) { nested.push(rel); return; }
     for (const e of entries) {
-      if (!e.isDirectory() || e.isSymbolicLink() || (!rel && isGit(e.name))) continue;
-      walk(rel ? `${rel}/${e.name}` : e.name);
+      const at = rel ? `${rel}/${e.name}` : e.name;
+      if (!e.isFile() && !e.isDirectory() && !e.isSymbolicLink()) special ??= at;
+      if (!e.isDirectory() || (!rel && isGit(e.name))) continue;
+      walk(at);
     }
   };
   walk('');
-  return found;
+  return { nested, special };
 };
+
+export const nestedRepos = (root: string): string[] => worldTree(root).nested;
 
 export class WorldGit {
   #dir: string;
@@ -180,9 +197,16 @@ export class WorldGit {
    * A timeout alone turned a planted FIFO from a permanent hang into one of
    * GIT_TIMEOUT_MS on every later call — each commit, each vitals poll — with
    * the FIFO still there. After the first, nothing more is run until the
-   * company is reopened, which the operator does once the file is gone.
+   * operator clears it (clearStall, through the API) or reopens the company.
    */
   #stalled: string | null = null;
+  /** Let git run here again, after the operator has dealt with the stall; what it was, or null. */
+  clearStall(): string | null {
+    const was = this.#stalled;
+    this.#stalled = null;
+    return was;
+  }
+
   /** Told once, when git is first stopped here; the company records it in its ledger. */
   onStall: (why: string) => void = () => {};
 
@@ -211,7 +235,7 @@ export class WorldGit {
     return this.#bounded(`git ${args[0]}`, () => execFileSync(confine ? 'bwrap' : 'git', confine ? [...confine, '--', 'git', ...argv] : argv, {
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
-      timeout: GIT_TIMEOUT_MS,
+      timeout: args[0] === 'add' ? GIT_ADD_TIMEOUT_MS : GIT_TIMEOUT_MS,
       // Capture stderr rather than inheriting it. Several calls here are
       // probes whose failure is expected and handled — notably the
       // "is this already a repo?" check on a directory that is not one yet.
@@ -227,8 +251,9 @@ export class WorldGit {
       return run();
     } catch (e) {
       if (!timedOut(e)) throw e;
-      this.#stalled = `${what} ran past ${GIT_TIMEOUT_MS / 1000}s; something in the repository blocks git ` +
-        '(a FIFO among the objects, say). Remove it and reopen the company.';
+      this.#stalled = `${what} timed out; something in the repository blocks git (a FIFO among the ` +
+        'objects, say) or a very large drop outran the bound. Once it is dealt with, ' +
+        'POST /api/companies/<slug>/git/clear.';
       this.onStall(this.#stalled);
       throw new Error(`refusing to run git in ${this.#dir}: ${this.#stalled}`);
     }
@@ -294,7 +319,8 @@ export class WorldGit {
    * shift's commit in ShipIt threw on one gitignored leftover worktree.
    */
   #scope(): string[] {
-    const nested = nestedRepos(this.#dir);
+    const { nested, special } = worldTree(this.#dir);
+    if (special) throw new Error(`refusing to run git in ${this.#dir}: world/${special} is neither a file nor a folder, and git would wait on it`);
     const ignored = this.#ignored(nested);
     return ['--', '.', ...nested.filter((r) => !ignored.has(r)).map((r) => `:(exclude,literal)${r}`)];
   }

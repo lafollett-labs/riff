@@ -378,12 +378,12 @@ describe('a world whose git stalls is on the record', () => {
       const r = new Registry(systemClock);
       const a = r.found({ name: 'Stuck Co', business: 'x', ceo: 'Sol', chair: 'Cali' });
       if (!a.ok) throw new Error('found failed');
-      a.company.world.git.onStall('git status ran past 10s');
+      a.company.world.git.onStall('git status timed out');
       const e = a.company.ledger.lastEvent(['world.git_stalled']);
       await r.close('stuck-co');
       console.log(JSON.stringify({ actor: e?.actor, why: e && JSON.parse(e.dataJson).why }));
     `);
-    assert.deepEqual(JSON.parse(out), { actor: 'company', why: 'git status ran past 10s' });
+    assert.deepEqual(JSON.parse(out), { actor: 'company', why: 'git status timed out' });
   });
 });
 
@@ -896,6 +896,21 @@ describe('what a script used to do, the API does', () => {
         method: 'POST', headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ running: false }),
       });
+    } finally { kill(); }
+  });
+
+  test('a stalled world\'s git is cleared through the API, without closing the company', async () => {
+    const { port, kill } = await serve();
+    try {
+      await fetch(`http://localhost:${port}/api/companies`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name: 'Clear Co', ceo: 'Ceo', chair: 'Cali', running: false }),
+      });
+      const post = (slug: string) => fetch(`http://localhost:${port}/api/companies/${slug}/git/clear`, { method: 'POST' });
+      const ok = await post('clear-co');
+      assert.equal(ok.status, 200);
+      assert.deepEqual(await ok.json(), { slug: 'clear-co', cleared: null }, 'nothing was stalled');
+      assert.equal((await post('no-such-co')).status, 404);
     } finally { kill(); }
   });
 

@@ -7,7 +7,7 @@ import { syncBuiltinESMExports } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { World } from '../src/worldfs/world.ts';
-import { GIT_TIMEOUT_MS, nestedRepos } from '../src/worldfs/git.ts';
+import { GIT_ADD_TIMEOUT_MS, GIT_TIMEOUT_MS, nestedRepos } from '../src/worldfs/git.ts';
 import { classifyPath } from '../src/runtime/permissions.ts';
 import { fixedClock } from '../src/core/clock.ts';
 
@@ -185,14 +185,40 @@ describe('the gateway’s git stays inside this company’s repository', () => {
     // objects, say — so a hang there has to end as a refused call.
     const timeouts: unknown[] = [];
     const real = cp.execFileSync;
+    const adds: unknown[] = [];
     mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: { timeout?: number }) => {
-      if (cmd === 'git') timeouts.push(opts?.timeout);
+      if (cmd === 'git') (args.includes('add') ? adds : timeouts).push(opts?.timeout);
       return real(cmd, args, opts);
     }) as typeof real);
     syncBuiltinESMExports();
-    try { changeSomething(); world.git.isDirty(); } finally { mock.restoreAll(); syncBuiltinESMExports(); }
-    assert.ok(timeouts.length >= 2, 'the vet and the call itself both ran git');
+    try {
+      changeSomething();
+      world.git.commitAs({ id: 'juno', name: 'Juno' }, 'work');
+    } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.ok(timeouts.length >= 2, 'the vet and the calls themselves ran git');
     assert.ok(timeouts.every((t) => t === GIT_TIMEOUT_MS), `timeouts: ${timeouts}`);
+    // Hashing a legitimate drop is the one slow call: 400MB took 14.4s.
+    assert.deepEqual(adds, [GIT_ADD_TIMEOUT_MS]);
+  });
+
+  test('a FIFO in the working tree is refused before git is run to wait on it', () => {
+    // git opens each folder's .gitignore with a blocking open, and the vet
+    // walks only .git: this held every company's gateway for the add's bound.
+    mkdirSync(join(world.root, 'commons', 'sub'), { recursive: true });
+    execFileSync('mkfifo', [join(world.root, 'commons', 'sub', '.gitignore')]);
+    changeSomething();
+    let gitRuns = 0;
+    const real = cp.execFileSync;
+    mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: object) => {
+      if (cmd === 'git' && !args.includes('--file')) gitRuns++;
+      return real(cmd, args, opts);
+    }) as typeof real);
+    syncBuiltinESMExports();
+    try {
+      assert.throws(() => world.git.commitAs({ id: 'juno', name: 'Juno' }, 'work'),
+        /commons\/sub\/\.gitignore is neither a file nor a folder/);
+    } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.equal(gitRuns, 0, 'git was never run over the tree');
   });
 
   test('after one git call times out, the next is refused without running git', () => {
@@ -210,14 +236,17 @@ describe('the gateway’s git stays inside this company’s repository', () => {
     }) as typeof real);
     syncBuiltinESMExports();
     try {
-      assert.throws(() => world.git.isDirty(), /ran past/);
+      assert.throws(() => world.git.isDirty(), /timed out/);
       const before = gitRuns;
-      assert.throws(() => world.git.isDirty(), /ran past/);
-      assert.throws(() => world.git.since('1.day'), /ran past/);
+      assert.throws(() => world.git.isDirty(), /timed out/);
+      assert.throws(() => world.git.since('1.day'), /timed out/);
       assert.equal(gitRuns, before, 'nothing more was run');
     } finally { mock.restoreAll(); syncBuiltinESMExports(); }
     assert.equal(stalls.length, 1, 'told once');
-    assert.match(stalls[0]!, /reopen the company/);
+    assert.match(stalls[0]!, /git\/clear/, 'and names the way out');
+    assert.match(world.git.clearStall() ?? '', /timed out/);
+    assert.equal(typeof world.git.isDirty(), 'boolean', 'cleared, git runs again');
+    assert.equal(world.git.clearStall(), null);
   });
 
   test('pruning cannot be pointed at a directory outside the repository', () => {

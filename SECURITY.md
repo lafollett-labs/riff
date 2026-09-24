@@ -246,16 +246,34 @@ setting. `api.anthropic.com` cannot be: the keyproxy's own requests need it.
 
 `docker/up.sh` builds on the newest Agent SDK release in the line
 `package.json` names, the day it ships, and the image installs it over the
-lockfile's. That SDK's JavaScript runs in the gateway process, which holds
-`master.key` and opens every company's vault; its bundled CLI runs in each
-shift. So a bad publish reaches the whole installation on the next
-`up --build`, with no soak time and nothing but npm's own integrity check
-between the registry and the keys. The host's tests run against the lockfile's
+lockfile's. That SDK's JavaScript runs in the gateway process, and its bundled
+CLI in each shift, so a bad publish reaches the installation on the next
+`up --build` with no soak time. The host's tests run against the lockfile's
 release, not the one the image took. This is the operator's choice, made to have
-each release's features as they ship; the controls are the gate not depending
-on the release (above), `agent.slept.cli` naming the release each shift ran on,
-and `CLAUDE_SDK_VERSION=<version>` — exported, or in `docker/.env` or
-`$RIFF_ENV` — pinning one to roll back.
+each release's features as they ship.
+
+In Docker, such a publish could NOT read a stored key: the gateway seals
+secrets to the keyproxy's public key and holds nothing that opens them, and each
+key is sent only to the destination sealed into it when it was entered (see the
+vault and the proxy, below). What it could still do from inside the gateway:
+
+| | |
+| - | - |
+| read a secret typed into the Desk while it runs | yes: the value passes through the gateway on its way in |
+| delete or overwrite a stored secret | yes: noticed as a key that stops working |
+| mint scoped tokens, and so spend a key at its sealed destination | yes |
+| re-point a route, or edit where a key may go, to receive it | no: the keyproxy refuses, and an edit to the sealed destination opens nothing |
+| read a key through the route's header, its error text, or the runtime token's reserved name | no: refused, and never echoed |
+| read a key its own upstream reflects back (an echo endpoint, an error that quotes headers) | not prevented: path and method are the caller's, a shift's included. TRACE and other methods outside GET/HEAD/POST/PUT/PATCH/DELETE/OPTIONS are refused |
+| move a key to another tenant on the same host, where the path names the tenant | not prevented: a key is bound to a host, not a path |
+
+Run on a host, outside Docker, the gateway holds the private key itself and none
+of this holds; a host run has no shell and no keyproxy. Backups taken before
+2026-09-23 hold `master.key` beside the old vaults and open every secret in
+them: protect or delete them, and rotate a key you treat as exposed. The other
+controls are the gate not depending on the release (above), `agent.slept.cli`
+naming the release each shift ran on, and `CLAUDE_SDK_VERSION=<version>` —
+exported, or in `docker/.env` or `$RIFF_ENV` — pinning one to roll back.
 
 ### `claude` on a shift's PATH is not gated
 
@@ -298,8 +316,8 @@ stage the transcript into the company's own repo.
 `sandboxFilesystem` (`src/runtime/staff.ts`) keeps two boundaries across this:
 
 - **Between companies.** A shift's Bash is denied the whole installation root —
-  `installRoot()`, i.e. all of `/data`, which holds `secrets/`, `master.key` and
-  every other company — and re-admitted only its own home (`allowRead` is
+  `installRoot()`, i.e. all of `/data`, which holds `secrets/`, the proxy-token
+  secret and every other company (and held `master.key` until 2026-09-23) — and re-admitted only its own home (`allowRead` is
   `dirname(worldRoot)`). One company cannot read another's transcript any more
   than it can read another's ledger or secrets.
 - **Around the CLI's private store.** The `.claude` subtree (its resume JSONL and
@@ -583,13 +601,36 @@ readable by a shell that has run long enough", so a real key is never put in the
 box. One mechanism carries them, in three parts, and only the third is new to
 reason about:
 
-- **The vault.** `src/core/secrets.ts` encrypts each company's secrets with a
-  per-company data key, itself wrapped under a master key at `~/.riff/master.key`
-  (`0600`). The master key and the vault files sit at the installation root,
-  **outside every world**, so the shift sandbox — which re-allows a shift to read
-  only its own world — never sees the ciphertext, let alone the key that unwraps
-  it. The runtime default lives beside them in an install-level vault
-  (`install.vault.json`) sealed under the same master key; a company's own runtime
+- **The vault.** `src/core/secrets.ts` seals each value to the keyproxy's X25519
+  public key (an ephemeral key per value, HKDF-SHA256, AES-256-GCM). Bound in as
+  additional data: the vault file, the name, and `to` — the destinations (host,
+  credential header, scheme) the company's routes sent that name to when the
+  value was entered, or both runtime shapes at Anthropic for the runtime token.
+  A value moved to another company or name, or whose `to` is edited on disk,
+  does not open. The private key is at `~/.riff-keys/vault.key` (`0600`, in a
+  `0700` folder) — beside the installation, never in it — and only the keyproxy
+  container mounts that folder. The gateway, which stores secrets and never reads
+  one back, fetches the public key from the keyproxy at boot
+  (`RIFF_VAULT_PUBLIC_FROM`) and cannot open a vault: it holds no key that does,
+  and a process with that variable set refuses to load or make one. Until
+  2026-09-23 a symmetric `~/.riff/master.key` sealed everything, on the factory's
+  own mount and readable by the gateway; the gateway's first boot after the
+  change first checks the keyproxy opens a canary sealed to the key it fetched —
+  before rewriting anything — then reseals each vault to the public key, binding
+  each value to where its routes send it that day, and deletes master.key only
+  once no vault still needs it: one that cannot move is named at boot and left
+  under it, and meanwhile its runtime token still reaches Anthropic. The move is one-way: an older image cannot read
+  the new vaults, so rolling back needs the pre-upgrade backup. A keyproxy that
+  finds no key while vaults are sealed to one refuses to start rather than make
+  a new one. The vault files
+  sit at the installation root, **outside every world**, so the shift sandbox —
+  which re-allows a shift to read only its own world — never sees the
+  ciphertext. `docker/backup.sh` archives `~/.riff-keys` to its own file:
+  without it, the stored secrets have to be entered again.
+  The runtime default lives beside them in an install-level vault
+  (`_install.vault.json`, a name no company slug can take; it was
+  `install.vault.json`, the file a company founded as "Install" would have
+  had) sealed to the same key; a company's own runtime
   override and its product keys are in its per-company vault. `/api/secrets` and
   `/api/settings` write a value and can report that one is set; no endpoint reads a
   value back.
@@ -602,6 +643,18 @@ reason about:
   credential on the reserved `_runtime` route, synthesized from the stored type —
   never a service any company can declare (`SERVICE_NAME_RE` bars the leading
   underscore). The factory never runs this code and never holds a key.
+  The routes are written by the gateway, which the proxy does not trust, so
+  before sending a product key it checks the route's destination — host,
+  credential header, scheme — against the ones sealed into the value, and sends
+  nothing on a mismatch: a route re-pointed after the key was entered is refused
+  until the key is entered again for it, which only whoever holds the value can
+  do. A key entered before any route used it is sealed for nowhere, and the
+  Desk says so. The credential header must be one keys are sent on
+  (`CREDENTIAL_HEADERS`): set to `host`, a key became the TLS SNI and then the
+  certificate error the proxy returned to the caller, and the proxy now never
+  returns an upstream error's text. No route may name the runtime token, and a
+  company holding secrets cannot be renamed, since its vault's name is sealed
+  into each of them.
 
 - **The scoped token.** A shift calls `http://keyproxy:8890/svc/<name>` — its
   product routes, and the `_runtime` route for the agents' own inference — with a

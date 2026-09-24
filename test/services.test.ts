@@ -175,3 +175,22 @@ describe('static route headers are validated and normalised', () => {
     assert.equal(validateServiceRoute('svc', { ...base, headers: many }).ok, false);
   });
 });
+
+describe('a route can only send a key where keys go', () => {
+  test('the credential header is one a key is sent on, never Host or a framing header', () => {
+    // On Host, the key became the TLS SNI and then the certificate error the
+    // proxy returned to the caller.
+    for (const header of ['host', 'Host', 'connection', 'x-forwarded-host', 'cookie']) {
+      const v = validateServiceRoute('svc', { upstream: 'https://a.test', secret: 'KEY', header });
+      assert.equal(v.ok, false, header);
+    }
+    for (const header of ['authorization', 'X-Api-Key', 'x-goog-api-key']) {
+      assert.equal(validateServiceRoute('svc', { upstream: 'https://a.test', secret: 'KEY', header }).ok, true, header);
+    }
+  });
+
+  test('no route may send the runtime credential', () => {
+    const v = validateServiceRoute('svc', { upstream: 'https://a.test', secret: 'RIFF_RUNTIME_TOKEN' });
+    assert.equal(v.ok, false);
+  });
+});

@@ -15,6 +15,9 @@ import { api, type Event, type State } from '../api';
 defineProps<{ state: State; events: Event[] }>();
 
 const names = ref<string[]>([]);
+/** The origins each key will be sent to, sealed in when it was entered. */
+const bound = ref<Record<string, string[]>>({});
+const warning = ref('');
 const loading = ref(true);
 const err = ref('');
 
@@ -36,7 +39,7 @@ const canSave = computed(() => !!name.value.trim() && !!value.value && !saving.v
 const msg = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 const load = async (): Promise<void> => {
-  try { names.value = (await api.secrets()).names; err.value = ''; }
+  try { const r = await api.secrets(); names.value = r.names; bound.value = r.bound ?? {}; err.value = ''; }
   catch (e) { err.value = msg(e); }
   finally { loading.value = false; }
 };
@@ -50,8 +53,9 @@ const save = async (): Promise<void> => {
   }
   saving.value = true;
   try {
-    await api.putSecret(name.value.trim(), value.value);
+    const r = await api.putSecret(name.value.trim(), value.value);
     justSaved.value = name.value.trim();
+    warning.value = r.warning ?? '';
     name.value = ''; value.value = ''; err.value = '';
     await load();
     // The Save button is now disabled and would swallow focus; put it back where
@@ -123,7 +127,10 @@ onMounted(load);
         <code>api_key_env</code>, and the Services route, must match it.
       </p>
       <p v-if="err" class="err">{{ err }}</p>
-      <p v-else-if="justSaved" class="ok">Saved <span class="mono">{{ justSaved }}</span>.</p>
+      <template v-else-if="justSaved">
+        <p class="ok">Saved <span class="mono">{{ justSaved }}</span>.</p>
+        <p v-if="warning" class="warn">{{ warning }}</p>
+      </template>
     </section>
 
     <section class="have">
@@ -134,6 +141,9 @@ onMounted(load);
         <li v-for="n in names" :key="n" class="item">
           <span class="key mono">{{ n }}</span>
           <span class="dots faint" aria-hidden="true">••••••••</span>
+          <span class="to faint" :class="{ nowhere: !(bound[n] ?? []).length }">
+            {{ (bound[n] ?? []).length ? `sent to ${bound[n]!.map((o) => o.replace(/^https?:\/\//, '')).join(', ')}` : 'sent nowhere — add its service, then replace' }}
+          </span>
           <template v-if="pendingDelete === n">
             <span class="confirm faint">Remove?</span>
             <button class="mini danger" @click="remove(n)" @keydown.esc="pendingDelete = null">Yes</button>
@@ -185,4 +195,7 @@ section { margin-top: 26px; padding-top: 22px; border-top: 1px solid var(--line)
 .mini:focus-visible { outline: none; color: var(--ink); border-color: var(--accent); }
 .mini.danger { color: var(--alert); }
 .mini.danger:hover, .mini.danger:focus-visible { border-color: var(--alert); }
+.warn { color: var(--gold); font-size: 12px; margin-top: 6px; line-height: 1.5; }
+.to { font-size: 11px; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.to.nowhere { color: var(--gold); }
 </style>

@@ -15,7 +15,7 @@ import { DEFAULT_STAFF, readStaffDefaults, type StaffDefaults } from '../core/mo
 import type { SDKRateLimitInfo } from '@anthropic-ai/claude-agent-sdk';
 import { existsSync, mkdirSync, readFileSync, renameSync } from 'node:fs';
 import { mkdirWithin } from '../worldfs/within.ts';
-import { dropVault } from '../core/secrets.ts';
+import { dropVault, listSecretNames } from '../core/secrets.ts';
 import { join } from 'node:path';
 
 /**
@@ -374,6 +374,13 @@ export class Registry {
 
     const wanted = patch.slug?.trim() ? slugId(patch.slug) : slug;
     if (wanted !== slug && this.has(wanted)) return { ok: false, reason: `${wanted} already exists` };
+    // Each secret is sealed with its vault's name bound in, and nothing here can
+    // reseal one: the vault could not follow the company, and a company founded
+    // later under the old name would have inherited it.
+    if (wanted !== slug && listSecretNames(slug).length) {
+      return { ok: false, reason: `${slug} holds secrets, which are sealed to its current name; ` +
+        `delete them, rename, then enter them again` };
+    }
 
     // The scheduler reads its dials once, at construction, so a policy change
     // only means anything after the company is let go and built again. That

@@ -312,6 +312,34 @@ const FORBIDDEN_STATIC_HEADERS = new Set([
 const MAX_STATIC_HEADERS = 50;
 
 /**
+ * The headers a key may be injected on. A list, not a rule: set to `host`, the
+ * key became the TLS SNI and then the certificate error the proxy handed back
+ * to the caller — a key read out through a route's own configuration.
+ */
+export const CREDENTIAL_HEADERS = new Set([
+  'authorization', 'x-api-key', 'api-key', 'apikey', 'x-goog-api-key', 'x-auth-token', 'x-api-token',
+]);
+
+/**
+ * Who receives a key sent on a route: the host, and the header and scheme it
+ * rides on. Sealed into each secret when its value is entered (secrets.ts), and
+ * checked by the keyproxy against the route it is asked to use, so a route the
+ * gateway later points somewhere else gets nothing. Mirrors how the keyproxy
+ * injects: header defaults to `authorization`, scheme to `Bearer`.
+ */
+export type Destination = { origin: string; header: string; scheme: string };
+export const destinationOf = (route: { upstream: string; header?: string; scheme?: string }): Destination => ({
+  origin: new URL(route.upstream).origin,
+  header: (route.header || 'authorization').toLowerCase(),
+  scheme: route.scheme ?? 'Bearer',
+});
+export const sameDestination = (a: Destination, b: Destination): boolean =>
+  a.origin === b.origin && a.header === b.header && a.scheme === b.scheme;
+/** Where a company's routes send the secret `name`, today. */
+export const destinationsFor = (services: Record<string, ServiceRoute>, name: string): Destination[] =>
+  Object.values(services).filter((r) => r.secret === name).map(destinationOf);
+
+/**
  * Validate and normalise a service route before it is written to a company's
  * config. The credential this route names is decrypted in the proxy and sent to
  * `upstream` over the open internet, so the one hard line is that upstream must
@@ -342,9 +370,18 @@ export const validateServiceRoute = (
   if (!ENV_NAME_RE.test(secret)) {
     return { ok: false, reason: 'secret must name a vault secret: a valid environment identifier (letter or underscore, then letters, digits, underscores)' };
   }
+  // The runtime token is Riff's, sent only on the reserved runtime route: named
+  // by a declared route, it was a company's Claude credential sent to any host.
+  if (secret === RUNTIME_SECRET_NAME) {
+    return { ok: false, reason: `${RUNTIME_SECRET_NAME} is the runtime credential and cannot be sent on a service route` };
+  }
   const header = typeof route.header === 'string' ? route.header.trim() : '';
   if (header && !HEADER_NAME_RE.test(header)) {
     return { ok: false, reason: `header ${JSON.stringify(header)} is not a valid HTTP header name` };
+  }
+  if (header && !CREDENTIAL_HEADERS.has(header.toLowerCase())) {
+    return { ok: false, reason: `header ${JSON.stringify(header)} is not a credential header this proxy injects on ` +
+      `(${[...CREDENTIAL_HEADERS].join(', ')})` };
   }
   // scheme '' is a deliberate choice (inject the raw value), so only a non-string
   // is "absent"; a control char in it would break out of the header line.
@@ -476,6 +513,10 @@ export const runtimeRouteHeaders = (type: RuntimeCredentialType): Record<string,
   type === 'apiKey'
     ? { 'anthropic-version': ANTHROPIC_VERSION }
     : { 'anthropic-version': ANTHROPIC_VERSION, 'anthropic-beta': 'oauth-2025-04-20', 'user-agent': CLAUDE_CODE_UA };
+/** Where a runtime token may go: Anthropic, in either credential shape, since
+ *  the type is chosen apart from the value and may change under it. */
+export const runtimeDestinations = (): Destination[] =>
+  (['subscription', 'apiKey'] as const).map((t) => destinationOf({ upstream: RUNTIME_UPSTREAM, ...runtimeRouteShape(t) }));
 export const runtimeRouteShape = (type: RuntimeCredentialType): { header: string; scheme: string } =>
   type === 'apiKey' ? { header: 'x-api-key', scheme: '' } : { header: 'authorization', scheme: 'Bearer' };
 

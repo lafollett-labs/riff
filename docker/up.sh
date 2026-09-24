@@ -42,6 +42,18 @@ done
 
 compose() { docker compose -f "$here/compose.yaml" "$@"; }
 
+# A setting from the env files, later winning, as compose layers them.
+from_env_files() {
+  for f in "$outside_env" "$local_env"; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    v=$(sed -n "s/^[[:space:]]*\(export[[:space:]]*\)\{0,1\}$1=[\"']\{0,1\}\([^\"']*\)[\"']\{0,1\}[[:space:]]*$/\2/p" "$f" | tail -1)
+    if [ -n "$v" ]; then printf '%s' "$v"; return 0; fi
+  done
+  # Found nowhere is an answer, not a failure: under set -e, a non-zero status
+  # here ended the script in silence, before anything was made or backed up.
+  return 0
+}
+
 # Both files are handed to compose, later winning, so ordinary settings can live
 # in either. Naming any --env-file replaces the automatic docker/.env, so when
 # both exist both are named; spelling the cases out keeps every path quoted,
@@ -194,9 +206,38 @@ drain() {
   fi
 }
 
+# The keyproxy's key directory, where compose will mount it — RIFF_KEYS may be
+# set in either env file, which this shell never read — made by you rather than
+# by the daemon, which makes a missing bind source root's on Linux. Refused
+# inside the data directory: the factory mounts that, and the key's whole point
+# is to be somewhere the factory is not.
+case $subcommand in
+  up|create)
+    # As compose reads them — this shell, then $RIFF_ENV, then docker/.env —
+    # without asking compose, whose `config --environment` older releases lack.
+    data=${RIFF_DATA:-$(from_env_files RIFF_DATA)}
+    data=${data:-$HOME/.riff}
+    data=${data%/}
+    keys=${RIFF_KEYS:-$(from_env_files RIFF_KEYS)}
+    # A trailing slash on RIFF_DATA made the default `.riff/-keys` — inside it.
+    keys=${keys%/}
+    keys=${keys:-$data-keys}
+    case "$keys/" in
+      "$data"/*) echo "riff: RIFF_KEYS ($keys) must be outside RIFF_DATA ($data), which the factory mounts" >&2; exit 1 ;;
+    esac
+    # Exported, so compose mounts exactly what was checked here.
+    RIFF_DATA=$data RIFF_KEYS=$keys
+    export RIFF_DATA RIFF_KEYS
+    mkdir -p "$keys"
+    # Yours to tighten; a directory already handed to the keyproxy's uid is not.
+    [ -O "$keys" ] && chmod 700 "$keys"
+    ;;
+esac
+
 case $subcommand in
   up|restart|down|stop|create) drain ;;
 esac
+
 
 # `up` starts the stack. Watching it is `up.sh logs -f`, which is why that is a
 # separate line in the usage above. Attached — which is what plain `docker

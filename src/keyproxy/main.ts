@@ -2,10 +2,12 @@ import { createServer, request as httpRequest, type IncomingMessage, type Server
   type OutgoingHttpHeaders } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import {
-  resolveConfig, RUNTIME_SERVICE_NAME, RUNTIME_SECRET_NAME, RUNTIME_UPSTREAM,
-  runtimeRouteHeaders, runtimeRouteShape, type ServiceRoute,
+  resolveConfig, RUNTIME_SERVICE_NAME, RUNTIME_SECRET_NAME, RUNTIME_UPSTREAM, CREDENTIAL_HEADERS,
+  runtimeRouteHeaders, runtimeRouteShape, destinationOf, sameDestination, type ServiceRoute,
 } from '../core/config.ts';
-import { getSecret, getInstallSecret } from '../core/secrets.ts';
+import {
+  openSecret, openInstallSecret, loadOrCreateVaultKey, vaultPublicKey, vaultKeysDir, openCanary,
+} from '../core/secrets.ts';
 import { readSettings } from '../core/settings.ts';
 import { verifyScopedToken } from '../core/proxytoken.ts';
 import { INSTALL_SCOPE, unifiedWindows, type UsageSnapshot } from '../core/usage.ts';
@@ -46,6 +48,8 @@ const HOP_BY_HOP = new Set([
   'proxy-connection', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'content-length',
 ]);
 
+const FORWARDED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS']);
+
 const send = (res: ServerResponse, status: number, body: string): void => {
   res.writeHead(status, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ error: body }));
@@ -79,13 +83,20 @@ const runtimeRoute = (company: string):
   // it is always the install default. See INSTALL_SCOPE.
   const own = company === INSTALL_SCOPE ? undefined : resolveConfig(process.cwd(), company).runtimeCredential;
   const type = own?.type ?? readSettings().runtimeCredential?.type ?? 'subscription';
-  const key = own ? getSecret(company, RUNTIME_SECRET_NAME) : getInstallSecret(RUNTIME_SECRET_NAME);
+  const opened = own ? openSecret(company, RUNTIME_SECRET_NAME) : openInstallSecret(RUNTIME_SECRET_NAME);
+  const key = opened?.value;
   if (key == null) {
     return { status: 502, msg: own
       ? "this company has a runtime credential type but no token; set it in the company's Runtime credential"
       : 'no runtime credential is set; set one in Riff Settings' };
   }
   const { header, scheme } = runtimeRouteShape(type);
+  // The route is a constant, but the value still says where it may go: one
+  // entered for Anthropic is sent to Anthropic.
+  const here = destinationOf({ upstream: RUNTIME_UPSTREAM, header, scheme });
+  if (!opened!.to.some((d) => sameDestination(d, here))) {
+    return { status: 502, msg: 'the runtime credential was not stored for Anthropic; set it again' };
+  }
   return {
     route: { upstream: RUNTIME_UPSTREAM, secret: RUNTIME_SECRET_NAME, header, scheme, headers: runtimeRouteHeaders(type) },
     key,
@@ -134,6 +145,26 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
 
   if (url.pathname === '/healthz') { res.writeHead(200); res.end('ok'); return; }
 
+  // What the gateway seals secrets to. Public by definition: it opens nothing.
+  if (url.pathname === '/vault/public-key' && req.method === 'GET') {
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(vaultPublicKey()));
+    return;
+  }
+
+  // Proof that this proxy opens what the gateway sealed, asked once, before the
+  // gateway deletes the key it can no longer need. Opens the canary only: its
+  // vault name is one no secret has, so no stored value opens here.
+  if (url.pathname === '/vault/verify' && req.method === 'POST') {
+    let digest: string;
+    try {
+      digest = openCanary(JSON.parse((await readBody(req)).toString('utf8')) as Parameters<typeof openCanary>[0]);
+    } catch { return send(res, 400, 'not a canary this key opens'); }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ digest }));
+    return;
+  }
+
   // The plan's windows, for the gateway only. Percentages and reset times, no
   // secret — but a company's own token must not read the installation's plan,
   // so it takes the install scope, which only the gateway can mint.
@@ -176,13 +207,34 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
     // A service the company has not declared gets nothing — same answer whether
     // it is unknown or forbidden, so probing tells an attacker nothing.
     if (!declared) return send(res, 404, `no service '${service}' for this company`);
-    const secret = getSecret(scope.company, declared.secret);
+    // What validateServiceRoute refuses, refused again here: the config file is
+    // the gateway's to write, and the gateway is what this proxy does not trust.
+    if (declared.secret === RUNTIME_SECRET_NAME) {
+      return send(res, 403, `service '${service}' names the runtime credential, which no service route may send`);
+    }
+    const dest = destinationOf(declared);
+    if (!CREDENTIAL_HEADERS.has(dest.header)) {
+      return send(res, 403, `service '${service}' injects on '${dest.header}', which is not a credential header`);
+    }
+    const opened = openSecret(scope.company, declared.secret);
     // The route names a secret the vault does not hold: a misconfiguration, not a
     // caller error, and never a reason to forward the call unauthenticated.
-    if (secret == null) return send(res, 502, `service '${service}' has no credential configured`);
+    if (opened == null) return send(res, 502, `service '${service}' has no credential configured`);
+    // Where the value may go was sealed into it when it was entered. A route
+    // pointed anywhere else since — another host, another header, another
+    // scheme — gets nothing until the key is entered again for it.
+    if (!opened.to.some((d) => sameDestination(d, dest))) {
+      console.log(`keyproxy ${scope.company} ${service} -> ${new URL(declared.upstream).host} destination-refused`);
+      return send(res, 502, `service '${service}' sends its key to ${dest.origin} on '${dest.header}', ` +
+        `which is not where it was stored for; enter the key again to send it there`);
+    }
     route = declared;
-    key = secret;
+    key = opened.value;
   }
+
+  // TRACE and its kin answer with the request they were sent, key included; an
+  // upstream that honours one hands the key to whoever asked.
+  if (!FORWARDED_METHODS.has(req.method ?? '')) return send(res, 405, `method ${req.method} is not forwarded`);
 
   const target = upstreamURL(route, rest, url.search);
 
@@ -203,7 +255,9 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
   // credential on the route's header. Default is a bearer Authorization; a
   // service wanting a raw header value sets an empty scheme.
   const headers: OutgoingHttpHeaders = {};
-  const injectHeader = (route.header ?? 'authorization').toLowerCase();
+  // The same reading of the route the destination check made, so what was
+  // checked is what is sent.
+  const { header: injectHeader, scheme } = destinationOf(route);
   for (const [k, v] of Object.entries(req.headers)) {
     if (v == null) continue;
     const lk = k.toLowerCase();
@@ -240,7 +294,6 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
       }
     }
   }
-  const scheme = route.scheme ?? 'Bearer';
   headers[injectHeader] = scheme ? `${scheme} ${key}` : key;
 
   const method = req.method ?? 'GET';
@@ -306,7 +359,9 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
     });
     upstreamReq.on('error', (e) => {
       console.log(`keyproxy ${scope.company} ${service} -> ${target.host} transport-error`);
-      fail(502, `upstream unreachable: ${e instanceof Error ? e.message : String(e)}`);
+      // Never the error's text: a TLS failure quoted the Host header, and a key
+      // routed onto Host came straight back to the caller in it.
+      fail(502, 'upstream unreachable');
     });
     // node:http has NO default timeout (undici's fetch applied ~300s), so a
     // stalling upstream would hang this request forever — and on the SHARED
@@ -324,6 +379,21 @@ export const handle = async (req: IncomingMessage, res: ServerResponse): Promise
 };
 
 export const start = (port = PORT): ReturnType<typeof createServer> => {
+  // Made before the first request, so the gateway's fetch of the public key
+  // never races its creation.
+  let kid: string;
+  try {
+    ({ kid } = loadOrCreateVaultKey());
+  } catch (e) {
+    // Said as the fix, not a stack: on a rootful Linux daemon /keys is not
+    // this user's until someone makes it so.
+    console.error(`keyproxy: cannot read or create the vault key in ${vaultKeysDir()} ` +
+      `(${e instanceof Error ? e.message : String(e)}), running as uid ${process.getuid?.() ?? '?'}.\n` +
+      `  Give the host directory behind RIFF_KEYS (default ~/.riff-keys) to this uid, or set UID/GID ` +
+      `in docker/.env and uncomment the keyproxy's user: line in compose.yaml.`);
+    process.exit(1);
+  }
+  console.log(`keyproxy vault key ${kid}`);
   const server = createServer((req, res) => {
     handle(req, res).catch((e) => {
       // A handler that throws must still answer, and must not leak a stack that

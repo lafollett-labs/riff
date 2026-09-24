@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { systemClock } from '../core/clock.ts';
 import {
   guessKeeperName, listCompanies, migrateLegacyLayout, resolveSlug, validateServiceRoute,
-  readRuntimeCredential, RUNTIME_SECRET_NAME,
+  readRuntimeCredential, RUNTIME_SECRET_NAME, destinationsFor, destinationOf, sameDestination,
+  runtimeDestinations, resolveConfig,
 } from '../core/config.ts';
 import { Registry, type Company } from '../company/registry.ts';
 import { runtimeCredentialHealth } from '../runtime/credential.ts';
@@ -16,7 +17,8 @@ import { isOperatorError, installRoot } from '../core/config.ts';
 import { takeInstallationLock, type Lock } from '../core/lock.ts';
 import {
   putSecret, listSecretNames, deleteSecret, hasSecret,
-  putInstallSecret, hasInstallSecret, deleteInstallSecret,
+  putInstallSecret, hasInstallSecret, deleteInstallSecret, fetchVaultPublicKey, migrateVaults, verifyCanary,
+  secretBoundTo,
 } from '../core/secrets.ts';
 import { readSettings, setDefaultRuntimeCredentialType, clearDefaultRuntimeCredential,
          setUsagePollMinutes, DEFAULT_USAGE_POLL_MINUTES, MAX_USAGE_POLL_MINUTES } from '../core/settings.ts';
@@ -345,7 +347,7 @@ const server = createServer(async (req, res) => {
       }
       try {
         if (rc) setDefaultRuntimeCredentialType(rc.type);
-        if (value) putInstallSecret(RUNTIME_SECRET_NAME, value);
+        if (value) putInstallSecret(RUNTIME_SECRET_NAME, value, runtimeDestinations());
       } catch (e) {
         return json(res, { error: e instanceof Error ? e.message : String(e) }, 400);
       }
@@ -1062,7 +1064,10 @@ const server = createServer(async (req, res) => {
         // The runtime token is Riff's, not a product secret: it never appears in
         // this list, and PUT/DELETE below refuse it. It is managed only through
         // /api/runtime-credential (per company) and /api/settings (the default).
-        return json(res, { names: listSecretNames(co.slug).filter((n) => n !== RUNTIME_SECRET_NAME) });
+        const names = listSecretNames(co.slug).filter((n) => n !== RUNTIME_SECRET_NAME);
+        // Where each will be sent: the origins sealed into it. Not a value.
+        return json(res, { names,
+          bound: Object.fromEntries(names.map((n) => [n, (secretBoundTo(co.slug, n) ?? []).map((d) => d.origin)])) });
       }
       if (p === '/api/secrets' && method === 'PUT') {
         const b = await readBody(req);
@@ -1076,14 +1081,19 @@ const server = createServer(async (req, res) => {
         if (name === RUNTIME_SECRET_NAME) {
           return json(res, { error: `${RUNTIME_SECRET_NAME} is reserved — set it under Runtime credential, not as a secret` }, 400);
         }
+        // Bound to wherever this company's routes send it now: the keyproxy
+        // sends it nowhere else, so a route re-pointed later (by anyone who can
+        // write this config) gets nothing until the value is entered again.
+        const to = destinationsFor(cfg.services, name);
         try {
-          putSecret(co.slug, name, value);
+          putSecret(co.slug, name, value, to);
         } catch (e) {
           // A bad name or an empty value is the caller's error, not a 500.
           return json(res, { error: e instanceof Error ? e.message : String(e) }, 400);
         }
-        // Never echo the value. The name is enough to confirm the write landed.
-        return json(res, { ok: true, name });
+        // Never echo the value. The name, and where it will go, confirm the write.
+        return json(res, { ok: true, name, boundTo: to.map((d) => d.origin),
+          ...(to.length ? {} : { warning: 'no service uses this key yet, so it will be sent nowhere; add the service, then enter the key again' }) });
       }
       if (p === '/api/secrets' && method === 'DELETE') {
         const name = url.searchParams.get('name')?.trim() ?? '';
@@ -1121,7 +1131,7 @@ const server = createServer(async (req, res) => {
             const r = await registry.update(co.slug, { runtimeCredential: rc });
             if (!r.ok) return json(res, { error: r.reason }, 409);
           }
-          if (value) putSecret(co.slug, RUNTIME_SECRET_NAME, value);
+          if (value) putSecret(co.slug, RUNTIME_SECRET_NAME, value, runtimeDestinations());
         } catch (e) {
           return json(res, { error: e instanceof Error ? e.message : String(e) }, 400);
         }
@@ -1144,7 +1154,13 @@ const server = createServer(async (req, res) => {
       // header — so the whole map is safe to read back. A route points the proxy
       // at a host and names the key to inject; the value lives only in the vault.
       if (p === '/api/services' && method === 'GET') {
-        return json(res, { services: cfg.services });
+        // Routes whose key is stored but sealed for somewhere else: they will be
+        // refused until the key is entered again for them.
+        const stale = Object.entries(cfg.services).filter(([, r]) => {
+          const bound = secretBoundTo(co.slug, r.secret);
+          return bound !== null && !bound.some((d) => sameDestination(d, destinationOf(r)));
+        }).map(([n]) => n);
+        return json(res, { services: cfg.services, stale });
       }
       if (p === '/api/services' && method === 'PUT') {
         const b = await readBody(req);
@@ -1155,7 +1171,13 @@ const server = createServer(async (req, res) => {
         // reads fresh, so two concurrent writes compose instead of clobbering.
         const r = await registry.update(co.slug, { setService: { name, route: v.route } });
         if (!r.ok) return json(res, { error: r.reason }, 409);
-        return json(res, { ok: true, name });
+        // A key is sealed for where its routes pointed when it was entered; say
+        // so now, rather than at the first call that is refused.
+        const bound = secretBoundTo(co.slug, v.route.secret);
+        const here = destinationOf(v.route);
+        return json(res, { ok: true, name,
+          ...(bound && !bound.some((d) => sameDestination(d, here))
+            ? { warning: `${v.route.secret} was stored for somewhere else; enter it again to send it to ${here.origin}` } : {}) });
       }
       if (p === '/api/services' && method === 'DELETE') {
         const name = url.searchParams.get('name')?.trim() ?? '';
@@ -1176,6 +1198,27 @@ const server = createServer(async (req, res) => {
     return json(res, { error: err instanceof Error ? err.message : String(err) }, 500);
   }
 });
+
+// Secrets are sealed to the keyproxy's public key, fetched before anything can
+// store one. Then any vault still under master.key is moved across and
+// master.key deleted — this process could open those vaults until now, and
+// after this nothing here can. A failure is said, not fatal: the companies'
+// work does not wait on it, and storing a secret fails loudly until it is fixed.
+try {
+  await fetchVaultPublicKey();
+  // Each value bound to where its company's routes send it today.
+  const moved = await migrateVaults((company, name) => {
+    if (name === RUNTIME_SECRET_NAME) return runtimeDestinations();
+    if (!company) return [];
+    try { return destinationsFor(resolveConfig(process.cwd(), company).services, name); } catch { return []; }
+  }, verifyCanary);
+  if (moved) {
+    console.log(`\n  Vaults: ${moved.secrets} secret(s) in ${moved.vaults} vault(s) resealed to the keyproxy's key` +
+      (moved.failed.length ? `; NOT moved: ${moved.failed.join(', ')} — master.key kept for them` : '; master.key deleted'));
+  }
+} catch (e) {
+  console.error(`\n  Vaults: ${e instanceof Error ? e.message : String(e)}`);
+}
 
 server.listen(PORT, () => {
   if (migrated) console.log(`\n  Moved ${migrated.moved} into companies/`);

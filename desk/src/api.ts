@@ -320,9 +320,11 @@ export const api = {
    * written, the same shape as the endpoint. Every call carries the company via
    * withCompany, so a secret is set for exactly the company on screen.
    */
-  secrets: () => get<{ names: string[] }>('/api/secrets'),
+  secrets: () => get<{ names: string[]; bound: Record<string, string[]> }>('/api/secrets'),
+  /** `boundTo` is where the value will be sent, sealed into it now; a key no
+   *  route uses yet comes back with a `warning` and goes nowhere. */
   putSecret: (name: string, value: string) =>
-    send<{ ok: boolean; name: string }>('/api/secrets', 'PUT', { name, value }),
+    send<{ ok: boolean; name: string; boundTo: string[]; warning?: string }>('/api/secrets', 'PUT', { name, value }),
   deleteSecret: (name: string) =>
     send<{ deleted: boolean }>(`/api/secrets?name=${encodeURIComponent(name)}`, 'DELETE'),
   /**
@@ -341,9 +343,11 @@ export const api = {
    * NAME, a host, a header), so unlike secrets the whole map reads back. Set a
    * route with the secret name a product's `api_key_env` will point at.
    */
-  services: () => get<{ services: Record<string, ServiceRoute> }>('/api/services'),
+  /** `stale`: routes whose key was stored for somewhere else, refused until
+   *  the key is entered again. */
+  services: () => get<{ services: Record<string, ServiceRoute>; stale: string[] }>('/api/services'),
   putService: (name: string, route: ServiceRoute) =>
-    send<{ ok: boolean; name: string }>('/api/services', 'PUT', { name, ...route }),
+    send<{ ok: boolean; name: string; warning?: string }>('/api/services', 'PUT', { name, ...route }),
   deleteService: (name: string) =>
     send<{ deleted: boolean }>(`/api/services?name=${encodeURIComponent(name)}`, 'DELETE'),
   /**

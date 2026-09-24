@@ -129,6 +129,25 @@ describe('managing a company', () => {
     assert.equal(r['ledgerOpens'], true, 'the moved ledger must still open');
   });
 
+  test('a company holding secrets keeps its slug: they are sealed to it', () => {
+    // Nothing in the gateway can reseal a secret, so the vault could not
+    // follow, and a company later founded under the old name would get it.
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const { putSecret } = await import('${process.cwd()}/src/core/secrets.ts');
+      const r = new Registry(systemClock);
+      r.found({ name: 'Alpha Works', business: '', ceo: 'Ash', chair: 'Cali' });
+      putSecret('alpha-works', 'KEY', 'v', []);
+      const res = await r.update('alpha-works', { slug: 'alpha' });
+      console.log(JSON.stringify({ res, slugs: r.list().map((x) => x.slug) }));
+    `);
+    const r = JSON.parse(out) as { res: { ok: boolean; reason?: string }; slugs: string[] };
+    assert.equal(r.res.ok, false);
+    assert.match(r.res.reason!, /sealed to its current name/);
+    assert.deepEqual(r.slugs, ['alpha-works']);
+  });
+
   test('a service route is a delta that composes, is read back, and never moves the folder', () => {
     const out = run(`
       const { Registry } = await import('${process.cwd()}/src/company/registry.ts');

@@ -272,7 +272,7 @@ server.registerTool('riff_services', {
 
 server.registerTool('riff_set_service', {
   title: 'Riff: set a service route',
-  description: 'Create or update one service route (create and update are the same write). `secret` names a vault secret that must already exist (set its VALUE in the Desk Secrets tab — this tool never takes a value). `scheme` is the credential prefix: "Bearer" (default) or "" for a raw value like x-api-key. `headers` are static, NON-secret headers injected on every request — e.g. an OAuth/subscription upstream\'s {"anthropic-beta":"oauth-2025-04-20","user-agent":"claude-code/1.x"}; a key naming the credential header or a connection header is refused.',
+  description: 'Create or update one service route (create and update are the same write). `secret` names a vault secret (set its VALUE in the Desk Secrets tab — this tool never takes a value). A value is sealed for the routes that name it when it is entered, so set the route FIRST, and enter the value again after changing a route\'s upstream, header or scheme. `header` must be a credential header (authorization, x-api-key, api-key, apikey, x-goog-api-key, x-auth-token, x-api-token). `scheme` is the credential prefix: "Bearer" (default) or "" for a raw value like x-api-key. `headers` are static, NON-secret headers injected on every request — e.g. an OAuth/subscription upstream\'s {"anthropic-beta":"oauth-2025-04-20","user-agent":"claude-code/1.x"}; a key naming the credential header or a connection header is refused.',
   inputSchema: {
     company,
     name: z.string().describe('service name — a single path segment used in /svc/<name>'),

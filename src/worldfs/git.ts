@@ -21,8 +21,8 @@ import { systemClock, type Clock } from '../core/clock.ts';
  * The world is written by the staff, and this process runs git over it outside
  * the shift sandbox — every commit a shift makes is committed by the gateway.
  * A hook, an fsmonitor, or a signing program named in the repository's own
- * files would run as the gateway: past bubblewrap, able to read master.key and
- * every company. Flags given with -c outrank anything in .git/config, so these
+ * files would run as the gateway: past bubblewrap, able to read every company
+ * and mint any company's scoped token. Flags given with -c outrank anything in .git/config, so these
  * hold whatever the repository says.
  */
 const INERT = [

@@ -1,11 +1,12 @@
 import { test, describe, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createServer, get as httpGet, type Server, type IncomingMessage } from 'node:http';
+import { createServer, get as httpGet, request as httpRequest, type Server, type IncomingMessage } from 'node:http';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import type { AddressInfo } from 'node:net';
+import { destinationsFor, type ServiceRoute } from '../src/core/config.ts';
 
 /**
  * The proxy holds the real key; the factory never does. These tests stand up a
@@ -35,6 +36,12 @@ const readAll = (req: IncomingMessage): Promise<string> =>
   new Promise((res) => { let b = ''; req.on('data', (c) => (b += c)); req.on('end', () => res(b)); });
 
 const port = (s: Server): number => (s.address() as AddressInfo).port;
+
+/** Where the fixture company's routes send `name` now: what the gateway binds
+ *  a value to when it is entered. */
+const bound = (name: string) => destinationsFor(
+  (JSON.parse(readFileSync(join(process.env['RIFF_ROOT']!, 'companies', 'shipit', 'config.json'), 'utf8')) as
+    { services: Record<string, ServiceRoute> }).services, name);
 
 beforeEach(async () => {
   root = mkdtempSync(join(tmpdir(), 'riff-keyproxy-'));
@@ -107,9 +114,9 @@ beforeEach(async () => {
       plaintext: { upstream: 'http://example.com/', secret: 'OPENROUTER_API_KEY' },
     },
   }));
-  secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY');
-  secrets.putSecret('shipit', 'CUSTOM_KEY', 'CUSTOM-REAL-KEY');
-  secrets.putSecret('shipit', 'ANTHROPIC_AUTH_TOKEN', 'oauth-REAL-TOKEN');
+  secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY', bound('OPENROUTER_API_KEY'));
+  secrets.putSecret('shipit', 'CUSTOM_KEY', 'CUSTOM-REAL-KEY', bound('CUSTOM_KEY'));
+  secrets.putSecret('shipit', 'ANTHROPIC_AUTH_TOKEN', 'oauth-REAL-TOKEN', bound('ANTHROPIC_AUTH_TOKEN'));
 
   proxy = createServer((req, res) => keyproxy.handle(req, res).catch(() => {
     if (!res.headersSent) { res.writeHead(500); res.end(); }
@@ -321,6 +328,107 @@ describe('a redirect from the upstream never carries the key onward', () => {
     const r = await call('/svc/openrouter/redirect', token, '{}');
     assert.equal(r.status, 502);
     assert.equal(attackerHits, 0);
+  });
+});
+
+describe('a key goes only where it was entered for', () => {
+  // The gateway writes routes and vault files, and runs npm's newest Agent SDK:
+  // a hostile one must not get a key by re-pointing a route or editing a vault.
+  const configPath = () => join(process.env['RIFF_ROOT']!, 'companies', 'shipit', 'config.json');
+  const vaultPath = () => join(process.env['RIFF_ROOT']!, 'secrets', 'shipit.vault.json');
+  const edit = (service: string, patch: Record<string, unknown>) => {
+    const cfg = JSON.parse(readFileSync(configPath(), 'utf8'));
+    Object.assign(cfg.services[service], patch);
+    writeFileSync(configPath(), JSON.stringify(cfg));
+  };
+  const attackerURL = () => `http://127.0.0.1:${port(attacker)}/api/v1`;
+
+  test('a route moved to another host is refused, and the key never reaches it', async () => {
+    const token = proxytoken.mintScopedToken('shipit', 3600);
+    edit('openrouter', { upstream: attackerURL() });
+    const r = await call('/svc/openrouter/models', token);
+    assert.equal(r.status, 502);
+    assert.match(((await r.json()) as { error: string }).error, /enter the key again/);
+    assert.equal(attackerHits, 0);
+  });
+
+  test('so is the first call to it: there is no first use to win', async () => {
+    // Re-pointed before the key was ever sent anywhere, as right after a move.
+    edit('openrouter', { upstream: attackerURL() });
+    assert.equal((await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600))).status, 502);
+    assert.equal(attackerHits, 0);
+  });
+
+  test('a route moved to another header or scheme is refused too', async () => {
+    const token = proxytoken.mintScopedToken('shipit', 3600);
+    edit('openrouter', { header: 'x-api-key', scheme: '' });
+    assert.equal((await call('/svc/openrouter/models', token)).status, 502);
+  });
+
+  test('entering the key again is what moves it', async () => {
+    edit('openrouter', { upstream: attackerURL() });
+    secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY', bound('OPENROUTER_API_KEY'));
+    assert.equal((await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600))).status, 200);
+    assert.equal(attackerHits, 1);
+  });
+
+  test('another path on the same host is the same destination', async () => {
+    edit('openrouter', { upstream: `http://127.0.0.1:${port(upstream)}/other/base` });
+    assert.equal((await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600))).status, 200);
+  });
+
+  test('a destination written into the vault file opens nothing', async () => {
+    const vault = JSON.parse(readFileSync(vaultPath(), 'utf8'));
+    vault.secrets.OPENROUTER_API_KEY.to.push({ origin: new URL(attackerURL()).origin, header: 'authorization', scheme: 'Bearer' });
+    writeFileSync(vaultPath(), JSON.stringify(vault));
+    edit('openrouter', { upstream: attackerURL() });
+    assert.notEqual((await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600))).status, 200);
+    assert.equal(attackerHits, 0);
+  });
+
+  test('a key entered before any service used it goes nowhere', async () => {
+    secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY', []);
+    assert.equal((await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600))).status, 502);
+  });
+
+  test('a key is never put on Host, and an upstream failure never quotes what was sent', async () => {
+    // Set on Host, the key became the TLS SNI and then the certificate error
+    // the proxy returned to the caller.
+    edit('openrouter', { header: 'host' });
+    const r = await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600));
+    assert.equal(r.status, 403);
+    assert.ok(!(await r.text()).includes('REALKEY'));
+    edit('openrouter', { header: 'authorization', upstream: 'https://127.0.0.1:1/' });
+    secrets.putSecret('shipit', 'OPENROUTER_API_KEY', 'sk-or-v1-REALKEY', bound('OPENROUTER_API_KEY'));
+    const down = await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600));
+    assert.equal(down.status, 502);
+    assert.deepEqual(await down.json(), { error: 'upstream unreachable' });
+  });
+
+  test('a method that echoes the request is not forwarded', async () => {
+    // node:http, since fetch refuses to send TRACE at all.
+    const status = await new Promise<number>((resolve, reject) => {
+      const q = httpRequest({ host: '127.0.0.1', port: port(proxy), path: '/svc/openrouter/models', method: 'TRACE',
+        headers: { authorization: `Bearer ${proxytoken.mintScopedToken('shipit', 3600)}` } },
+        (r) => { r.resume(); resolve(r.statusCode ?? 0); });
+      q.on('error', reject);
+      q.end();
+    });
+    assert.equal(status, 405);
+    assert.equal(seen, null, 'nothing reached the upstream');
+  });
+
+  test('no service route may send the runtime credential', async () => {
+    secrets.putSecret('shipit', 'RIFF_RUNTIME_TOKEN', 'sk-ant-oat-RUNTIME', [{ origin: new URL(attackerURL()).origin, header: 'authorization', scheme: 'Bearer' }]);
+    edit('openrouter', { upstream: attackerURL(), secret: 'RIFF_RUNTIME_TOKEN' });
+    assert.equal((await call('/svc/openrouter/models', proxytoken.mintScopedToken('shipit', 3600))).status, 403);
+    assert.equal(attackerHits, 0);
+  });
+
+  test('a company named "install" has its own vault, not the installation\'s', async () => {
+    secrets.putInstallSecret('RIFF_RUNTIME_TOKEN', 'install-default', []);
+    assert.equal(secrets.getSecret('install', 'RIFF_RUNTIME_TOKEN'), null);
+    assert.ok(secrets.installVaultPath().endsWith('_install.vault.json'));
   });
 });
 

@@ -232,6 +232,60 @@ describe('what the factory can reach', () => {
   });
 });
 
+describe('a backup carries the vault key, or says it cannot', () => {
+  // A copy of the script beside its own docker/.env, so this never reads the
+  // operator's env file, data or keys.
+  const setup = (dotenv: string) => {
+    const home = mkdtempSync(join(tmpdir(), 'riff-backup-'));
+    mkdirSync(join(home, 'docker'));
+    writeFileSync(join(home, 'docker', 'backup.sh'), readFileSync('docker/backup.sh'));
+    writeFileSync(join(home, 'docker', '.env'), dotenv);
+    mkdirSync(join(home, '.riff', 'companies', 'co'), { recursive: true });
+    return home;
+  };
+  const backup = (home: string) => spawnSync('sh', [join(home, 'docker', 'backup.sh'), join(home, 'out')], {
+    encoding: 'utf8', env: { PATH: process.env['PATH']!, HOME: home } });
+
+  test('an env file that sets neither RIFF_DATA nor RIFF_KEYS still backs up', () => {
+    // It exited 1 in silence: the lookup's "not found" ended the script under set -e.
+    const home = setup('PORT=4174\n');
+    mkdirSync(join(home, '.riff-keys'));
+    writeFileSync(join(home, '.riff-keys', 'vault.key'), 'k');
+    const r = backup(home);
+    assert.equal(r.status, 0, r.stderr);
+    const out = readdirSync(join(home, 'out'));
+    assert.ok(out.some((f) => /^riff-2.*\.tar\.gz$/.test(f)));
+    assert.ok(out.some((f) => /^riff-keys-.*\.tar\.gz$/.test(f)), 'the vault key, archived beside it');
+    for (const f of out) assert.equal(statSync(join(home, 'out', f)).mode & 0o777, 0o600, f);
+  });
+
+  test('sealed vaults with no key beside them fail the backup loudly', () => {
+    const home = setup('');
+    mkdirSync(join(home, '.riff', 'secrets'));
+    writeFileSync(join(home, '.riff', 'secrets', 'co.vault.json'), '{"v":2,"secrets":{}}');
+    const r = backup(home);
+    assert.notEqual(r.status, 0);
+    assert.match(r.stderr, /NO VAULT KEY/);
+  });
+});
+
+describe('the vault key is mounted into the keyproxy and nowhere else', () => {
+  const dev = readFileSync('docker/compose.dev.yaml', 'utf8');
+
+  test('the keyproxy has the key directory — its default RIFF_DATA\'s sibling — and nothing else does', () => {
+    const mount = '${RIFF_KEYS:-${RIFF_DATA:-${HOME}/.riff}-keys}:/keys';
+    assert.ok(service('keyproxy').includes(`- ${mount}\n`));
+    assert.match(service('keyproxy'), /RIFF_KEYS_DIR: \/keys/);
+    assert.equal(compose.split(mount).length - 1, 1, 'mounted once, in the keyproxy');
+    assert.ok(!/RIFF_KEYS|:\/keys/.test(dev), 'the dev stack mounts it nowhere');
+    assert.ok(!/RIFF_KEYS|:\/keys/.test(service('factory')));
+  });
+
+  test('the factory only fetches the public key', () => {
+    assert.match(service('factory'), /RIFF_VAULT_PUBLIC_FROM: http:\/\/keyproxy:8890/);
+  });
+});
+
 describe('one Claude Code, and none of it in the keyproxy', () => {
   const dockerfile = readFileSync('docker/Dockerfile', 'utf8');
   const stage = (name: string): string => {
@@ -294,8 +348,8 @@ describe('the example env file describes this container, not an imagined one', (
    * called, to prove the launcher drains before a rebuild and starts nothing it
    * should not.
    */
-  const launch = (args: string[] = ['up'], env: Record<string, string> = {}):
-      { out: string; err: string; curl: string; argv: string; sdk: string } => {
+  const launch = (args: string[] = ['up'], env: Record<string, string> = {}, fails = false):
+      { out: string; err: string; curl: string; argv: string; sdk: string; dir: string } => {
     const dir = mkdtempSync(join(tmpdir(), 'riff-launch-'));
     // It answers `compose port` as a running stack would (STUB_PORT, or 4173),
     // and says nothing is published when STUB_STACK_DOWN is set.
@@ -303,7 +357,9 @@ describe('the example env file describes this container, not an imagined one', (
       `#!/bin/sh\n`
       + `case "$*" in *" port ingress 4173"*)\n`
       + `  [ -n "$STUB_STACK_DOWN" ] && exit 1\n`
-      + `  echo "127.0.0.1:\${STUB_PORT:-4173}"; exit 0 ;;\nesac\n`
+      + `  echo "127.0.0.1:\${STUB_PORT:-4173}"; exit 0 ;;\n`
+      // Compose's resolved environment, as far as the key directory goes.
+      + `  *"config --environment"*) echo "RIFF_DATA=$RIFF_DATA"; echo "RIFF_KEYS=$RIFF_KEYS"; exit 0 ;;\nesac\n`
       + `printf '%s\\n' "$*" > ${dir}/argv\n`
       // What compose would substitute for the image's Claude Code release.
       + `printf '%s' "\${CLAUDE_SDK_VERSION-<unset>}" > ${dir}/sdk\n`, { mode: 0o755 });
@@ -339,17 +395,48 @@ describe('the example env file describes this container, not an imagined one', (
     const r = spawnSync('sh', ['docker/up.sh', ...args], {
       encoding: 'utf8',
       env: { ...process.env, PATH: `${dir}:${process.env['PATH'] ?? ''}`, RIFF_ENV: '',
-        CLAUDE_SDK_VERSION: undefined, STUB_SDK_LATEST: '0.3.999', ...env },
+        CLAUDE_SDK_VERSION: undefined, STUB_SDK_LATEST: '0.3.999',
+        RIFF_DATA: join(dir, 'data'), RIFF_KEYS: join(dir, 'keys'), ...env },
     });
-    assert.equal(r.status, 0, `up.sh ${args.join(' ')} failed: ${r.stderr}`);
+    if (fails) assert.notEqual(r.status, 0, `up.sh ${args.join(' ')} should have refused`);
+    else assert.equal(r.status, 0, `up.sh ${args.join(' ')} failed: ${r.stderr}`);
     return {
       out: r.stdout,
       err: r.stderr,
       curl: existsSync(join(dir, 'curl.log')) ? readFileSync(join(dir, 'curl.log'), 'utf8') : '',
       argv: existsSync(join(dir, 'argv')) ? readFileSync(join(dir, 'argv'), 'utf8') : '',
       sdk: existsSync(join(dir, 'sdk')) ? readFileSync(join(dir, 'sdk'), 'utf8') : '',
+      dir,
     };
   };
+
+  test('the vault key directory is made owner-only before the keyproxy mounts it', () => {
+    const r = launch(['up']);
+    assert.equal(statSync(join(r.dir, 'keys')).mode & 0o777, 0o700);
+  });
+
+  test('a trailing slash on RIFF_DATA does not put the default key directory inside it', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'riff-slash-'));
+    const r = launch(['up'], { RIFF_DATA: join(dir, 'data') + '/', RIFF_KEYS: '' });
+    assert.ok(existsSync(join(dir, 'data-keys')), 'the sibling, not data/-keys');
+    assert.ok(!existsSync(join(dir, 'data', '-keys')));
+    assert.equal(r.err.includes('must be outside'), false);
+  });
+
+  test('RIFF_DATA set only in an env file is where the key directory is made beside', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'riff-envfile-'));
+    writeFileSync(join(dir, 'riff.env'), `RIFF_DATA=${join(dir, 'elsewhere')}\n`);
+    launch(['up'], { RIFF_ENV: join(dir, 'riff.env'), RIFF_DATA: undefined as unknown as string, RIFF_KEYS: undefined as unknown as string });
+    assert.ok(existsSync(join(dir, 'elsewhere-keys')));
+  });
+
+  test('a key directory inside the data the factory mounts is refused', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'riff-keys-in-'));
+    const r = launch(['up'], { RIFF_DATA: join(dir, 'data'), RIFF_KEYS: join(dir, 'data', 'keys') }, true);
+    assert.match(r.err, /must be outside RIFF_DATA/);
+    assert.equal(r.argv, '', 'compose was never asked to start anything');
+    assert.equal(r.curl, '', 'refused before the drain, so nobody was paused for a rebuild that never came');
+  });
 
   test('a rebuild is on the newest Claude Code in the line Riff is written against', () => {
     const r = launch(['up', '--build']);

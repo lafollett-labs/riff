@@ -19,6 +19,9 @@ defineProps<{ state: State; events: Event[] }>();
 
 const routes = ref<Record<string, ServiceRoute>>({});
 const secretNames = ref<string[]>([]);
+/** Routes whose key was stored for somewhere else: refused until re-entered. */
+const stale = ref<string[]>([]);
+const warning = ref('');
 const loading = ref(true);
 const err = ref('');
 
@@ -68,6 +71,7 @@ const load = async (): Promise<void> => {
   try {
     const [svc, sec] = await Promise.all([api.services(), api.secrets()]);
     routes.value = svc.services;
+    stale.value = svc.stale ?? [];
     secretNames.value = sec.names;
     err.value = '';
   } catch (e) { err.value = msg(e); }
@@ -134,8 +138,9 @@ const save = async (): Promise<void> => {
       if (k) built[k] = hr.v;
     }
     if (Object.keys(built).length) route.headers = built;
-    await api.putService(name.value.trim(), route);
+    const r = await api.putService(name.value.trim(), route);
     justSaved.value = name.value.trim();
+    warning.value = r.warning ?? '';
     err.value = '';
     reset();
     await load();
@@ -281,7 +286,10 @@ onMounted(load);
       </div>
 
       <p v-if="err" class="err">{{ err }}</p>
-      <p v-else-if="justSaved" class="ok">Saved route <span class="mono">{{ justSaved }}</span>.</p>
+      <template v-else-if="justSaved">
+        <p class="ok">Saved route <span class="mono">{{ justSaved }}</span>.</p>
+        <p v-if="warning" class="warn">{{ warning }}</p>
+      </template>
     </section>
 
     <section class="have">
@@ -299,6 +307,7 @@ onMounted(load);
             <span class="mono">{{ effect(routes[n]!) }}</span>
             <span v-for="[hk, hv] in staticHeaders(routes[n]!)" :key="hk" class="hchip mono">{{ hk }}: {{ hv }}</span>
             <span v-if="!secretNames.includes(routes[n]!.secret)" class="badge">secret not set</span>
+            <span v-else-if="stale.includes(n)" class="badge">key stored for elsewhere — replace it</span>
           </div>
           <div class="racts">
             <template v-if="pendingDelete === n">

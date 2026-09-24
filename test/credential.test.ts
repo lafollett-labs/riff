@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { RUNTIME_SECRET_NAME } from '../src/core/config.ts';
+import { RUNTIME_SECRET_NAME, runtimeDestinations } from '../src/core/config.ts';
 
 /**
  * runtimeCredentialHealth is the start preflight: it refuses a wake no runtime
@@ -47,7 +47,7 @@ describe('the runtime-credential preflight', () => {
   });
 
   test('an installation default token makes a company with no override live', () => {
-    secrets.putInstallSecret(RUNTIME_SECRET_NAME, 'sk-ant-install-default');
+    secrets.putInstallSecret(RUNTIME_SECRET_NAME, 'sk-ant-install-default', runtimeDestinations());
     assert.deepEqual(cred.runtimeCredentialHealth('shipit', true), { live: true });
   });
 });

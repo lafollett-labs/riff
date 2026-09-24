@@ -2071,6 +2071,39 @@ test('a service route is set by name, shows its upstream, and warns when its sec
   await expect(page.locator('.route').filter({ hasText: 'openrouter' })).toHaveCount(0);
 });
 
+test('a key is sealed for the routes that use it, and the Desk says where it goes', async ({ page }) => {
+  // Route first: a key is bound to where its routes send it when it is entered.
+  await go(page, 'Services');
+  await page.locator('.srv.name').fill('bindtest');
+  await page.locator('.srv.up').fill('https://bind.example/v1');
+  await page.locator('.srv.secret').fill('BIND_KEY');
+  await page.getByRole('button', { name: 'Add', exact: true }).click();
+
+  await go(page, 'Secrets');
+  await page.locator('.fld.name').fill('BIND_KEY');
+  await page.locator('.fld.val').fill('bind-secret-value');
+  await page.getByRole('button', { name: 'Save' }).click();
+  const row = page.locator('.item').filter({ hasText: 'BIND_KEY' });
+  await expect(row.locator('.to')).toContainText('sent to bind.example');
+
+  // A key no route uses yet goes nowhere, and saving it says so.
+  await page.locator('.fld.name').fill('LONELY_KEY');
+  await page.locator('.fld.val').fill('lonely-value');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.locator('.warn')).toContainText('no service uses this key yet');
+  await expect(page.locator('.item').filter({ hasText: 'LONELY_KEY' }).locator('.to')).toContainText('sent nowhere');
+
+  // Re-pointing the route warns, and the list flags it until the key is replaced.
+  await go(page, 'Services');
+  const route = page.locator('.route').filter({ hasText: 'bindtest' });
+  await route.getByRole('button', { name: 'Edit' }).click();
+  await page.locator('.srv.up').fill('https://elsewhere.example/v1');
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await expect(page.locator('.warn')).toContainText('enter it again');
+  await expect(route.locator('.badge')).toHaveText('key stored for elsewhere — replace it');
+  await expect(page.locator('main')).not.toContainText('bind-secret-value');
+});
+
 test('a service route carries static headers, and they round-trip through edit', async ({ page }) => {
   await go(page, 'Services');
 

@@ -69,12 +69,11 @@ const HOME_CACHES = ['.npm', '.cache', '.undo'];
  *
  * Deny the whole INSTALLATION ROOT, not just companies/. bubblewrap reads are
  * allow-by-default, so anything under the root that is not denied is readable —
- * and the root holds the secrets store: master.key (wraps every company's key),
- * secrets/<slug>.vault and keyproxy.secret (mints scoped tokens), plus archive/
- * and the transfer staging dir. Denying only companies/ once left every one of
- * those a `cat /data/master.key` away, which would decrypt EVERY company's keys
- * and forge a token for any of them — the exact cross-company read the sandbox
- * exists to stop. allowRead re-admits this company's own home (under the root),
+ * and the root holds secrets/<slug>.vault and keyproxy.secret (mints scoped
+ * tokens), plus archive/ and the transfer staging dir — and until 2026-09-23 it
+ * held master.key, which opened every vault. Denying only companies/ once left
+ * every one of those a `cat` away: every company's keys, and a token forged
+ * for any of them — the exact cross-company read the sandbox exists to stop. allowRead re-admits this company's own home (under the root),
  * and more-specific-wins keeps it while the root stays closed.
  *
  * The credentials measurement that motivated the named denies: on 2026-09-07 a
@@ -149,7 +148,7 @@ export const sandboxFilesystem = (worldRoot: string, configDir?: string): {
  */
 export const cliConfinement = (companyHome: string): string[] => {
   // Bound back in over an emptied root, a home that is not strictly below
-  // companies/ would put the root itself — master.key, the vaults, every
+  // companies/ would put the root itself — the vaults, the token secret, every
   // company — back in view. A shift that cannot be confined does not run.
   if (!isCompanyHome(companyHome)) {
     throw new Error(`refusing to confine a shift to ${companyHome}: not a company under ${companiesDir()}`);

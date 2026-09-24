@@ -66,6 +66,10 @@ services:
       # loopback names. A product reaches it at http://keyproxy:8890.
       NO_PROXY: localhost,127.0.0.1,egress,keyproxy
       no_proxy: localhost,127.0.0.1,egress,keyproxy
+      # Secrets are sealed to the keyproxy's public key, fetched from here. The
+      # private key is on the keyproxy's own mount and on no mount of this
+      # container: the gateway stores secrets and cannot open one. See SECURITY.md.
+      RIFF_VAULT_PUBLIC_FROM: http://keyproxy:8890
     # Docker Desktop maps bind-mount ownership, so on macOS the image's own
     # unprivileged user writes files that come back owned by you. A rootful
     # Linux daemon does not map anything — uncomment this and set UID/GID in
@@ -175,12 +179,20 @@ services:
     # Docker's own init as PID 1 for signal handling; the minimal image ships no
     # tini and the proxy spawns no children to reap.
     init: true
+    # As on the factory: a rootful Linux daemon maps no ownership, and this
+    # writes its vault key into /keys. Set UID/GID in docker/.env and uncomment.
+    # user: "${UID:-10001}:${GID:-10001}"
     networks: [walled, outside]
     environment:
       RIFF_ROOT: /data
       KEYPROXY_PORT: 8890
+      RIFF_KEYS_DIR: /keys
     volumes:
       - ${RIFF_DATA:-${HOME}/.riff}:/data:ro
+      # The vault's private key, and the upstream each secret is pinned to.
+      # Beside the installation, not in it, because the factory mounts the
+      # installation. Nothing else mounts this.
+      - ${RIFF_KEYS:-${RIFF_DATA:-${HOME}/.riff}-keys}:/keys
     restart: unless-stopped
     security_opt:
       - 'no-new-privileges:true'

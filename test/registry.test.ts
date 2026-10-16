@@ -404,6 +404,21 @@ describe('a world whose git stalls is on the record', () => {
     `);
     assert.deepEqual(JSON.parse(out), { actor: 'company', why: 'git status timed out' });
   });
+
+  test('a file a commit held back is on the record, by path and in the committer\'s name', () => {
+    const out = run(`
+      const { Registry } = await import('${process.cwd()}/src/company/registry.ts');
+      const { systemClock } = await import('${process.cwd()}/src/core/clock.ts');
+      const r = new Registry(systemClock);
+      const a = r.found({ name: 'Build Co', business: 'x', ceo: 'Sol', chair: 'Cali' });
+      if (!a.ok) throw new Error('found failed');
+      a.company.world.git.onHeld('sol', [{ path: 'staff/sol/explain', why: 'executable' }]);
+      const e = a.company.ledger.lastEvent(['world.held']);
+      await r.close('build-co');
+      console.log(JSON.stringify({ actor: e?.actor, subject: e?.subject, count: e && JSON.parse(e.dataJson).count }));
+    `);
+    assert.deepEqual(JSON.parse(out), { actor: 'sol', subject: 'staff/sol/explain', count: 1 });
+  });
 });
 
 describe('the environment seeds a company; it never renames one', () => {

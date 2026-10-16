@@ -187,7 +187,7 @@ describe('the gateway’s git stays inside this company’s repository', () => {
     const real = cp.execFileSync;
     const adds: unknown[] = [];
     mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: { timeout?: number }) => {
-      if (cmd === 'git') (args.includes('add') ? adds : timeouts).push(opts?.timeout);
+      if (cmd === 'git') (args.includes('add') || args.includes('update-index') ? adds : timeouts).push(opts?.timeout);
       return real(cmd, args, opts);
     }) as typeof real);
     syncBuiltinESMExports();
@@ -197,8 +197,9 @@ describe('the gateway’s git stays inside this company’s repository', () => {
     } finally { mock.restoreAll(); syncBuiltinESMExports(); }
     assert.ok(timeouts.length >= 2, 'the vet and the calls themselves ran git');
     assert.ok(timeouts.every((t) => t === GIT_TIMEOUT_MS), `timeouts: ${timeouts}`);
-    // Hashing a legitimate drop is the one slow call: 400MB took 14.4s.
-    assert.deepEqual(adds, [GIT_ADD_TIMEOUT_MS]);
+    // Hashing a legitimate drop is the one slow step: 400MB took 14.4s. It is
+    // staged in two calls, edits to tracked files and then new ones.
+    assert.ok(adds.length >= 1 && adds.every((t) => t === GIT_ADD_TIMEOUT_MS), `adds: ${adds}`);
   });
 
   test('a FIFO in the working tree is refused before git is run to wait on it', () => {

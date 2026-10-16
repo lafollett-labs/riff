@@ -32,6 +32,9 @@ export const found = (cfg: RiffConfig, clock: Clock): {
     shellIsContained() && isCompanyHome(cfg.home) ? () => cliConfinement(cfg.home) : undefined);
   const ledger = new Ledger(cfg.ledgerPath, clock);
   world.git.onStall = (why) => { ledger.emit('company', 'world.git_stalled', null, { why }); };
+  world.git.onHeld = (actor, held) => {
+    ledger.emit(actor, 'world.held', held[0]!.path, { held: held.slice(0, 20), count: held.length });
+  };
   // Beside the ledger, its own file — see TranscriptStore for why not a table.
   const transcript = new TranscriptStore(join(cfg.home, 'transcript.db'), clock);
   world.ensure();

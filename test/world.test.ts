@@ -1,10 +1,12 @@
-import { test, describe, beforeEach, afterEach } from 'node:test';
+import { test, describe, beforeEach, afterEach, mock } from 'node:test';
+import { syncBuiltinESMExports } from 'node:module';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, realpathSync } from 'node:fs';
-import { execFileSync } from 'node:child_process';
+import cp, { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { World, commonsPath } from '../src/worldfs/world.ts';
+import { HOLD_BYTES } from '../src/worldfs/git.ts';
 import { parse, stringify } from '../src/worldfs/frontmatter.ts';
 import { Ledger } from '../src/ledger/ledger.ts';
 import { fixedClock } from '../src/core/clock.ts';
@@ -169,6 +171,190 @@ describe('git — attribution is the audit trail', () => {
       new Date(clock.now().getTime() - 3_600_000).toISOString());
     assert.equal(c[0]!.author, 'Dennis');
     assert.equal(c[0]!.commits, 2);
+  });
+});
+
+describe('git — a build left behind is not committed in anyone\'s name', () => {
+  const elf = Buffer.concat([Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1, 0]), Buffer.alloc(64)]);
+  const macho = Buffer.concat([Buffer.from([0xcf, 0xfa, 0xed, 0xfe, 7, 0, 0, 1]), Buffer.alloc(64)]);
+  const png = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.alloc(64)]);
+  const tracked = () => execFileSync('git', ['-C', world.root, 'ls-files'], { encoding: 'utf8' });
+  const untracked = () => execFileSync('git', ['-C', world.root, 'ls-files', '--others', '--exclude-standard'],
+    { encoding: 'utf8' });
+
+  test('a compiled program next to real work stays in the tree, untracked, and the commit carries the work', () => {
+    // As on 2026-09-24: `go build` left `explain` where it ran, and the shift's
+    // closing commit put 5.7 MB of it into history in its author's name.
+    const said: Array<[string, unknown]> = [];
+    world.git.onHeld = (actor, held) => said.push([actor, held]);
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/explain'), elf);
+    writeFileSync(world.path('staff/lynn/explain-mac'), macho);
+    world.writeNote('lynn', null, 'a', 'real work');
+    assert.ok(world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn works'));
+
+    assert.doesNotMatch(tracked(), /explain/);
+    assert.match(tracked(), /staff\/lynn\/notes\//);
+    assert.match(untracked(), /staff\/lynn\/explain\n/, 'left where it was built');
+    assert.deepEqual(said, [['lynn', [
+      { path: 'staff/lynn/explain', why: 'executable' },
+      { path: 'staff/lynn/explain-mac', why: 'executable' },
+    ]]]);
+  });
+
+  test('a file over the size line is held; a picture the staff made is committed', () => {
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/dump.json'), Buffer.alloc(HOLD_BYTES + 1, 0x20));
+    writeFileSync(world.path('staff/lynn/chart.png'), png);
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn works');
+    assert.doesNotMatch(tracked(), /dump\.json/);
+    assert.match(tracked(), /staff\/lynn\/chart\.png/);
+  });
+
+  test('a held file is never hashed into the repository, and is told of once', () => {
+    const said: unknown[] = [];
+    world.git.onHeld = (_actor, held) => said.push(held.map((h) => h.path));
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/explain'), elf);
+    world.writeNote('lynn', null, 'a', 'one');
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn works');
+    world.writeNote('lynn', null, 'b', 'two');
+    world.git.commitAs({ id: 'dana', name: 'Dana' }, 'dana works');
+    const blob = execFileSync('git', ['-C', world.root, 'hash-object', 'staff/lynn/explain'], { encoding: 'utf8' }).trim();
+    assert.throws(() => execFileSync('git', ['-C', world.root, 'cat-file', '-e', blob], { stdio: 'ignore' }));
+    assert.deepEqual(said, [['staff/lynn/explain']], 'once, not again on the next commit beside it');
+  });
+
+  test('a name with a tab in it holds that file, and no tracked file beside it', () => {
+    // Parsed from a tab-separated listing, `tool\tchart` once read as `tool`,
+    // and the tracked `tool` was dropped from the next commit.
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/tool'), 'a tracked script');
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn writes');
+    writeFileSync(world.path('staff/lynn/tool\tchart'), elf);
+    writeFileSync(world.path('staff/lynn/tool'), 'a tracked script, edited');
+    assert.ok(world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn edits'));
+    const files = tracked();
+    assert.match(files, /staff\/lynn\/tool\n/);
+    assert.doesNotMatch(files, /chart/);
+  });
+
+  test('a commit beside many held files hands git nothing that grows with them', () => {
+    // One exclusion per held file is matched against every path in the tree:
+    // 30,000 stubs beside 4,000 files made each commit take 8 s, and 140,000
+    // took it past its time limit and stopped git for the company.
+    world.ensureStaff('lynn');
+    mkdirSync(world.path('staff/lynn/obj'));
+    for (let i = 0; i < 5_000; i++) writeFileSync(world.path(`staff/lynn/obj/u${i}.o`), elf);
+    world.writeNote('lynn', null, 'a', 'real work');
+    let handed = 0;
+    const real = cp.execFileSync;
+    mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: { input?: string }) => {
+      if (cmd === 'git') handed += args.join(' ').length + (opts?.input?.length ?? 0);
+      return real(cmd, args, opts);
+    }) as typeof real);
+    syncBuiltinESMExports();
+    try {
+      assert.ok(world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn builds'));
+    } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.ok(handed < 10_000, `${handed} bytes of arguments and input`);
+    assert.doesNotMatch(tracked(), /\.o\n/);
+  });
+
+  test('a listed file that turns into a folder before it is staged leaves the rest to commit', () => {
+    // update-index stops at the first path it cannot take and stages none; a
+    // colleague's shell flipping one path failed 3 commits in 10.
+    world.ensureStaff('lynn');
+    world.ensureStaff('mal');
+    world.writeNote('lynn', null, 'a', 'real work');
+    writeFileSync(world.path('staff/mal/flip'), 'x');
+    const real = cp.execFileSync;
+    let flipped = false;
+    mock.method(cp, 'execFileSync', ((cmd: string, args: string[], opts: object) => {
+      if (cmd === 'git' && args.includes('update-index') && !flipped) {
+        flipped = true;
+        rmSync(world.path('staff/mal/flip'));
+        mkdirSync(world.path('staff/mal/flip'));
+        writeFileSync(world.path('staff/mal/flip/inside'), 'y');
+      }
+      return real(cmd, args, opts);
+    }) as typeof real);
+    syncBuiltinESMExports();
+    try {
+      assert.ok(world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn works'));
+    } finally { mock.restoreAll(); syncBuiltinESMExports(); }
+    assert.ok(flipped);
+    assert.match(tracked(), /staff\/lynn\/notes\//);
+  });
+
+  test('a held file that is rewritten as something staff write is committed next time', () => {
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/out'), elf);
+    world.writeNote('lynn', null, 'a', 'one');
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn builds');
+    writeFileSync(world.path('staff/lynn/out'), 'now a report');
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn writes');
+    assert.match(tracked(), /staff\/lynn\/out\n/);
+  });
+
+  test('a program untracked on purpose stays out, though its bytes are in history', () => {
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/tool'), elf);
+    const git = (...a: string[]) => execFileSync('git', ['-C', world.root, '-c', 'user.name=t', '-c', 'user.email=t@t', ...a]);
+    git('add', 'staff/lynn/tool');
+    git('commit', '-qm', 'chosen');
+    git('rm', '--cached', '-q', 'staff/lynn/tool');
+    git('commit', '-qm', 'unchosen');
+    world.writeNote('lynn', null, 'a', 'one');
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn works');
+    assert.doesNotMatch(tracked(), /staff\/lynn\/tool/);
+  });
+
+  test('a drop with nothing else beside it is no commit at all', () => {
+    world.ensureStaff('lynn');
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn arrives');
+    writeFileSync(world.path('staff/lynn/explain'), elf);
+    assert.equal(world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn builds'), null);
+  });
+
+  test('a program already tracked is committed as ever: someone chose it', () => {
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/tool'), elf);
+    execFileSync('git', ['-C', world.root, 'add', 'staff/lynn/tool']);
+    execFileSync('git', ['-C', world.root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'chosen']);
+    writeFileSync(world.path('staff/lynn/tool'), Buffer.concat([elf, Buffer.from([1])]));
+    assert.ok(world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn rebuilds'));
+  });
+
+  test('a tracked program moved or copied stays tracked: its bytes were chosen once', () => {
+    world.ensureStaff('lynn');
+    writeFileSync(world.path('staff/lynn/tool'), elf);
+    execFileSync('git', ['-C', world.root, 'add', 'staff/lynn/tool']);
+    execFileSync('git', ['-C', world.root, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-qm', 'chosen']);
+    mkdirSync(world.path('staff/lynn/bin'));
+    execFileSync('mv', [world.path('staff/lynn/tool'), world.path('staff/lynn/bin/tool')]);
+    writeFileSync(world.path('staff/lynn/bin/tool-copy'), elf);
+    writeFileSync(world.path('staff/lynn/bin/rebuilt'), Buffer.concat([elf, Buffer.from([1])]));
+    world.git.commitAs({ id: 'lynn', name: 'Lynn' }, 'lynn tidies');
+    const files = tracked();
+    assert.match(files, /staff\/lynn\/bin\/tool\n/);
+    assert.match(files, /staff\/lynn\/bin\/tool-copy\n/);
+    assert.doesNotMatch(files, /rebuilt/, 'new bytes are a new build');
+  });
+
+  test('the first commit of a new repository holds a program back too', () => {
+    // A world whose .gitignore was there before its repository is never given
+    // the scaffold's own first commit.
+    mkdirSync(join(dir, 'fresh'));
+    execFileSync('git', ['-C', join(dir, 'fresh'), 'init', '-q', '-b', 'main']);
+    const fresh = new World(join(dir, 'fresh'), clock);
+    fresh.ensureStaff('lynn');
+    writeFileSync(fresh.path('staff/lynn/explain'), elf);
+    writeFileSync(fresh.path('staff/lynn/notes.md'), 'x');
+    fresh.git.commitAs({ id: 'company', name: 'Co' }, 'founded');
+    const files = execFileSync('git', ['-C', fresh.root, 'ls-files'], { encoding: 'utf8' });
+    assert.match(files, /notes\.md/);
+    assert.doesNotMatch(files, /explain/);
   });
 });
 

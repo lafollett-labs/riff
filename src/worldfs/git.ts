@@ -1,6 +1,7 @@
 import { execFileSync } from 'node:child_process';
-import { realpathSync, existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { lexists, readWithin, writeWithin } from './within.ts';
+import { createHash } from 'node:crypto';
+import { realpathSync, existsSync, lstatSync, readdirSync, readFileSync, closeSync, fstatSync, readSync } from 'node:fs';
+import { lexists, openWithin, readWithin, writeWithin } from './within.ts';
 import { join } from 'node:path';
 import { systemClock, type Clock } from '../core/clock.ts';
 
@@ -58,6 +59,69 @@ export const GIT_TIMEOUT_MS = 10_000;
 export const GIT_ADD_TIMEOUT_MS = 120_000;
 
 const timedOut = (e: unknown): boolean => (e as NodeJS.ErrnoException).code === 'ETIMEDOUT';
+
+/**
+ * A new file this large is left for its author to place rather than committed
+ * in their name. ShipIt's largest authored file is 735 KB (a model price list);
+ * the drops that motivated this were 9.6 MB and 5.7 MB, both executables, so
+ * the magic below catches those and this is the backstop for archives,
+ * datasets and the like.
+ */
+export const HOLD_BYTES = 10 * 1024 * 1024;
+
+/**
+ * The first bytes of a compiled program: ELF; Mach-O either way round, thin and
+ * fat (whose magic a Java class file shares, which is build output too); WebAssembly.
+ */
+const EXECUTABLE = ['7f454c46', 'feedface', 'feedfacf', 'cefaedfe', 'cffaedfe', 'cafebabe', 'cafebabf',
+  '0061736d']; // and WebAssembly
+
+type Hold = { why: string; blob?: string };
+/** Enough of a file's stat to tell it is the same file, unchanged. */
+type Seen = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
+const same = (a: Seen, b: Seen): boolean =>
+  a.dev === b.dev && a.ino === b.ino && a.size === b.size && a.mtimeMs === b.mtimeMs && a.ctimeMs === b.ctimeMs;
+
+/**
+ * Why a new file is held back from a commit, or null if it is the kind of thing
+ * staff write. A program small enough to read also gets its blob id, so one the
+ * repository already holds can be told from one just built.
+ */
+const holdReason = (root: string, rel: string): { hold: Hold | null; seen?: Seen } => {
+  let fd: number;
+  try {
+    fd = openWithin(root, join(root, rel));
+  } catch {
+    // A link, a FIFO, or gone since it was listed: git records a link as its
+    // target's name, which is no drop of bytes, and the vet refuses the rest.
+    return { hold: null };
+  }
+  try {
+    const st = fstatSync(fd);
+    const seen = { dev: st.dev, ino: st.ino, size: st.size, mtimeMs: st.mtimeMs, ctimeMs: st.ctimeMs };
+    if (st.size > HOLD_BYTES) return { hold: { why: 'large' }, seen };
+    const head = Buffer.alloc(64);
+    const got = head.subarray(0, readSync(fd, head, 0, 64, 0));
+    const hex = got.subarray(0, 4).toString('hex');
+    // PE's magic is two printable letters, so a text file may open with them;
+    // a program has a NUL in its header.
+    const program = EXECUTABLE.some((m) => hex.startsWith(m)) || (hex.startsWith('4d5a') && got.includes(0));
+    if (!program) return { hold: null, seen };
+    // Exactly the size fstat gave, not to EOF: a writer still appending would
+    // otherwise keep this read, and the gateway, going.
+    const bytes = Buffer.alloc(st.size);
+    let n = 0;
+    while (n < st.size) {
+      const r = readSync(fd, bytes, n, st.size - n, n);
+      if (r === 0) break;
+      n += r;
+    }
+    const blob = createHash('sha1').update(`blob ${n}\0`).update(bytes.subarray(0, n)).digest('hex');
+    return { hold: { why: 'executable', blob }, seen };
+  } finally {
+    closeSync(fd);
+  }
+};
 
 /**
  * The repository-local settings git may find here. Anything else — a filter or
@@ -210,13 +274,23 @@ export class WorldGit {
   /** Told once, when git is first stopped here; the company records it in its ledger. */
   onStall: (why: string) => void = () => {};
 
+  /** Told when a commit first leaves a new file out (see commitAs); the company records it in its ledger. */
+  onHeld: (actor: string, held: Array<{ path: string; why: string }>) => void = () => {};
+  /**
+   * What was held last time, and the stat it was decided on. A held file stays
+   * untracked, so every later commit lists it again: unchanged, it costs one
+   * lstat rather than an open and a read (140,000 held stubs took 5.3 s), and
+   * it is reported once, not on every commit after.
+   */
+  #held = new Map<string, { seen: Seen; hold: Hold }>();
+
   constructor(dir: string, clock: Clock = systemClock, checkRoot: () => void = () => {}) {
     this.#dir = dir;
     this.#clock = clock;
     this.#checkRoot = checkRoot;
   }
 
-  #git(args: string[], env?: Record<string, string>, confine?: string[]): string {
+  #git(args: string[], env?: Record<string, string>, confine?: string[], input?: string): string {
     // `safe.directory` on every call, not in a config file.
     //
     // The world lives on a bind mount, and the uid the host presents it under
@@ -235,13 +309,14 @@ export class WorldGit {
     return this.#bounded(`git ${args[0]}`, () => execFileSync(confine ? 'bwrap' : 'git', confine ? [...confine, '--', 'git', ...argv] : argv, {
       encoding: 'utf8',
       maxBuffer: 32 * 1024 * 1024,
-      timeout: args[0] === 'add' ? GIT_ADD_TIMEOUT_MS : GIT_TIMEOUT_MS,
+      timeout: args[0] === 'add' || args[0] === 'update-index' ? GIT_ADD_TIMEOUT_MS : GIT_TIMEOUT_MS,
       // Capture stderr rather than inheriting it. Several calls here are
       // probes whose failure is expected and handled — notably the
       // "is this already a repo?" check on a directory that is not one yet.
       // Inheriting would print `fatal: not a git repository` on every first
       // run and make a healthy bootstrap look broken.
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+      ...(input === undefined ? {} : { input }),
       ...(env ? { env: { ...process.env, ...env } } : {}),
     }).trim());
   }
@@ -371,10 +446,35 @@ export class WorldGit {
   /**
    * Commit whatever the staff member just changed, in their name.
    * Returns the sha, or null when there was nothing to record.
+   *
+   * Except a new compiled program, or a new file over HOLD_BYTES: those are
+   * left in the tree, untracked, for their author to ignore or move. On
+   * 2026-09-24 this commit put a 9.6 MB `livecall` and a 5.7 MB `explain`, each
+   * a `go build` left where it ran, into ShipIt's history in the names of the
+   * shifts that ended next to them. Decided before anything is staged, so a
+   * held file is never hashed into the repository. A file already tracked is
+   * committed as ever, and so is a program whose bytes the repository already
+   * holds: someone chose it, and it has moved or been copied.
    */
   commitAs(actor: { id: string; name: string }, message: string): string | null {
     const scope = this.#scope();
-    this.#git(['add', '-A', ...scope]);
+    const { fresh, held } = this.#sortNew(scope);
+    // Told before staging: #sortNew has marked these as told, and a staging
+    // failure below would otherwise lose the notice for good.
+    if (held.length) this.onHeld(actor.id, held);
+    // Staged in two steps, each linear in the files. `add -A` with an
+    // exclusion per held file matches every path against every exclusion:
+    // 140,000 held stubs took a commit past GIT_ADD_TIMEOUT_MS and stopped git
+    // for the company, and they would again on every commit after.
+    try {
+      this.#git(['add', '-u', '--pathspec-from-file=-', '--pathspec-file-nul'], { LC_ALL: 'C' }, undefined,
+        scope.slice(1).join('\0'));
+    } catch (e) {
+      // A repository with nothing tracked yet has nothing to update, and git
+      // says so as an error.
+      if (!String((e as { stderr?: unknown }).stderr).includes('did not match any file(s) known to git')) throw e;
+    }
+    this.#stageNew(fresh);
     const staged = this.#git(['diff', '--cached', '--name-only', '--ignore-submodules=all', ...scope]);
     if (!staged) return null;
 
@@ -385,6 +485,78 @@ export class WorldGit {
       'commit', '-q', '-m', message,
     ], { GIT_AUTHOR_DATE: at, GIT_COMMITTER_DATE: at });
     return this.#git(['rev-parse', 'HEAD']);
+  }
+
+  /**
+   * Stage new files by name. `update-index` stops at the first it cannot take
+   * — a listed file a colleague's shell turned into a folder since — and
+   * stages none, which failed the commit with the edits from `add -u` left
+   * staged for whoever committed next. So the one it names is set aside and
+   * the rest tried again; past that, the new files wait for the next commit
+   * and the edits are committed now, in the right name.
+   */
+  #stageNew(paths: string[]): void {
+    let rest = paths;
+    for (let tries = 0; rest.length && tries < 5; tries++) {
+      try {
+        // --remove: a file listed a moment ago may be gone by now.
+        this.#git(['update-index', '--add', '--remove', '-z', '--stdin'], { LC_ALL: 'C' }, undefined,
+          rest.join('\0') + '\0');
+        return;
+      } catch (e) {
+        const stderr = (e as { stderr?: unknown }).stderr;
+        if (typeof stderr !== 'string') throw e;   // a stall, not a refusal
+        const bad = /Unable to process path (.*)$/m.exec(stderr)?.[1];
+        if (bad === undefined || !rest.includes(bad)) return;
+        rest = rest.filter((p) => p !== bad);
+      }
+    }
+  }
+
+  /**
+   * The new files in scope: those commitAs records, and those it holds back
+   * that it has not already said so of.
+   */
+  #sortNew(scope: string[]): { fresh: string[]; held: Array<{ path: string; why: string }> } {
+    const out = this.#git(['ls-files', '--others', '--exclude-standard', '-z', ...scope]);
+    const fresh: string[] = [];
+    const maybe: Array<{ path: string; seen: Seen; hold: Hold; told: boolean }> = [];
+    for (const path of out.split('\0')) {
+      if (!path) continue;
+      const before = this.#held.get(path);
+      if (before) {
+        let st: Seen | null = null;
+        try { st = lstatSync(join(this.#dir, path)); } catch { /* gone: decided afresh below */ }
+        if (st && same(st, before.seen)) { maybe.push({ path, ...before, told: true }); continue; }
+      }
+      const { hold, seen } = holdReason(this.#dir, path);
+      if (hold && seen) maybe.push({ path, seen, hold, told: false }); else fresh.push(path);
+    }
+    const known = maybe.some((m) => m.hold.blob) ? this.#inHead() : new Set<string>();
+    const held: Array<{ path: string; why: string }> = [];
+    this.#held = new Map();
+    for (const m of maybe) {
+      if (m.hold.blob && known.has(m.hold.blob)) { fresh.push(m.path); continue; }
+      this.#held.set(m.path, { seen: m.seen, hold: m.hold });
+      if (!m.told) held.push({ path: m.path, why: m.hold.why });
+    }
+    return { fresh, held };
+  }
+
+  /**
+   * The blob ids HEAD's tree holds: a program moved or copied from one of them
+   * was chosen once. HEAD, not the whole object store, which still has a
+   * program someone untracked on purpose.
+   */
+  #inHead(): Set<string> {
+    try {
+      this.#git(['rev-parse', '--verify', '-q', 'HEAD']);
+    } catch {
+      return new Set();
+    }
+    const out = this.#git(['ls-tree', '-r', '-z', 'HEAD']);
+    // `<mode> <type> <id>\t<path>`, each entry ended by a NUL.
+    return new Set(out.split('\0').map((e) => e.split('\t')[0]!.split(' ')).filter((f) => f[1] === 'blob').map((f) => f[2]!));
   }
 
   /**

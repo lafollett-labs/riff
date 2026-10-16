@@ -10,6 +10,7 @@ import { Gate } from '../src/policy/gate.ts';
 import { constitutionFor } from '../src/policy/rules.ts';
 import { fixedClock } from '../src/core/clock.ts';
 import { landing, tick } from '../src/runtime/staff.ts';
+import { offeredTools, shellIsContained } from '../src/runtime/permissions.ts';
 import type { Agent, Tier } from '../src/core/types.ts';
 
 /**
@@ -119,11 +120,13 @@ type Script = {
  */
 const scripted = (...scripts: Script[]) => {
   const said: unknown[][] = [];
+  const options: Array<Options | undefined> = [];
   let interrupts = 0;
   let call = 0;
   const fake = ((args: { options?: Options }) => {
     const script = scripts[Math.min(call, scripts.length - 1)]!;
     const leg = call++;
+    options.push(args.options);
     const out: unknown[] = [];
     said.push(out);
     const hook = args.options?.hooks?.PostToolBatch?.[0]?.hooks[0] as HookCallback;
@@ -232,7 +235,7 @@ const scripted = (...scripts: Script[]) => {
     }
     return Object.assign(run(), { interrupt: async () => { interrupts++; } });
   }) as unknown as typeof sdkQuery;
-  return { fake, said, interrupts: () => interrupts, calls: () => call };
+  return { fake, said, options, interrupts: () => interrupts, calls: () => call };
 };
 
 const shift = (fake: typeof sdkQuery, o: {
@@ -278,6 +281,16 @@ describe('a shift is landed between tool calls', () => {
     assert.equal(r.summary, 'stopped at its time limit');
     assert.match(readFileSync(join(world.root, 'staff', 'ceo', 'journal', '2026-09-23.md'), 'utf8'),
       /Stopped at its 45-minute limit/, 'and the journal does not call it a turn ceiling');
+  });
+
+  test('a shift is offered the built-in tools the gate has rules for, not the release\'s whole set', async () => {
+    const s = scripted({ turns: 1 });
+    await shift(s.fake, { maxTurns: 10 });
+    const tools = s.options[0]?.tools as string[];
+    assert.deepEqual(tools, offeredTools(shellIsContained()));
+    assert.equal(tools.includes('Bash'), shellIsContained());
+    assert.ok(!tools.includes('CronCreate') && !tools.includes('Skill'));
+    assert.deepEqual(s.options[0]?.skills, []);
   });
 
   test('a CLI that runs on past both stops is interrupted', async () => {

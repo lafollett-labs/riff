@@ -12,7 +12,7 @@ import type { Gate } from '../policy/gate.ts';
 import type { World } from '../worldfs/world.ts';
 import type { Clock } from '../core/clock.ts';
 import { createTools, TOOL_NAMESPACE } from './tools.ts';
-import { makeCanUseTool, makePreToolCheck, shellIsContained, SHELL_TOOLS, UNKNOWN_TOOL } from './permissions.ts';
+import { makeCanUseTool, makePreToolCheck, offeredTools, shellIsContained, UNKNOWN_TOOL } from './permissions.ts';
 import { DEFAULT_POLICY, installRoot, companiesDir, isCompanyHome, RUNTIME_BASE_URL, type ServiceRoute } from '../core/config.ts';
 import { mintScopedToken } from '../core/proxytoken.ts';
 import type { TranscriptSink } from '../ledger/transcript.ts';
@@ -1929,11 +1929,13 @@ export const tick = async (
         strictMcpConfig: true,       // only the tools we hand them
         mcpServers: { [TOOL_NAMESPACE]: server, ...(d.connectors ?? {}) },
         canUseTool: gated,
-        // Belt and braces on the host: canUseTool already refuses these, but
-        // disallowedTools keeps them out of the tool list the model is shown,
-        // so no turn is spent reaching for something that cannot be granted.
-        // Inside the container the shell is the point, so it is offered.
-        ...(shellIsContained() ? {} : { disallowedTools: [...SHELL_TOOLS] }),
+        // Only what the gate has a rule for, so no turn is spent reaching for
+        // something that cannot be granted. Inside the container the shell is
+        // the point, so it is offered; on the host it is not.
+        tools: offeredTools(shellIsContained()),
+        // The CLI's bundled skills (loop, schedule, ...) are for a person at a
+        // terminal, and point at tools a shift is not offered.
+        skills: [],
 
         // The kernel boundary between one company and the next.
         //

@@ -8,7 +8,7 @@ import { World } from '../src/worldfs/world.ts';
 import { Gate, type CommonsView } from '../src/policy/gate.ts';
 import { constitutionFor } from '../src/policy/rules.ts';
 import { fixedClock } from '../src/core/clock.ts';
-import { makeCanUseTool, makePreToolCheck, shellIsContained } from '../src/runtime/permissions.ts';
+import { makeCanUseTool, makePreToolCheck, offeredTools, shellIsContained, UNKNOWN_TOOL } from '../src/runtime/permissions.ts';
 import { createTools, TOOL_NAMESPACE, TOOL_PREFIX } from '../src/runtime/tools.ts';
 import type { Agent, Tier } from '../src/core/types.ts';
 import type { PermissionResult } from '@anthropic-ai/claude-agent-sdk';
@@ -104,6 +104,32 @@ describe('the chokepoint', () => {
     denied(await call('SomeToolShippedNextVersion', { anything: true }));
   });
 
+  test('every built-in tool a shift is offered is one the gate has a rule for', async () => {
+    const unknown: string[] = [];
+    const check = makeCanUseTool({ actor: 'rae', world, gate, toolCapabilities: capabilities as never,
+      contained: true, onDecision: (t, _out, detail) => { if (detail === UNKNOWN_TOOL) unknown.push(t); } });
+    for (const t of offeredTools(true)) {
+      await check(t, { command: 'ls', file_path: 'staff/rae/x.md', url: 'https://example.com', to: 'x' },
+        { signal: AbortSignal.timeout(5_000) } as never);
+    }
+    assert.deepEqual(unknown, []);
+  });
+
+  test('what a release ships is not offered until a rule names it', () => {
+    // The tools CLI 2.1.301 put in front of every seat, each refused when tried.
+    const offered = offeredTools(true);
+    for (const t of ['CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'Workflow', 'EnterWorktree',
+      'ExitWorktree', 'EnterPlanMode', 'AskUserQuestion', 'ReportFindings', 'ListAgents', 'RemoteTrigger',
+      // Decided if called, but a shift has no skills and no plan mode.
+      'Skill', 'ExitPlanMode']) {
+      assert.ok(!offered.includes(t), t);
+    }
+    // Native builds drop these unless named, and the gate scopes them.
+    for (const t of ['Glob', 'Grep', 'Read', 'Write', 'Edit', 'Agent', 'WebFetch', 'SendMessage', 'TaskCreate']) {
+      assert.ok(offered.includes(t), t);
+    }
+  });
+
   test('a tool under the right prefix that we never defined is still refused', async () => {
     denied(await call(`${TOOL_PREFIX}drop_the_database`));
   });
@@ -136,6 +162,13 @@ describe('the shell is decided by where the runtime is', () => {
   test('reading or stopping your own background work runs nothing, so it is free', async () => {
     for (const t of ['BashOutput', 'KillShell', 'KillTask', 'TaskStop', 'TaskOutput']) {
       allowed(await call(t, {}, { contained: false }), t);
+    }
+  });
+
+  test('a shell is offered only where it would be allowed', () => {
+    for (const t of ['Bash', 'Monitor']) {
+      assert.ok(offeredTools(true).includes(t), t);
+      assert.ok(!offeredTools(false).includes(t), t);
     }
   });
 

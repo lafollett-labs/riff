@@ -60,12 +60,38 @@ const WRITE_TOOLS = new Set(['Write', 'Edit', 'NotebookEdit', 'MultiEdit']);
  * shell each cross this gate in turn. ToolSearch loads a tool's schema, which
  * grants nothing: the tool it loads is decided here when it is called.
  * TaskStop and TaskOutput stop and read the shift's own background work.
+ * TaskCreate, TaskGet, TaskUpdate and TaskList are the session's own to-do
+ * list, TodoWrite's successor.
  */
 const FREE_TOOLS = new Set(['TodoWrite', 'Agent', 'Skill', 'ExitPlanMode', 'ToolSearch',
-  'TaskStop', 'TaskOutput', 'BashOutput', 'KillShell', 'KillTask']);
+  'TaskStop', 'TaskOutput', 'BashOutput', 'KillShell', 'KillTask',
+  'TaskCreate', 'TaskGet', 'TaskUpdate', 'TaskList']);
+/**
+ * Decided if called, but not offered: a shift has no skills (`skills: []`)
+ * and never enters plan mode, so each would be a schema paid for on every
+ * request and a turn spent on nothing.
+ */
+const NOT_OFFERED = new Set(['Skill', 'ExitPlanMode']);
 /** The detail a refusal of a tool this gate does not know carries. */
 export const UNKNOWN_TOOL = 'unknown tool';
 const OUTSIDE_READ = new Set(['WebFetch', 'WebSearch']);
+
+/**
+ * The built-in tools a shift is offered: every one this gate has a rule for,
+ * and nothing else. Left to its default the CLI offers whatever its release
+ * ships — 2.1.301 put CronCreate, ScheduleWakeup, Workflow, EnterWorktree and
+ * six more in front of every seat, and the gate refused each one a turn was
+ * spent on. It also offers less: native builds dropped Glob and Grep unless
+ * named, so the scoped search below sat unused while staff grepped in the
+ * shell. A new tool reaches staff when a rule here names it, not when a
+ * release does — save one the CLI bundles with a tool named here, which
+ * 2.1.301 did not. Each name left off becomes a deny rule in the CLI, for its
+ * subagents too; the gate stays default-deny beneath that, and a tool offered
+ * is still decided call by call.
+ */
+export const offeredTools = (contained: boolean): string[] => [
+  ...(contained ? SHELL_TOOLS : []), ...READ_TOOLS, ...WRITE_TOOLS, ...FREE_TOOLS, ...OUTSIDE_READ, 'SendMessage',
+].filter((t) => !NOT_OFFERED.has(t));
 
 type Where = { kind: 'own' } | { kind: 'other'; who: string } | { kind: 'commons' } | { kind: 'outside' };
 
